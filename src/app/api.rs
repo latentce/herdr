@@ -1030,8 +1030,21 @@ impl App {
             Method::WorkspaceReportMetadata(params) => {
                 return self.handle_workspace_report_metadata(request.id, params);
             }
+            Method::WorkspaceAssignGroup(params) => {
+                return self.handle_workspace_assign_group(request.id, params);
+            }
             Method::WorkspaceClose(target) => {
                 return self.handle_workspace_close(request.id, target)
+            }
+            Method::WorkspaceGroupList(_) => return self.handle_workspace_group_list(request.id),
+            Method::WorkspaceGroupCreate(params) => {
+                return self.handle_workspace_group_create(request.id, params);
+            }
+            Method::WorkspaceGroupRename(params) => {
+                return self.handle_workspace_group_rename(request.id, params);
+            }
+            Method::WorkspaceGroupDelete(params) => {
+                return self.handle_workspace_group_delete(request.id, params);
             }
             Method::WorktreeList(params) => return self.handle_worktree_list(request.id, params),
             Method::WorktreeCreate(params) => {

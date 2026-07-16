@@ -10,7 +10,11 @@ impl AppState {
         if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
             return Rect::default();
         }
-        crate::ui::workspace_list_rect(sidebar, self.sidebar_section_split)
+        crate::ui::workspace_list_rect(
+            sidebar,
+            self.sidebar_section_split,
+            self.agents_section_visible,
+        )
     }
 
     pub(super) fn agent_panel_rect(&self) -> Rect {
@@ -18,8 +22,11 @@ impl AppState {
         if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
             return Rect::default();
         }
-        let (_, detail_area) =
-            crate::ui::expanded_sidebar_sections(sidebar, self.sidebar_section_split);
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+            sidebar,
+            self.sidebar_section_split,
+            self.agents_section_visible,
+        );
         detail_area
     }
 
@@ -197,7 +204,14 @@ impl AppState {
     }
 
     pub(crate) fn global_menu_labels(&self) -> Vec<&'static str> {
-        let mut labels = vec!["settings", "keybinds", "reload config"];
+        // First entry must stay index-aligned with `global_menu_actions`
+        // (GlobalMenuAction::ToggleAgents).
+        let toggle_agents = if self.agents_section_visible {
+            "hide agents"
+        } else {
+            "show agents"
+        };
+        let mut labels = vec![toggle_agents, "settings", "keybinds", "reload config"];
         if self.update_available.is_some() {
             labels.push("update ready");
         } else if self.latest_release_notes_available {
@@ -279,6 +293,7 @@ impl AppState {
         let rect = crate::ui::sidebar_section_divider_rect(
             self.view.sidebar_rect,
             self.sidebar_section_split,
+            self.agents_section_visible,
         );
         rect.width > 0
             && col >= rect.x
@@ -316,12 +331,59 @@ impl AppState {
         })
     }
 
+    /// Hit-test a folder header row, returning its (group_id, collapsed) state.
+    pub(super) fn workspace_group_header_at(&self, row: u16) -> Option<(String, bool)> {
+        let headers = if self.view.workspace_group_header_areas.is_empty() {
+            crate::ui::compute_workspace_group_header_areas(self, self.view.sidebar_rect)
+        } else {
+            self.view.workspace_group_header_areas.clone()
+        };
+        headers.into_iter().find_map(|header| {
+            (row >= header.rect.y && row < header.rect.y + header.rect.height).then(|| {
+                let collapsed = self.collapsed_group_ids.contains(&header.group_id);
+                (header.group_id, collapsed)
+            })
+        })
+    }
+
+    /// Resolve the folder-membership change a drop at `row` implies for a
+    /// dragged workspace: `None` = pure reorder, `Some(Some(id))` = join folder
+    /// `id`, `Some(None)` = remove from any folder.
+    pub(super) fn resolve_workspace_group_drop(
+        &self,
+        source_ws_idx: usize,
+        row: u16,
+    ) -> Option<Option<String>> {
+        let source_group = self
+            .workspaces
+            .get(source_ws_idx)
+            .and_then(|ws| ws.group_id.clone());
+        // Dropping onto a folder header joins that folder.
+        if let Some((group_id, _)) = self.workspace_group_header_at(row) {
+            return (source_group.as_deref() != Some(group_id.as_str())).then_some(Some(group_id));
+        }
+        // Otherwise mirror the membership of the row under the cursor.
+        let target_group = self
+            .workspace_at_row(row)
+            .and_then(|idx| self.workspaces.get(idx))
+            .and_then(|ws| ws.group_id.clone());
+        match (source_group, target_group) {
+            (source, target) if source == target => None,
+            (_, Some(group_id)) => Some(Some(group_id)),
+            (Some(_), None) => Some(None),
+            (None, None) => None,
+        }
+    }
+
     pub(super) fn collapsed_workspace_at_row(&self, row: u16) -> Option<usize> {
         if !self.sidebar_collapsed {
             return None;
         }
 
-        let (ws_area, _, _) = crate::ui::collapsed_sidebar_sections(self.view.sidebar_rect);
+        let (ws_area, _, _) = crate::ui::collapsed_sidebar_sections(
+            self.view.sidebar_rect,
+            self.agents_section_visible,
+        );
         if ws_area == Rect::default() || row < ws_area.y || row >= ws_area.y + ws_area.height {
             return None;
         }
@@ -338,7 +400,10 @@ impl AppState {
             return None;
         }
 
-        let (_, _, detail_area) = crate::ui::collapsed_sidebar_sections(self.view.sidebar_rect);
+        let (_, _, detail_area) = crate::ui::collapsed_sidebar_sections(
+            self.view.sidebar_rect,
+            self.agents_section_visible,
+        );
         let detail_content_area = Rect::new(
             detail_area.x,
             detail_area.y,
@@ -400,7 +465,7 @@ impl AppState {
                     ws_idx,
                     indented: false,
                 } => Some(ws_idx),
-                crate::ui::WorkspaceListEntry::Workspace { .. } => None,
+                _ => None,
             })
             .collect::<Vec<_>>();
         let source_pos = roots.iter().position(|ws_idx| *ws_idx == source_ws_idx)?;
@@ -473,6 +538,7 @@ impl AppState {
         let (_, detail_area) = crate::ui::expanded_sidebar_sections(
             self.view.sidebar_rect,
             self.sidebar_section_split,
+            self.agents_section_visible,
         );
         let rect = crate::ui::agent_panel_toggle_rect(detail_area, self.agent_panel_sort);
         rect.width > 0
@@ -530,11 +596,52 @@ mod tests {
 
     use super::super::{app_for_mouse_test, capture_snapshot, mouse, unique_temp_path};
     use crate::{
-        app::state::{AgentPanelSort, DragTarget, Mode},
+        app::state::{AgentPanelSort, AppState, DragTarget, Mode},
         config::SidebarCollapsedModeConfig,
         detect::{Agent, AgentState},
         workspace::Workspace,
     };
+
+    #[test]
+    fn resolve_group_drop_join_remove_and_reorder() {
+        use crate::app::state::{GroupHeaderArea, WorkspaceCardArea};
+
+        let mut state = AppState::test_new();
+        state.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
+        state.ensure_test_terminals();
+        let gid = state.create_workspace_group("Work".to_string());
+        assert!(state.assign_workspace_to_group(0, Some(gid.clone())));
+
+        // Fake sidebar geometry: folder header row 0, member `a` row 1, loose `b` row 2.
+        state.view.workspace_group_header_areas = vec![GroupHeaderArea {
+            group_id: gid.clone(),
+            rect: Rect::new(0, 0, 20, 1),
+        }];
+        state.view.workspace_card_areas = vec![
+            WorkspaceCardArea {
+                ws_idx: 0,
+                rect: Rect::new(0, 1, 20, 1),
+                indented: true,
+            },
+            WorkspaceCardArea {
+                ws_idx: 1,
+                rect: Rect::new(0, 2, 20, 1),
+                indented: false,
+            },
+        ];
+
+        // Drag loose `b` onto the header -> join the folder.
+        assert_eq!(
+            state.resolve_workspace_group_drop(1, 0),
+            Some(Some(gid.clone()))
+        );
+        // Drag member `a` onto loose `b`'s row -> leave the folder.
+        assert_eq!(state.resolve_workspace_group_drop(0, 2), Some(None));
+        // Drag member `a` onto its own folder header -> no change.
+        assert_eq!(state.resolve_workspace_group_drop(0, 0), None);
+        // Drag loose `b` onto another loose row -> pure reorder.
+        assert_eq!(state.resolve_workspace_group_drop(1, 2), None);
+    }
 
     #[test]
     fn clicking_launcher_opens_global_menu() {
@@ -580,7 +687,7 @@ mod tests {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             menu.x + 2,
-            menu.y + 2,
+            menu.y + 3,
         ));
 
         assert_eq!(app.state.mode, Mode::KeybindHelp);
@@ -600,7 +707,7 @@ mod tests {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             menu.x + 2,
-            menu.y + 1,
+            menu.y + 2,
         ));
 
         assert_eq!(app.state.mode, Mode::Settings);
@@ -620,7 +727,7 @@ mod tests {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             menu.x + 2,
-            menu.y + 3,
+            menu.y + 4,
         ));
 
         assert!(app.state.request_reload_config);
@@ -643,6 +750,7 @@ mod tests {
         assert_eq!(
             app.state.global_menu_labels(),
             vec![
+                "hide agents",
                 "settings",
                 "keybinds",
                 "reload config",
@@ -667,14 +775,20 @@ mod tests {
 
         assert_eq!(
             app.state.global_menu_labels(),
-            vec!["settings", "keybinds", "reload config", "detach"]
+            vec![
+                "hide agents",
+                "settings",
+                "keybinds",
+                "reload config",
+                "detach"
+            ]
         );
 
         let menu = app.state.global_menu_rect();
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             menu.x + 2,
-            menu.y + 4,
+            menu.y + 5,
         ));
 
         assert!(app.state.detach_requested);
@@ -690,6 +804,7 @@ mod tests {
         assert_eq!(
             app.state.global_menu_labels(),
             vec![
+                "hide agents",
                 "settings",
                 "keybinds",
                 "reload config",
@@ -855,6 +970,7 @@ mod tests {
         let (_, detail_area) = crate::ui::expanded_sidebar_sections(
             app.state.view.sidebar_rect,
             app.state.sidebar_section_split,
+            app.state.agents_section_visible,
         );
         let toggle = crate::ui::agent_panel_toggle_rect(detail_area, app.state.agent_panel_sort);
         app.handle_mouse(mouse(
@@ -901,6 +1017,7 @@ mod tests {
         let (_, detail_area) = crate::ui::expanded_sidebar_sections(
             app.state.view.sidebar_rect,
             app.state.sidebar_section_split,
+            app.state.agents_section_visible,
         );
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -1076,8 +1193,10 @@ mod tests {
         app.state.view.sidebar_rect = Rect::new(0, 0, 4, 20);
         app.state.view.terminal_area = Rect::new(4, 0, 80, 20);
 
-        let (_, _, detail_area) =
-            crate::ui::collapsed_sidebar_sections(app.state.view.sidebar_rect);
+        let (_, _, detail_area) = crate::ui::collapsed_sidebar_sections(
+            app.state.view.sidebar_rect,
+            app.state.agents_section_visible,
+        );
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             detail_area.x,
@@ -1121,8 +1240,10 @@ mod tests {
         set_state(&mut app, 0, first_pane, AgentState::Working);
         set_state(&mut app, 1, second_pane, AgentState::Blocked);
 
-        let (_, _, detail_area) =
-            crate::ui::collapsed_sidebar_sections(app.state.view.sidebar_rect);
+        let (_, _, detail_area) = crate::ui::collapsed_sidebar_sections(
+            app.state.view.sidebar_rect,
+            app.state.agents_section_visible,
+        );
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             detail_area.x,
@@ -1897,6 +2018,7 @@ mod tests {
         let divider = crate::ui::sidebar_section_divider_rect(
             app.state.view.sidebar_rect,
             app.state.sidebar_section_split,
+            app.state.agents_section_visible,
         );
 
         app.handle_mouse(mouse(

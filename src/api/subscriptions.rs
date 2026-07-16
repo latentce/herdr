@@ -136,12 +136,28 @@ impl ActiveSubscription {
                 event_kind: crate::api::schema::EventKind::WorkspaceReordered,
                 last_sequence: 0,
             })),
+            Subscription::WorkspaceGroupAssigned {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::WorkspaceGroupAssigned,
+                last_sequence: 0,
+            })),
             Subscription::WorkspaceClosed {} => Ok(Self::Event(ActiveEventSubscription {
                 event_kind: crate::api::schema::EventKind::WorkspaceClosed,
                 last_sequence: 0,
             })),
             Subscription::WorkspaceFocused {} => Ok(Self::Event(ActiveEventSubscription {
                 event_kind: crate::api::schema::EventKind::WorkspaceFocused,
+                last_sequence: 0,
+            })),
+            Subscription::WorkspaceGroupCreated {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::WorkspaceGroupCreated,
+                last_sequence: 0,
+            })),
+            Subscription::WorkspaceGroupRenamed {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::WorkspaceGroupRenamed,
+                last_sequence: 0,
+            })),
+            Subscription::WorkspaceGroupDeleted {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::WorkspaceGroupDeleted,
                 last_sequence: 0,
             })),
             Subscription::WorktreeCreated {} => Ok(Self::Event(ActiveEventSubscription {

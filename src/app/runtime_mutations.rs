@@ -2,8 +2,10 @@ use crate::api::schema::{
     EmptyParams, LayoutSetSplitRatioParams, Method, PaneFocusDirectionParams, PaneInputSetParams,
     PaneRenameParams, PaneResizeParams, PaneSplitParams, PaneSwapParams, PaneTarget,
     PaneZoomParams, TabCreateParams, TabMoveParams, TabRenameParams, TabTarget,
-    WorkspaceCreateParams, WorkspaceMoveBlockParams, WorkspaceMoveParams, WorkspaceRenameParams,
-    WorkspaceTarget, WorktreeCreateParams, WorktreeOpenParams, WorktreeRemoveParams,
+    WorkspaceAssignGroupParams, WorkspaceCreateParams, WorkspaceGroupCreateParams,
+    WorkspaceGroupDeleteParams, WorkspaceGroupRenameParams, WorkspaceMoveBlockParams,
+    WorkspaceMoveParams, WorkspaceRenameParams, WorkspaceTarget, WorktreeCreateParams,
+    WorktreeOpenParams, WorktreeRemoveParams,
 };
 
 use super::App;
@@ -59,6 +61,38 @@ impl App {
         params: WorkspaceMoveBlockParams,
     ) -> String {
         self.dispatch_runtime_mutation(id, Method::WorkspaceMoveBlock(params))
+    }
+
+    pub(crate) fn runtime_workspace_assign_group(
+        &mut self,
+        id: &'static str,
+        params: WorkspaceAssignGroupParams,
+    ) -> String {
+        self.dispatch_runtime_mutation(id, Method::WorkspaceAssignGroup(params))
+    }
+
+    pub(crate) fn runtime_workspace_group_create(
+        &mut self,
+        id: &'static str,
+        params: WorkspaceGroupCreateParams,
+    ) -> String {
+        self.dispatch_runtime_mutation(id, Method::WorkspaceGroupCreate(params))
+    }
+
+    pub(crate) fn runtime_workspace_group_rename(
+        &mut self,
+        id: &'static str,
+        params: WorkspaceGroupRenameParams,
+    ) -> String {
+        self.dispatch_runtime_mutation(id, Method::WorkspaceGroupRename(params))
+    }
+
+    pub(crate) fn runtime_workspace_group_delete(
+        &mut self,
+        id: &'static str,
+        params: WorkspaceGroupDeleteParams,
+    ) -> String {
+        self.dispatch_runtime_mutation(id, Method::WorkspaceGroupDelete(params))
     }
 
     pub(crate) fn runtime_workspace_close(

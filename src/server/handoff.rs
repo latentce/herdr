@@ -485,6 +485,8 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            workspace_groups: Vec::new(),
+            collapsed_group_ids: Default::default(),
         }
     }
 

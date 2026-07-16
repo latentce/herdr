@@ -28,8 +28,16 @@ pub enum Subscription {
     WorkspaceMoved {},
     #[serde(rename = "workspace.reordered")]
     WorkspaceReordered {},
+    #[serde(rename = "workspace.group_assigned")]
+    WorkspaceGroupAssigned {},
     #[serde(rename = "workspace.closed")]
     WorkspaceClosed {},
+    #[serde(rename = "workspace_group.created")]
+    WorkspaceGroupCreated {},
+    #[serde(rename = "workspace_group.renamed")]
+    WorkspaceGroupRenamed {},
+    #[serde(rename = "workspace_group.deleted")]
+    WorkspaceGroupDeleted {},
     #[serde(rename = "workspace.focused")]
     WorkspaceFocused {},
     #[serde(rename = "worktree.created")]
@@ -199,7 +207,11 @@ pub enum EventKind {
     WorkspaceRenamed,
     WorkspaceMoved,
     WorkspaceReordered,
+    WorkspaceGroupAssigned,
     WorkspaceFocused,
+    WorkspaceGroupCreated,
+    WorkspaceGroupRenamed,
+    WorkspaceGroupDeleted,
     WorktreeCreated,
     WorktreeOpened,
     WorktreeRemoved,
@@ -230,7 +242,11 @@ impl EventKind {
             EventKind::WorkspaceRenamed => "workspace.renamed",
             EventKind::WorkspaceMoved => "workspace.moved",
             EventKind::WorkspaceReordered => "workspace.reordered",
+            EventKind::WorkspaceGroupAssigned => "workspace.group_assigned",
             EventKind::WorkspaceFocused => "workspace.focused",
+            EventKind::WorkspaceGroupCreated => "workspace_group.created",
+            EventKind::WorkspaceGroupRenamed => "workspace_group.renamed",
+            EventKind::WorkspaceGroupDeleted => "workspace_group.deleted",
             EventKind::WorktreeCreated => "worktree.created",
             EventKind::WorktreeOpened => "worktree.opened",
             EventKind::WorktreeRemoved => "worktree.removed",
@@ -262,7 +278,11 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::WorkspaceRenamed,
     EventKind::WorkspaceMoved,
     EventKind::WorkspaceReordered,
+    EventKind::WorkspaceGroupAssigned,
     EventKind::WorkspaceFocused,
+    EventKind::WorkspaceGroupCreated,
+    EventKind::WorkspaceGroupRenamed,
+    EventKind::WorkspaceGroupDeleted,
     EventKind::WorktreeCreated,
     EventKind::WorktreeOpened,
     EventKind::WorktreeRemoved,
@@ -449,8 +469,26 @@ pub enum EventData {
         before_workspace_id: Option<String>,
         workspaces: Vec<WorkspaceInfo>,
     },
+    WorkspaceGroupAssigned {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_id: Option<String>,
+        workspaces: Vec<WorkspaceInfo>,
+    },
     WorkspaceFocused {
         workspace_id: String,
+    },
+    WorkspaceGroupCreated {
+        group_id: String,
+        name: String,
+    },
+    WorkspaceGroupRenamed {
+        group_id: String,
+        name: String,
+    },
+    WorkspaceGroupDeleted {
+        group_id: String,
+        workspaces: Vec<WorkspaceInfo>,
     },
     WorktreeCreated {
         workspace: WorkspaceInfo,

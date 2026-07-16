@@ -654,6 +654,45 @@ pub struct WorkspaceCardArea {
     pub indented: bool,
 }
 
+/// Hit-test rect for a folder ("workspace group") header row in the sidebar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupHeaderArea {
+    pub group_id: String,
+    pub rect: Rect,
+}
+
+/// Pending folder name-input action driving `Mode::RenameWorkspaceGroup`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceGroupNameAction {
+    /// Create a new folder from the entered name and assign this workspace to it.
+    Create { ws_idx: usize },
+    /// Rename an existing folder.
+    Rename { group_id: String },
+}
+
+/// One choice in the "Move to folder" picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupPickChoice {
+    NewFolder,
+    Existing(String),
+    RemoveFromFolder,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupPickOption {
+    pub label: String,
+    pub choice: GroupPickChoice,
+}
+
+/// State for the "Move to folder" picker (`Mode::WorkspaceGroupPicker`).
+pub struct WorkspaceGroupPickerState {
+    pub ws_idx: usize,
+    pub options: Vec<GroupPickOption>,
+    pub list: MenuListState,
+    pub x: u16,
+    pub y: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeCreateState {
     pub source_workspace_id: String,
@@ -809,6 +848,7 @@ pub struct ViewState {
     pub layout: ViewLayout,
     pub sidebar_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
+    pub workspace_group_header_areas: Vec<GroupHeaderArea>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
     pub tab_scroll_left_hit_area: Rect,
@@ -832,6 +872,8 @@ pub enum Mode {
     Copy,
     Terminal,
     RenameWorkspace,
+    RenameWorkspaceGroup,
+    WorkspaceGroupPicker,
     RenameTab,
     RenamePane,
     NewLinkedWorktree,
@@ -1138,6 +1180,10 @@ pub(crate) enum DragTarget {
         source_id: crate::app::InputSourceId,
         source_ws_idx: usize,
         drop_target: Option<WorkspaceDropTarget>,
+        /// Folder membership the drop would apply: `None` = pure reorder (no
+        /// change), `Some(Some(id))` = join folder `id`, `Some(None)` = remove
+        /// from any folder.
+        group_change: Option<Option<String>>,
     },
     TabReorder {
         source_id: crate::app::InputSourceId,
@@ -1215,6 +1261,11 @@ pub enum ContextMenuKind {
         has_manual_label: bool,
         right_click_passthrough: bool,
     },
+    /// Right-click on a folder ("workspace group") header row.
+    WorkspaceGroup {
+        group_id: String,
+        collapsed: bool,
+    },
 }
 
 /// Right-click context menu state.
@@ -1228,12 +1279,18 @@ pub struct ContextMenuState {
 impl ContextMenuState {
     pub fn items(&self) -> Vec<&'static str> {
         match self.kind {
-            ContextMenuKind::Workspace { .. } => vec!["Rename", "Close"],
+            ContextMenuKind::Workspace { .. } => vec!["Rename", "Close", "Move to folder..."],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: false,
                 ..
-            } => vec!["Rename", "Close", "New worktree", "Open worktree..."],
+            } => vec![
+                "Rename",
+                "Close",
+                "New worktree",
+                "Open worktree...",
+                "Move to folder...",
+            ],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: true,
                 ..
@@ -1273,6 +1330,12 @@ impl ContextMenuState {
                 items.push("Close pane");
                 items
             }
+            ContextMenuKind::WorkspaceGroup {
+                collapsed: true, ..
+            } => vec!["Rename", "Expand", "Delete folder"],
+            ContextMenuKind::WorkspaceGroup {
+                collapsed: false, ..
+            } => vec!["Rename", "Collapse", "Delete folder"],
         }
     }
 }
@@ -1409,11 +1472,20 @@ pub struct AppState {
     pub requested_new_tab_name: Option<String>,
     pub pending_workspace_create_cwd: Option<std::path::PathBuf>,
     pub rename_pane_target: Option<PaneId>,
+    /// Pending folder create/rename name-input action.
+    pub workspace_group_name_action: Option<WorkspaceGroupNameAction>,
+    /// Active "Move to folder" picker, if any.
+    pub workspace_group_picker: Option<WorkspaceGroupPickerState>,
     pub worktree_create: Option<WorktreeCreateState>,
     pub worktree_open: Option<WorktreeOpenState>,
     pub worktree_remove: Option<WorktreeRemoveState>,
     pub worktree_directory: std::path::PathBuf,
     pub collapsed_space_keys: std::collections::HashSet<String>,
+    /// User-created folders that group workspaces. Order defines empty-folder
+    /// display order; membership lives on `Workspace::group_id`.
+    pub workspace_groups: Vec<crate::workspace::WorkspaceGroup>,
+    /// Folder ids currently collapsed in the sidebar.
+    pub collapsed_group_ids: std::collections::HashSet<String>,
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
@@ -1462,6 +1534,9 @@ pub struct AppState {
     pub sidebar_width_auto: bool,
     pub sidebar_collapsed: bool,
     pub sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig,
+    /// Whether the lower "agents" section is currently shown. Initialized from
+    /// `ui.sidebar.show_agents`; toggled at runtime for the session.
+    pub agents_section_visible: bool,
     /// Ratio of sidebar height allocated to the workspaces section.
     pub sidebar_section_split: f32,
     pub agent_panel_sort: AgentPanelSort,
@@ -1774,11 +1849,15 @@ impl AppState {
             requested_new_tab_name: None,
             pending_workspace_create_cwd: None,
             rename_pane_target: None,
+            workspace_group_name_action: None,
+            workspace_group_picker: None,
             worktree_create: None,
             worktree_open: None,
             worktree_remove: None,
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
+            workspace_groups: Vec::new(),
+            collapsed_group_ids: std::collections::HashSet::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -1796,6 +1875,7 @@ impl AppState {
                 layout: ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
+                workspace_group_header_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),
@@ -1838,6 +1918,7 @@ impl AppState {
             sidebar_width_auto: false,
             sidebar_collapsed: false,
             sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig::Compact,
+            agents_section_visible: true,
             sidebar_section_split: 0.5,
             agent_panel_sort: AgentPanelSort::Spaces,
             status_indicators: crate::config::StatusIndicatorStyle::Dots,
@@ -2080,6 +2161,50 @@ impl AppState {
             }
         }
 
+        // Folder ("workspace group") invariants.
+        let mut group_ids = std::collections::HashSet::new();
+        for group in &self.workspace_groups {
+            assert!(
+                group_ids.insert(group.id.clone()),
+                "duplicate workspace group id {}",
+                group.id
+            );
+        }
+        for ws in &self.workspaces {
+            if let Some(group_id) = &ws.group_id {
+                assert!(
+                    group_ids.contains(group_id),
+                    "workspace {} references unknown group {}",
+                    ws.id,
+                    group_id
+                );
+            }
+        }
+        for id in &self.collapsed_group_ids {
+            assert!(
+                group_ids.contains(id),
+                "collapsed group id {} has no matching group",
+                id
+            );
+        }
+        // Worktree-atomic: every member of a worktree group shares one group_id.
+        let mut worktree_group: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        for ws in &self.workspaces {
+            if let Some(space) = ws.worktree_space() {
+                match worktree_group.get(&space.key) {
+                    Some(expected) => assert_eq!(
+                        expected, &ws.group_id,
+                        "worktree group {} has members in different folders",
+                        space.key
+                    ),
+                    None => {
+                        worktree_group.insert(space.key.clone(), ws.group_id.clone());
+                    }
+                }
+            }
+        }
+
         let assert_live_pane = |pane_id: PaneId, context: &str| {
             assert!(
                 pane_ids.contains(&pane_id),
@@ -2247,6 +2372,8 @@ impl AppState {
                         assert_live_pane(source_pane_id, "context menu source pane");
                     }
                 }
+                // Folder header menu carries no workspace/tab/pane index.
+                ContextMenuKind::WorkspaceGroup { .. } => {}
             }
         }
     }
@@ -2573,7 +2700,13 @@ mod tests {
 
         assert_eq!(
             menu.items(),
-            &["Rename", "Close", "New worktree", "Open worktree..."]
+            &[
+                "Rename",
+                "Close",
+                "New worktree",
+                "Open worktree...",
+                "Move to folder..."
+            ]
         );
     }
 

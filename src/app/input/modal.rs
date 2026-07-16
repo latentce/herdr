@@ -74,6 +74,7 @@ pub(super) fn modal_action_from_buttons<A: Copy>(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GlobalMenuAction {
+    ToggleAgents,
     Detach,
     WhatsNew,
     Keybinds,
@@ -83,6 +84,7 @@ pub(crate) enum GlobalMenuAction {
 
 pub(super) fn global_menu_actions(state: &AppState) -> Vec<GlobalMenuAction> {
     let mut actions = vec![
+        GlobalMenuAction::ToggleAgents,
         GlobalMenuAction::Settings,
         GlobalMenuAction::Keybinds,
         GlobalMenuAction::ReloadConfig,
@@ -130,6 +132,10 @@ pub(super) fn request_detach(state: &mut AppState) {
 
 pub(super) fn apply_global_menu_action(state: &mut AppState, action: GlobalMenuAction) {
     match action {
+        GlobalMenuAction::ToggleAgents => {
+            state.agents_section_visible = !state.agents_section_visible;
+            leave_modal(state);
+        }
         GlobalMenuAction::Detach => {
             leave_modal(state);
             request_detach(state);
@@ -392,6 +398,130 @@ pub(crate) fn open_new_workspace_dialog(state: &mut AppState, cwd: std::path::Pa
     state.mode = Mode::RenameWorkspace;
 }
 
+/// Open the name-input modal to create a new folder and assign `ws_idx` to it.
+pub(super) fn open_new_workspace_group(state: &mut AppState, ws_idx: usize) {
+    state.rename_pane_target = None;
+    state.workspace_group_name_action =
+        Some(crate::app::state::WorkspaceGroupNameAction::Create { ws_idx });
+    state.name_input = String::new();
+    state.name_input_replace_on_type = true;
+    state.mode = Mode::RenameWorkspaceGroup;
+}
+
+/// Open the name-input modal to rename an existing folder.
+pub(super) fn open_rename_workspace_group(state: &mut AppState, group_id: String) {
+    state.rename_pane_target = None;
+    state.name_input = state
+        .workspace_groups
+        .iter()
+        .find(|group| group.id == group_id)
+        .map(|group| group.name.clone())
+        .unwrap_or_default();
+    state.workspace_group_name_action =
+        Some(crate::app::state::WorkspaceGroupNameAction::Rename { group_id });
+    state.name_input_replace_on_type = false;
+    state.mode = Mode::RenameWorkspaceGroup;
+}
+
+/// Open the "Move to folder" picker for `ws_idx`.
+pub(super) fn open_workspace_group_picker(state: &mut AppState, ws_idx: usize, x: u16, y: u16) {
+    use crate::app::state::{GroupPickChoice, GroupPickOption, WorkspaceGroupPickerState};
+    let mut options = vec![GroupPickOption {
+        label: "New folder...".to_string(),
+        choice: GroupPickChoice::NewFolder,
+    }];
+    if state
+        .workspaces
+        .get(ws_idx)
+        .and_then(|ws| ws.group_id.as_ref())
+        .is_some()
+    {
+        options.push(GroupPickOption {
+            label: "Remove from folder".to_string(),
+            choice: GroupPickChoice::RemoveFromFolder,
+        });
+    }
+    for group in &state.workspace_groups {
+        options.push(GroupPickOption {
+            label: group.name.clone(),
+            choice: GroupPickChoice::Existing(group.id.clone()),
+        });
+    }
+    state.workspace_group_picker = Some(WorkspaceGroupPickerState {
+        ws_idx,
+        options,
+        list: MenuListState::new(0),
+        x,
+        y,
+    });
+    state.mode = Mode::WorkspaceGroupPicker;
+}
+
+impl App {
+    pub(crate) fn handle_workspace_group_picker_key_via_api(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.state.workspace_group_picker = None;
+                leave_modal(&mut self.state);
+            }
+            KeyCode::Up => {
+                if let Some(picker) = &mut self.state.workspace_group_picker {
+                    picker.list.move_prev();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(picker) = &mut self.state.workspace_group_picker {
+                    let count = picker.options.len();
+                    picker.list.move_next(count);
+                }
+            }
+            KeyCode::Enter => self.apply_workspace_group_picker_via_api(),
+            _ => {}
+        }
+    }
+
+    /// Apply the currently-selected picker option, routing membership changes
+    /// through the API so events fire (folder create/assign are shared facts).
+    pub(crate) fn apply_workspace_group_picker_via_api(&mut self) {
+        use crate::app::state::GroupPickChoice;
+        let Some(picker) = self.state.workspace_group_picker.take() else {
+            leave_modal(&mut self.state);
+            return;
+        };
+        let Some(option) = picker.options.get(picker.list.highlighted).cloned() else {
+            leave_modal(&mut self.state);
+            return;
+        };
+        match option.choice {
+            GroupPickChoice::NewFolder => {
+                open_new_workspace_group(&mut self.state, picker.ws_idx);
+                return;
+            }
+            GroupPickChoice::Existing(group_id) => {
+                let workspace_id = self.public_workspace_id(picker.ws_idx);
+                self.runtime_workspace_assign_group(
+                    "tui.workspace.assign_group",
+                    crate::api::schema::WorkspaceAssignGroupParams {
+                        workspace_id,
+                        group_id: Some(group_id),
+                    },
+                );
+            }
+            GroupPickChoice::RemoveFromFolder => {
+                let workspace_id = self.public_workspace_id(picker.ws_idx);
+                self.runtime_workspace_assign_group(
+                    "tui.workspace.assign_group",
+                    crate::api::schema::WorkspaceAssignGroupParams {
+                        workspace_id,
+                        group_id: None,
+                    },
+                );
+            }
+        }
+        leave_modal(&mut self.state);
+    }
+}
+
 pub(super) fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool) {
     state.creating_new_tab = false;
     state.requested_new_tab_name = None;
@@ -522,6 +652,23 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                     state.workspaces[state.selected].set_custom_name(new_name);
                     crate::logging::workspace_renamed(&workspace_id);
                     state.mark_session_dirty();
+                }
+                Mode::RenameWorkspaceGroup => {
+                    if let Some(action) = state.workspace_group_name_action.take() {
+                        match action {
+                            crate::app::state::WorkspaceGroupNameAction::Create { ws_idx } => {
+                                if !new_name.is_empty() {
+                                    let gid = state.create_workspace_group(new_name);
+                                    state.assign_workspace_to_group(ws_idx, Some(gid));
+                                }
+                            }
+                            crate::app::state::WorkspaceGroupNameAction::Rename { group_id } => {
+                                if !new_name.is_empty() {
+                                    state.rename_workspace_group(&group_id, new_name);
+                                }
+                            }
+                        }
+                    }
                 }
                 Mode::RenameTab if state.creating_new_tab => {
                     state.request_new_tab = true;
@@ -767,7 +914,25 @@ pub(super) fn apply_context_menu_action(
     idx: usize,
 ) {
     let item = menu.items().get(idx).copied();
+    let (menu_x, menu_y) = (menu.x, menu.y);
     match (menu.kind, item) {
+        (
+            ContextMenuKind::Workspace { ws_idx } | ContextMenuKind::GitWorkspace { ws_idx, .. },
+            Some("Move to folder..."),
+        ) => {
+            open_workspace_group_picker(state, ws_idx, menu_x, menu_y);
+        }
+        (ContextMenuKind::WorkspaceGroup { group_id, .. }, Some("Collapse" | "Expand")) => {
+            state.toggle_workspace_group_collapsed(&group_id);
+            leave_modal(state);
+        }
+        (ContextMenuKind::WorkspaceGroup { group_id, .. }, Some("Rename")) => {
+            open_rename_workspace_group(state, group_id);
+        }
+        (ContextMenuKind::WorkspaceGroup { group_id, .. }, Some("Delete folder")) => {
+            state.delete_workspace_group(&group_id);
+            leave_modal(state);
+        }
         (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("New worktree")) => {
             state.request_new_linked_worktree = Some(ws_idx);
             leave_modal(state);
@@ -1094,6 +1259,52 @@ impl App {
                     }
                 }
             }
+            Mode::RenameWorkspaceGroup => {
+                // Folder create/rename are shared session facts: route through the
+                // API so events fire (collapse, by contrast, stays TUI-local).
+                if let Some(action) = self.state.workspace_group_name_action.take() {
+                    match action {
+                        crate::app::state::WorkspaceGroupNameAction::Create { ws_idx } => {
+                            if !new_name.is_empty() {
+                                self.runtime_workspace_group_create(
+                                    "tui.workspace_group.create",
+                                    crate::api::schema::WorkspaceGroupCreateParams {
+                                        name: new_name,
+                                    },
+                                );
+                                // The new folder is appended; assign the workspace
+                                // that triggered creation to it (also via the API).
+                                if let Some(group_id) = self
+                                    .state
+                                    .workspace_groups
+                                    .last()
+                                    .map(|group| group.id.clone())
+                                {
+                                    let workspace_id = self.public_workspace_id(ws_idx);
+                                    self.runtime_workspace_assign_group(
+                                        "tui.workspace.assign_group",
+                                        crate::api::schema::WorkspaceAssignGroupParams {
+                                            workspace_id,
+                                            group_id: Some(group_id),
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        crate::app::state::WorkspaceGroupNameAction::Rename { group_id } => {
+                            if !new_name.is_empty() {
+                                self.runtime_workspace_group_rename(
+                                    "tui.workspace_group.rename",
+                                    crate::api::schema::WorkspaceGroupRenameParams {
+                                        group_id,
+                                        name: new_name,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
 
@@ -1196,7 +1407,29 @@ impl App {
 
     pub(crate) fn apply_context_menu_action_via_api(&mut self, menu: ContextMenuState, idx: usize) {
         let item = menu.items().get(idx).copied();
+        let (menu_x, menu_y) = (menu.x, menu.y);
         match (menu.kind, item) {
+            (
+                ContextMenuKind::Workspace { ws_idx }
+                | ContextMenuKind::GitWorkspace { ws_idx, .. },
+                Some("Move to folder..."),
+            ) => {
+                open_workspace_group_picker(&mut self.state, ws_idx, menu_x, menu_y);
+            }
+            (ContextMenuKind::WorkspaceGroup { group_id, .. }, Some("Collapse" | "Expand")) => {
+                self.state.toggle_workspace_group_collapsed(&group_id);
+                leave_modal(&mut self.state);
+            }
+            (ContextMenuKind::WorkspaceGroup { group_id, .. }, Some("Rename")) => {
+                open_rename_workspace_group(&mut self.state, group_id);
+            }
+            (ContextMenuKind::WorkspaceGroup { group_id, .. }, Some("Delete folder")) => {
+                self.runtime_workspace_group_delete(
+                    "tui.workspace_group.delete",
+                    crate::api::schema::WorkspaceGroupDeleteParams { group_id },
+                );
+                leave_modal(&mut self.state);
+            }
             (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("New worktree")) => {
                 self.state.request_new_linked_worktree = Some(ws_idx);
                 leave_modal(&mut self.state);
@@ -1389,6 +1622,7 @@ fn cancel_rename_modal(state: &mut AppState) {
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.rename_pane_target = None;
+    state.workspace_group_name_action = None;
     state.name_input.clear();
     state.name_input_replace_on_type = false;
     leave_modal(state);
@@ -2179,6 +2413,24 @@ mod tests {
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "main");
         assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn global_menu_toggle_agents_flips_visibility() {
+        let mut state = state_with_workspaces(&["main"]);
+        assert!(state.agents_section_visible);
+
+        // The toggle is the first menu entry, and its label reflects state.
+        let actions = global_menu_actions(&state);
+        assert_eq!(actions.first(), Some(&GlobalMenuAction::ToggleAgents));
+        assert_eq!(state.global_menu_labels().first(), Some(&"hide agents"));
+
+        apply_global_menu_action(&mut state, GlobalMenuAction::ToggleAgents);
+        assert!(!state.agents_section_visible);
+        assert_eq!(state.global_menu_labels().first(), Some(&"show agents"));
+
+        apply_global_menu_action(&mut state, GlobalMenuAction::ToggleAgents);
+        assert!(state.agents_section_visible);
     }
 
     #[test]

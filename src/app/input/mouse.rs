@@ -61,6 +61,13 @@ pub(super) enum MouseAction {
         menu: ContextMenuState,
         idx: usize,
     },
+    WorkspaceGroupPickerSelect {
+        idx: usize,
+    },
+    AssignWorkspaceToGroup {
+        ws_idx: usize,
+        group_id: Option<String>,
+    },
 }
 
 enum MobileMouseResult {
@@ -391,7 +398,10 @@ impl AppState {
 
                 if matches!(
                     self.mode,
-                    Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane
+                    Mode::RenameWorkspace
+                        | Mode::RenameWorkspaceGroup
+                        | Mode::RenameTab
+                        | Mode::RenamePane
                 ) {
                     let action = self
                         .rename_modal_inner()
@@ -419,6 +429,17 @@ impl AppState {
                         } else {
                             leave_modal(self);
                         }
+                    }
+                    return None;
+                }
+
+                if self.mode == Mode::WorkspaceGroupPicker {
+                    if let Some(idx) = self.workspace_group_picker_item_at(mouse.column, mouse.row)
+                    {
+                        return Some(MouseAction::WorkspaceGroupPickerSelect { idx });
+                    } else {
+                        self.workspace_group_picker = None;
+                        leave_modal(self);
                     }
                     return None;
                 }
@@ -588,6 +609,11 @@ impl AppState {
                         }
                     }
 
+                    if let Some((group_id, _)) = self.workspace_group_header_at(mouse.row) {
+                        self.toggle_workspace_group_collapsed(&group_id);
+                        return None;
+                    }
+
                     if let Some(idx) = self.workspace_at_row(mouse.row) {
                         self.workspace_presses.insert(
                             source_id,
@@ -705,6 +731,7 @@ impl AppState {
                                     source_id,
                                     source_ws_idx: press.ws_idx,
                                     drop_target: workspace_drop_target,
+                                    group_change: None,
                                 },
                             });
                         }
@@ -729,17 +756,30 @@ impl AppState {
                     }
                 }
 
+                // Resolve folder-drop intent (needs &self) before the &mut borrow.
+                let workspace_group_change = if let Some(DragState {
+                    target: DragTarget::WorkspaceReorder { source_ws_idx, .. },
+                }) = &self.drag
+                {
+                    Some(self.resolve_workspace_group_drop(*source_ws_idx, mouse.row))
+                } else {
+                    None
+                };
                 if let Some(DragState {
                     target:
                         DragTarget::WorkspaceReorder {
                             source_id: drag_source_id,
                             drop_target,
+                            group_change,
                             ..
                         },
                 }) = &mut self.drag
                 {
                     if *drag_source_id == source_id {
                         *drop_target = workspace_drop_target;
+                        if let Some(resolved) = workspace_group_change {
+                            *group_change = resolved;
+                        }
                     }
                 } else if let Some(DragState {
                     target:
@@ -875,13 +915,22 @@ impl AppState {
                         target:
                             DragTarget::WorkspaceReorder {
                                 source_ws_idx,
-                                drop_target: Some(drop_target),
+                                drop_target,
+                                group_change,
                                 ..
                             },
                     }) => {
-                        if let Some(params) =
+                        // A membership change wins over reorder: folder grouping
+                        // determines the final position.
+                        if let Some(group_id) = group_change {
+                            return Some(MouseAction::AssignWorkspaceToGroup {
+                                ws_idx: source_ws_idx,
+                                group_id,
+                            });
+                        }
+                        if let Some(params) = drop_target.and_then(|drop_target| {
                             self.workspace_move_block_params(source_ws_idx, drop_target)
-                        {
+                        }) {
                             if self
                                 .workspaces
                                 .get(source_ws_idx)
@@ -1043,7 +1092,18 @@ impl AppState {
                 {
                     return None;
                 }
-                if let Some(idx) = self.workspace_at_row(mouse.row) {
+                if let Some((group_id, collapsed)) = self.workspace_group_header_at(mouse.row) {
+                    self.context_menu = Some(ContextMenuState {
+                        kind: ContextMenuKind::WorkspaceGroup {
+                            group_id,
+                            collapsed,
+                        },
+                        x: mouse.column,
+                        y: mouse.row,
+                        list: MenuListState::new(0),
+                    });
+                    self.mode = Mode::ContextMenu;
+                } else if let Some(idx) = self.workspace_at_row(mouse.row) {
                     self.selected = idx;
                     let kind = self
                         .workspaces
@@ -1259,6 +1319,40 @@ impl AppState {
         let x = menu.x.min(screen.x + screen.width.saturating_sub(menu_w));
         let y = menu.y.min(screen.y + screen.height.saturating_sub(menu_h));
         Some(Rect::new(x, y, menu_w, menu_h))
+    }
+
+    pub(crate) fn workspace_group_picker_rect(&self) -> Option<Rect> {
+        let picker = self.workspace_group_picker.as_ref()?;
+        let screen = self.screen_rect();
+        let max_item_w = picker
+            .options
+            .iter()
+            .map(|option| option.label.len() as u16)
+            .max()
+            .unwrap_or(0);
+        let menu_w = (max_item_w + 4).max(16).min(screen.width.max(1));
+        let menu_h = (picker.options.len() as u16 + 2).min(screen.height.max(1));
+        let x = picker.x.min(screen.x + screen.width.saturating_sub(menu_w));
+        let y = picker
+            .y
+            .min(screen.y + screen.height.saturating_sub(menu_h));
+        Some(Rect::new(x, y, menu_w, menu_h))
+    }
+
+    /// Hit-test a click inside the "Move to folder" picker, returning the option
+    /// index at that row.
+    pub(crate) fn workspace_group_picker_item_at(&self, col: u16, row: u16) -> Option<usize> {
+        let rect = self.workspace_group_picker_rect()?;
+        let picker = self.workspace_group_picker.as_ref()?;
+        if col <= rect.x
+            || col >= rect.x + rect.width.saturating_sub(1)
+            || row <= rect.y
+            || row >= rect.y + rect.height.saturating_sub(1)
+        {
+            return None;
+        }
+        let idx = (row - rect.y - 1) as usize;
+        (idx < picker.options.len()).then_some(idx)
     }
 
     pub(crate) fn confirm_close_rect(&self) -> Rect {

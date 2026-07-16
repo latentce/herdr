@@ -39,7 +39,7 @@ fn modified_url_click_modifier_matches_terminal_mouse_reporting() {
 mod clipboard;
 mod copy_mode;
 mod lease;
-mod modal;
+pub(crate) mod modal;
 mod mouse;
 mod navigate;
 mod overlays;
@@ -100,8 +100,12 @@ impl App {
                 Mode::ReleaseNotes => self.handle_release_notes_key(key_event),
                 Mode::ProductAnnouncement => self.handle_product_announcement_key(key_event),
                 Mode::Prefix | Mode::Navigate | Mode::Copy => unreachable!(),
-                Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
-                    self.handle_rename_key_via_api(key_event)
+                Mode::RenameWorkspace
+                | Mode::RenameWorkspaceGroup
+                | Mode::RenameTab
+                | Mode::RenamePane => self.handle_rename_key_via_api(key_event),
+                Mode::WorkspaceGroupPicker => {
+                    self.handle_workspace_group_picker_key_via_api(key_event)
                 }
                 Mode::NewLinkedWorktree => self.handle_worktree_create_key(key_event),
                 Mode::OpenExistingWorktree => self.handle_worktree_open_key(key_event),
@@ -209,7 +213,10 @@ impl App {
 
     pub(crate) fn paste_into_active_text_input(&mut self, text: &str) -> bool {
         match self.state.mode {
-            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
+            Mode::RenameWorkspace
+            | Mode::RenameWorkspaceGroup
+            | Mode::RenameTab
+            | Mode::RenamePane => {
                 insert_rename_input_text(&mut self.state, text);
                 true
             }
@@ -445,6 +452,15 @@ impl App {
                     MouseAction::ConfirmCloseAccept => self.confirm_close_accept_via_api(),
                     MouseAction::ContextMenu { menu, idx } => {
                         self.apply_context_menu_action_via_api(menu, idx)
+                    }
+                    MouseAction::WorkspaceGroupPickerSelect { idx } => {
+                        if let Some(picker) = &mut self.state.workspace_group_picker {
+                            picker.list.highlighted = idx;
+                        }
+                        self.apply_workspace_group_picker_via_api();
+                    }
+                    MouseAction::AssignWorkspaceToGroup { ws_idx, group_id } => {
+                        self.assign_workspace_to_group_via_api(ws_idx, group_id)
                     }
                 }
             }
@@ -726,9 +742,11 @@ pub(crate) fn is_modal_paste_shortcut(key: &KeyEvent) -> bool {
 
 pub(crate) fn modal_paste_target_active(state: &AppState) -> bool {
     match state.mode {
-        Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::NewLinkedWorktree => {
-            true
-        }
+        Mode::RenameWorkspace
+        | Mode::RenameWorkspaceGroup
+        | Mode::RenameTab
+        | Mode::RenamePane
+        | Mode::NewLinkedWorktree => true,
         Mode::OpenExistingWorktree => state
             .worktree_open
             .as_ref()
@@ -875,6 +893,8 @@ fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
         state.sidebar_width,
         state.sidebar_section_split,
         state.collapsed_space_keys.clone(),
+        &state.workspace_groups,
+        state.collapsed_group_ids.clone(),
     )
 }
 

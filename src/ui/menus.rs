@@ -283,6 +283,36 @@ pub(super) fn render_resize_overlay(app: &AppState, frame: &mut Frame, area: Rec
     render_bottom_bar(frame, overlay_area, line, app.palette.panel_bg);
 }
 
+pub(super) fn render_workspace_group_picker(app: &AppState, frame: &mut Frame) {
+    let Some(picker) = &app.workspace_group_picker else {
+        return;
+    };
+    let p = &app.palette;
+    let Some(menu_rect) = app.workspace_group_picker_rect() else {
+        return;
+    };
+    let Some(inner) = render_panel_shell(frame, menu_rect, p.accent, p.panel_bg) else {
+        return;
+    };
+
+    let items: Vec<ListItem> = picker
+        .options
+        .iter()
+        .map(|option| ListItem::new(Line::from(option.label.clone())))
+        .collect();
+    let list = List::new(items)
+        .style(Style::default().fg(p.text))
+        .highlight_style(
+            Style::default()
+                .bg(p.accent)
+                .fg(panel_contrast_fg(p))
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(" ");
+    let mut state = ListState::default().with_selected(Some(picker.list.highlighted));
+    frame.render_stateful_widget(list, inner, &mut state);
+}
+
 pub(super) fn render_context_menu(app: &AppState, frame: &mut Frame) {
     let Some(menu) = &app.context_menu else {
         return;

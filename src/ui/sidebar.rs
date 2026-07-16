@@ -56,10 +56,20 @@ fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
     (ws_h, detail_h)
 }
 
-pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, Rect) {
+pub(crate) fn expanded_sidebar_sections(
+    area: Rect,
+    split_ratio: f32,
+    show_agents: bool,
+) -> (Rect, Rect) {
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
     if content.width == 0 || content.height == 0 {
         return (Rect::default(), Rect::default());
+    }
+
+    // When the agents section is hidden the spaces list takes the whole height
+    // and there is no detail area (so agent hit-testing/scroll are inert).
+    if !show_agents {
+        return (content, Rect::default());
     }
 
     let (ws_h, detail_h) = sidebar_section_heights(content.height, split_ratio);
@@ -68,9 +78,13 @@ pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, 
     (ws_area, detail_area)
 }
 
-pub(crate) fn sidebar_section_divider_rect(area: Rect, split_ratio: f32) -> Rect {
+pub(crate) fn sidebar_section_divider_rect(
+    area: Rect,
+    split_ratio: f32,
+    show_agents: bool,
+) -> Rect {
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
-    if content.width == 0 || content.height < 6 {
+    if !show_agents || content.width == 0 || content.height < 6 {
         return Rect::default();
     }
 
@@ -300,7 +314,15 @@ pub(crate) fn grouped_child_display_label(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkspaceListEntry {
-    Workspace { ws_idx: usize, indented: bool },
+    Workspace {
+        ws_idx: usize,
+        indented: bool,
+    },
+    /// A user folder header row.
+    GroupHeader {
+        group_id: String,
+        collapsed: bool,
+    },
 }
 
 pub(crate) fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) -> bool {
@@ -311,7 +333,7 @@ pub(crate) fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], i
 }
 
 pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested: usize) -> usize {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect(area, app.sidebar_section_split, app.agents_section_visible);
     let body = workspace_list_body_rect(ws_area, false);
     if body.height == 0 {
         return requested;
@@ -328,14 +350,79 @@ pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> 
     workspace_list_entries_inner(app, false)
 }
 
+/// Entry list for the mobile switcher: worktree grouping only, with folders
+/// flattened. The mobile switcher has no folder affordance in v1, so folder
+/// headers are omitted and members appear as ordinary rows.
+pub(crate) fn workspace_list_entries_mobile(app: &AppState) -> Vec<WorkspaceListEntry> {
+    worktree_grouped_entries(app, true)
+}
+
 /// Like [`workspace_list_entries`] but always expands worktree groups, ignoring
-/// `collapsed_space_keys`. The mobile switcher has no collapse affordance and
-/// always shows the full worktree tree.
+/// `collapsed_space_keys`, and omits folder headers. Used where the full
+/// workspace order is needed regardless of presentation collapse state.
 pub(crate) fn workspace_list_entries_expanded(app: &AppState) -> Vec<WorkspaceListEntry> {
-    workspace_list_entries_inner(app, true)
+    worktree_grouped_entries(app, true)
 }
 
 fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<WorkspaceListEntry> {
+    let base = worktree_grouped_entries(app, force_expanded);
+    if app.workspace_groups.is_empty() {
+        return base;
+    }
+    apply_folder_grouping(app, base, force_expanded)
+}
+
+/// Layer user folders over the worktree-grouped entries: emit a folder header at
+/// the position of each folder's first member, indent its members, and honor
+/// per-folder collapse. Empty folders are appended at the end.
+fn apply_folder_grouping(
+    app: &AppState,
+    base: Vec<WorkspaceListEntry>,
+    force_expanded: bool,
+) -> Vec<WorkspaceListEntry> {
+    let is_collapsed = |gid: &str| !force_expanded && app.collapsed_group_ids.contains(gid);
+    let mut result = Vec::new();
+    let mut emitted = std::collections::HashSet::<String>::new();
+    for entry in base {
+        let WorkspaceListEntry::Workspace { ws_idx, .. } = &entry else {
+            result.push(entry);
+            continue;
+        };
+        let group_id = app
+            .workspaces
+            .get(*ws_idx)
+            .and_then(|ws| ws.group_id.clone());
+        match group_id {
+            None => result.push(entry),
+            Some(gid) => {
+                let collapsed = is_collapsed(&gid);
+                if emitted.insert(gid.clone()) {
+                    result.push(WorkspaceListEntry::GroupHeader {
+                        group_id: gid.clone(),
+                        collapsed,
+                    });
+                }
+                if !collapsed {
+                    result.push(WorkspaceListEntry::Workspace {
+                        ws_idx: *ws_idx,
+                        indented: true,
+                    });
+                }
+            }
+        }
+    }
+    for group in &app.workspace_groups {
+        if !emitted.contains(&group.id) {
+            result.push(WorkspaceListEntry::GroupHeader {
+                group_id: group.id.clone(),
+                collapsed: is_collapsed(&group.id),
+            });
+        }
+    }
+    result
+}
+
+fn worktree_grouped_entries(app: &AppState, force_expanded: bool) -> Vec<WorkspaceListEntry> {
     let mut members_by_key = std::collections::HashMap::<String, Vec<usize>>::new();
     for (ws_idx, ws) in app.workspaces.iter().enumerate() {
         if let Some(space) = ws.worktree_space() {
@@ -435,8 +522,8 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
     entries
 }
 
-pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32) -> Rect {
-    let (ws_area, _) = expanded_sidebar_sections(area, split_ratio);
+pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32, show_agents: bool) -> Rect {
+    let (ws_area, _) = expanded_sidebar_sections(area, split_ratio, show_agents);
     ws_area
 }
 
@@ -472,6 +559,7 @@ fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> us
                     workspace_entry_gap(app, &entries, entry_idx),
                 )
             }
+            WorkspaceListEntry::GroupHeader { .. } => (1, 0),
         };
         if used_rows.saturating_add(row_height) > body.height {
             break;
@@ -489,13 +577,17 @@ fn workspace_list_bottom_start(app: &AppState, area: Rect) -> usize {
     let mut used_rows = 0u16;
     let mut start = entries.len();
     for (entry_idx, entry) in entries.iter().enumerate().rev() {
-        let WorkspaceListEntry::Workspace { ws_idx, indented } = entry;
-        let Some(workspace) = app.workspaces.get(*ws_idx) else {
-            continue;
+        let needed = match entry {
+            WorkspaceListEntry::Workspace { ws_idx, indented } => {
+                let Some(workspace) = app.workspaces.get(*ws_idx) else {
+                    continue;
+                };
+                let gap = workspace_entry_gap(app, &entries, entry_idx);
+                workspace_row_height_in_body(app, workspace, *indented, body.height)
+                    .saturating_add(gap)
+            }
+            WorkspaceListEntry::GroupHeader { .. } => 1,
         };
-        let gap = workspace_entry_gap(app, &entries, entry_idx);
-        let needed = workspace_row_height_in_body(app, workspace, *indented, body.height)
-            .saturating_add(gap);
         if used_rows.saturating_add(needed) > body.height {
             break;
         }
@@ -655,11 +747,22 @@ pub(crate) fn agent_panel_scrollbar_rect(app: &AppState, area: Rect) -> Option<R
     ))
 }
 
+/// Compute folder header hit-test rects for the current sidebar layout.
+pub(crate) fn compute_workspace_group_header_areas(
+    app: &AppState,
+    area: Rect,
+) -> Vec<crate::app::state::GroupHeaderArea> {
+    compute_workspace_list_areas(app, area).1
+}
+
 pub(crate) fn compute_workspace_list_areas(
     app: &AppState,
     area: Rect,
-) -> (Vec<crate::app::state::WorkspaceCardArea>, Vec<()>) {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+) -> (
+    Vec<crate::app::state::WorkspaceCardArea>,
+    Vec<crate::app::state::GroupHeaderArea>,
+) {
+    let ws_area = workspace_list_rect(area, app.sidebar_section_split, app.agents_section_visible);
     if ws_area == Rect::default() {
         return (Vec::new(), Vec::new());
     }
@@ -674,7 +777,7 @@ pub(crate) fn compute_workspace_list_areas(
     let mut row_y = body.y;
     let body_bottom = body.y + body.height;
     let mut cards = Vec::new();
-    let headers = Vec::new();
+    let mut headers = Vec::new();
 
     let entries = workspace_list_entries(app);
     for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
@@ -697,6 +800,16 @@ pub(crate) fn compute_workspace_list_areas(
                     .saturating_add(row_height)
                     .saturating_add(gap)
                     .min(body_bottom);
+            }
+            WorkspaceListEntry::GroupHeader { group_id, .. } => {
+                if row_y.saturating_add(1) > body_bottom {
+                    break;
+                }
+                headers.push(crate::app::state::GroupHeaderArea {
+                    group_id: group_id.clone(),
+                    rect: Rect::new(body.x, row_y, body.width, 1),
+                });
+                row_y = row_y.saturating_add(1).min(body_bottom);
             }
         }
     }
@@ -725,13 +838,16 @@ pub(crate) fn workspace_group_chevron_rect(card: &crate::app::state::WorkspaceCa
 }
 
 /// Auto-scale sidebar width based on workspace identity + agent summary.
-pub(crate) fn collapsed_sidebar_sections(area: Rect) -> (Rect, Option<u16>, Rect) {
+pub(crate) fn collapsed_sidebar_sections(
+    area: Rect,
+    show_agents: bool,
+) -> (Rect, Option<u16>, Rect) {
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
     if content.width == 0 || content.height == 0 {
         return (Rect::default(), None, Rect::default());
     }
 
-    if content.height < 7 {
+    if !show_agents || content.height < 7 {
         return (content, None, Rect::default());
     }
 
@@ -760,6 +876,10 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
     frame
         .buffer_mut()
         .set_style(area, Style::default().bg(p.sidebar_bg));
+
+    let (ws_area, divider_y, detail_area) =
+        collapsed_sidebar_sections(area, app.agents_section_visible);
+
     let sep_style = if is_navigating {
         Style::default().fg(p.accent)
     } else {
@@ -772,7 +892,6 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let (ws_area, divider_y, detail_area) = collapsed_sidebar_sections(area);
     if ws_area == Rect::default() {
         render_sidebar_toggle(app, frame, area, true, p);
         return;
@@ -903,7 +1022,7 @@ pub(crate) fn workspace_drop_slots(
                     ws_idx,
                     indented: false,
                 } => Some(*ws_idx),
-                WorkspaceListEntry::Workspace { .. } => None,
+                _ => None,
             })
     };
 
@@ -945,7 +1064,9 @@ pub(crate) fn workspace_drop_slots(
         Some(WorkspaceListEntry::Workspace { ws_idx, .. }) => {
             crate::app::state::WorkspaceDropTarget::Before(*ws_idx)
         }
-        None => crate::app::state::WorkspaceDropTarget::End,
+        Some(WorkspaceListEntry::GroupHeader { .. }) | None => {
+            crate::app::state::WorkspaceDropTarget::End
+        }
     };
     let row = last.rect.y.saturating_add(last.rect.height);
     if row < list_bottom
@@ -993,7 +1114,8 @@ pub(super) fn render_sidebar(
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let (ws_area, detail_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+    let (ws_area, detail_area) =
+        expanded_sidebar_sections(area, app.sidebar_section_split, app.agents_section_visible);
 
     render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
     render_agent_detail(app, terminal_runtimes, frame, detail_area);
@@ -1211,11 +1333,23 @@ fn render_workspace_list(
         }
         _ => None,
     };
+    // Folder header being targeted by a drop (join). Highlighted instead of the
+    // between-rows insertion line.
+    let drag_target_group = match app.drag.as_ref().map(|drag| &drag.target) {
+        Some(crate::app::state::DragTarget::WorkspaceReorder {
+            group_change: Some(Some(group_id)),
+            ..
+        }) => Some(group_id.clone()),
+        _ => None,
+    };
     let insertion_row = match app.drag.as_ref().map(|drag| &drag.target) {
         Some(crate::app::state::DragTarget::WorkspaceReorder {
             drop_target: Some(drop_target),
+            group_change,
             ..
-        }) => workspace_drop_indicator_row(app, &app.view.workspace_card_areas, area, *drop_target),
+        }) if !matches!(group_change, Some(Some(_))) => {
+            workspace_drop_indicator_row(app, &app.view.workspace_card_areas, area, *drop_target)
+        }
         _ => None,
     };
 
@@ -1377,6 +1511,48 @@ fn render_workspace_list(
                 workspace_group_chevron_rect(card),
             );
         }
+    }
+
+    // Folder ("workspace group") header rows.
+    let folder_name_fg = p.text;
+    for header in &app.view.workspace_group_header_areas {
+        if header.rect.y >= list_bottom {
+            continue;
+        }
+        let collapsed = app.collapsed_group_ids.contains(&header.group_id);
+        let name = app
+            .workspace_groups
+            .iter()
+            .find(|group| group.id == header.group_id)
+            .map(|group| group.name.as_str())
+            .unwrap_or("");
+        let chevron = if collapsed { "▸" } else { "▾" };
+        let name_budget = header.rect.width.saturating_sub(3) as usize;
+        // Highlight the header when a drag would drop into this folder.
+        let is_drop_target = drag_target_group.as_deref() == Some(header.group_id.as_str());
+        if is_drop_target {
+            let buf = frame.buffer_mut();
+            for y in header.rect.y..header.rect.y + header.rect.height {
+                for x in header.rect.x..header.rect.x + header.rect.width {
+                    buf[(x, y)].set_style(Style::default().bg(p.surface1));
+                }
+            }
+        }
+        let base = if is_drop_target {
+            Style::default().bg(p.surface1)
+        } else {
+            Style::default()
+        };
+        let spans = vec![
+            Span::styled(" ", base),
+            Span::styled(chevron, base.fg(p.accent)),
+            Span::styled(" ", base),
+            Span::styled(
+                truncate_end(name, name_budget),
+                base.fg(folder_name_fg).add_modifier(Modifier::BOLD),
+            ),
+        ];
+        frame.render_widget(Paragraph::new(Line::from(spans)), header.rect);
     }
 
     if let Some(y) = insertion_row.filter(|y| *y < list_bottom) {
@@ -1591,6 +1767,67 @@ mod tests {
     use crate::{detect::Agent, layout::PaneId, workspace::Workspace};
     use ratatui::{backend::TestBackend, layout::Direction, Terminal};
 
+    #[test]
+    fn folders_inject_headers_and_collapse_hides_members() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        let gid = app.create_workspace_group("Work".to_string());
+        assert!(app.assign_workspace_to_group(0, Some(gid.clone())));
+
+        let entries = workspace_list_entries(&app);
+        assert!(entries.iter().any(|entry| matches!(
+            entry,
+            WorkspaceListEntry::GroupHeader { group_id, collapsed: false } if group_id == &gid
+        )));
+        assert!(entries.iter().any(|entry| matches!(
+            entry,
+            WorkspaceListEntry::Workspace {
+                ws_idx: 0,
+                indented: true
+            }
+        )));
+        // Workspace b is loose (not in a folder).
+        assert!(entries.iter().any(|entry| matches!(
+            entry,
+            WorkspaceListEntry::Workspace {
+                ws_idx: 1,
+                indented: false
+            }
+        )));
+
+        // Collapsing the folder hides its member but keeps the header.
+        app.collapsed_group_ids.insert(gid.clone());
+        let entries = workspace_list_entries(&app);
+        assert!(!entries
+            .iter()
+            .any(|entry| matches!(entry, WorkspaceListEntry::Workspace { ws_idx: 0, .. })));
+        assert!(entries.iter().any(|entry| matches!(
+            entry,
+            WorkspaceListEntry::GroupHeader {
+                collapsed: true,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn empty_folder_renders_a_trailing_header() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("a")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        let gid = app.create_workspace_group("Empty".to_string());
+
+        let entries = workspace_list_entries(&app);
+        // Loose workspace first, then the empty folder header at the end.
+        assert!(matches!(
+            entries.last(),
+            Some(WorkspaceListEntry::GroupHeader { group_id, .. }) if group_id == &gid
+        ));
+    }
+
     fn row_text(buffer: &ratatui::buffer::Buffer, row: u16, width: u16) -> String {
         (0..width)
             .map(|x| buffer[(x, row)].symbol())
@@ -1662,7 +1899,8 @@ mod tests {
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+        let (_, agent_area) =
+            expanded_sidebar_sections(area, app.sidebar_section_split, app.agents_section_visible);
         let body = agent_panel_body_rect(agent_area, false);
 
         let first = row_text(buffer, body.y, 25);
@@ -1713,7 +1951,8 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         terminal
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
-        let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+        let (_, agent_area) =
+            expanded_sidebar_sections(area, app.sidebar_section_split, app.agents_section_visible);
         let body = agent_panel_body_rect(agent_area, false);
         let buffer = terminal.backend().buffer();
         let workspace = buffer[(find_symbol_x(buffer, body.y, body.width, "o"), body.y)].style();
@@ -1914,7 +2153,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+        let (_, agent_area) =
+            expanded_sidebar_sections(area, app.sidebar_section_split, app.agents_section_visible);
         let body = agent_panel_body_rect(agent_area, false);
         let first = row_text(buffer, body.y, 17);
 
@@ -1944,7 +2184,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         renderer
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
-        let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+        let (_, agent_area) =
+            expanded_sidebar_sections(area, app.sidebar_section_split, app.agents_section_visible);
         let body = agent_panel_body_rect(agent_area, false);
         let rendered = row_text(renderer.backend().buffer(), body.y, 9);
 
@@ -2020,7 +2261,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
         app.sidebar_spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]; 6];
         let area = Rect::new(0, 0, 20, 10);
-        let workspace_area = workspace_list_rect(area, app.sidebar_section_split);
+        let workspace_area =
+            workspace_list_rect(area, app.sidebar_section_split, app.agents_section_visible);
         let body = workspace_list_body_rect(workspace_area, false);
 
         let metrics = workspace_list_scroll_metrics(&app, workspace_area);
@@ -2191,7 +2433,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         }
 
         let area = Rect::new(0, 0, 4, 12);
-        let (_, _, detail_area) = collapsed_sidebar_sections(area);
+        let (_, _, detail_area) = collapsed_sidebar_sections(area, app.agents_section_visible);
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
             .expect("test terminal should initialize");
 
@@ -2258,7 +2500,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(!app.is_active_pane(0, 0, first_pane));
 
         let area = Rect::new(0, 0, 4, 14);
-        let (_, _, detail_area) = collapsed_sidebar_sections(area);
+        let (_, _, detail_area) = collapsed_sidebar_sections(area, true);
         let rows = collapsed_agent_row_styles(&app, area, detail_area, 3);
 
         let highlighted: Vec<_> = rows
@@ -2292,7 +2534,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.active = None;
 
         let area = Rect::new(0, 0, 4, 14);
-        let (_, _, detail_area) = collapsed_sidebar_sections(area);
+        let (_, _, detail_area) = collapsed_sidebar_sections(area, true);
         let rows = collapsed_agent_row_styles(&app, area, detail_area, 3);
 
         for cells in rows {
@@ -2320,7 +2562,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         }
 
         let area = Rect::new(0, 0, 4, 25);
-        let (workspace_area, _, _) = collapsed_sidebar_sections(area);
+        let (workspace_area, _, _) = collapsed_sidebar_sections(area, true);
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
             .expect("test terminal should initialize");
 
@@ -2361,7 +2603,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         }
 
         let area = Rect::new(0, 0, 4, 25);
-        let (_, _, detail_area) = collapsed_sidebar_sections(area);
+        let (_, _, detail_area) = collapsed_sidebar_sections(area, app.agents_section_visible);
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
             .expect("test terminal should initialize");
 
@@ -2411,7 +2653,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(agent_panel_entries(&app)[0].pane_id, urgent_pane);
 
         let area = Rect::new(0, 0, 4, 16);
-        let (_, _, detail_area) = collapsed_sidebar_sections(area);
+        let (_, _, detail_area) = collapsed_sidebar_sections(area, app.agents_section_visible);
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
             .expect("test terminal should initialize");
 
@@ -2533,15 +2775,20 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
     #[test]
     fn expanded_sidebar_sections_handle_tiny_heights() {
-        let (ws_area, detail_area) = expanded_sidebar_sections(Rect::new(0, 0, 20, 5), 0.9);
+        let (ws_area, detail_area) = expanded_sidebar_sections(Rect::new(0, 0, 20, 5), 0.9, true);
 
         assert_eq!(ws_area, Rect::new(0, 0, 19, 3));
         assert_eq!(detail_area, Rect::new(0, 3, 19, 2));
+
+        // Hiding the agents section gives the whole content height to spaces.
+        let (ws_full, detail_none) = expanded_sidebar_sections(Rect::new(0, 0, 20, 5), 0.9, false);
+        assert_eq!(ws_full, Rect::new(0, 0, 19, 5));
+        assert_eq!(detail_none, Rect::default());
     }
 
     #[test]
     fn sidebar_section_divider_is_hidden_for_tiny_heights() {
-        let divider = sidebar_section_divider_rect(Rect::new(0, 0, 20, 5), 0.5);
+        let divider = sidebar_section_divider_rect(Rect::new(0, 0, 20, 5), 0.5, true);
 
         assert_eq!(divider, Rect::default());
     }
@@ -2633,7 +2880,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_spaces.row_gap = 0;
         let area = Rect::new(0, 0, 30, 20);
         app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
-        let list_area = workspace_list_rect(area, app.sidebar_section_split);
+        let list_area =
+            workspace_list_rect(area, app.sidebar_section_split, app.agents_section_visible);
 
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
         terminal
@@ -2674,7 +2922,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let area = Rect::new(0, 0, 30, 10);
         app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
         assert_eq!(app.view.workspace_card_areas.len(), 2);
-        let list_area = workspace_list_rect(area, app.sidebar_section_split);
+        let list_area =
+            workspace_list_rect(area, app.sidebar_section_split, app.agents_section_visible);
 
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
         terminal
@@ -2766,7 +3015,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_spaces.row_gap = 0;
         let area = Rect::new(0, 0, 30, 20);
         app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
-        let list_area = workspace_list_rect(area, app.sidebar_section_split);
+        let list_area =
+            workspace_list_rect(area, app.sidebar_section_split, app.agents_section_visible);
         let indicator_row = workspace_drop_indicator_row(
             &app,
             &app.view.workspace_card_areas,
@@ -2780,6 +3030,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 source_id: 0,
                 source_ws_idx: 0,
                 drop_target: Some(crate::app::state::WorkspaceDropTarget::Before(2)),
+                group_change: None,
             },
         });
 

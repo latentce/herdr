@@ -418,6 +418,7 @@ fn restore_workspace(
             cached_git_ahead_behind: None,
             cached_git_space,
             worktree_space,
+            group_id: snap.group_id.clone(),
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),
             public_pane_numbers,
@@ -1177,6 +1178,7 @@ mod tests {
                 custom_name: None,
                 identity_cwd: cwd.clone(),
                 worktree_space: None,
+                group_id: None,
                 public_pane_numbers: HashMap::new(),
                 next_public_pane_number: 0,
                 public_tab_numbers: Vec::new(),
@@ -1211,6 +1213,8 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            workspace_groups: Vec::new(),
+            collapsed_group_ids: Default::default(),
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1257,6 +1261,7 @@ mod tests {
                 custom_name: None,
                 identity_cwd: cwd.clone(),
                 worktree_space: None,
+                group_id: None,
                 public_pane_numbers: HashMap::from([(10, 1), (20, 3)]),
                 next_public_pane_number: 4,
                 public_tab_numbers: vec![5],
@@ -1304,6 +1309,8 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            workspace_groups: Vec::new(),
+            collapsed_group_ids: Default::default(),
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1366,6 +1373,7 @@ mod tests {
                 custom_name: None,
                 identity_cwd: cwd.clone(),
                 worktree_space: None,
+                group_id: None,
                 public_pane_numbers: HashMap::from([(10, 1), (11, 2), (12, 3), (13, 4)]),
                 next_public_pane_number: 5,
                 public_tab_numbers: vec![1, 3, 4, 5],
@@ -1411,6 +1419,8 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            workspace_groups: Vec::new(),
+            collapsed_group_ids: Default::default(),
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1449,6 +1459,7 @@ mod tests {
             custom_name: None,
             identity_cwd: cwd,
             worktree_space: None,
+            group_id: None,
             public_pane_numbers: HashMap::new(),
             next_public_pane_number: 0,
             public_tab_numbers: Vec::new(),
@@ -1488,6 +1499,7 @@ mod tests {
                 custom_name: None,
                 identity_cwd: cwd.clone(),
                 worktree_space: None,
+                group_id: None,
                 public_pane_numbers: HashMap::new(),
                 next_public_pane_number: 0,
                 public_tab_numbers: Vec::new(),
@@ -1522,6 +1534,8 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            workspace_groups: Vec::new(),
+            collapsed_group_ids: Default::default(),
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1697,6 +1711,7 @@ mod tests {
                 custom_name: None,
                 identity_cwd: cwd,
                 worktree_space: None,
+                group_id: None,
                 public_pane_numbers: HashMap::new(),
                 next_public_pane_number: 0,
                 public_tab_numbers: Vec::new(),
@@ -1716,6 +1731,8 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: Default::default(),
+            workspace_groups: Vec::new(),
+            collapsed_group_ids: Default::default(),
         };
         (snapshot, history)
     }

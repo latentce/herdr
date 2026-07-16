@@ -1300,14 +1300,15 @@ impl AppState {
         // Mobile always shows the worktree tree expanded, so its visible order
         // must ignore collapse state to match what the switcher renders.
         let entries = if self.view.layout == ViewLayout::Mobile {
-            crate::ui::workspace_list_entries_expanded(self)
+            crate::ui::workspace_list_entries_mobile(self)
         } else {
             crate::ui::workspace_list_entries(self)
         };
         let order = entries
             .into_iter()
-            .map(|entry| match entry {
-                crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } => ws_idx,
+            .filter_map(|entry| match entry {
+                crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } => Some(ws_idx),
+                crate::ui::WorkspaceListEntry::GroupHeader { .. } => None,
             })
             .collect::<Vec<_>>();
         if order.is_empty() {
@@ -1467,6 +1468,92 @@ impl AppState {
         true
     }
 
+    /// Create a new empty folder, returning its generated id.
+    pub fn create_workspace_group(&mut self, name: String) -> String {
+        let id = crate::workspace::generate_workspace_group_id();
+        self.workspace_groups
+            .push(crate::workspace::WorkspaceGroup {
+                id: id.clone(),
+                name,
+            });
+        self.mark_session_dirty();
+        id
+    }
+
+    /// Rename an existing folder. Returns false if the id is unknown.
+    pub fn rename_workspace_group(&mut self, group_id: &str, name: String) -> bool {
+        let Some(group) = self
+            .workspace_groups
+            .iter_mut()
+            .find(|group| group.id == group_id)
+        else {
+            return false;
+        };
+        group.name = name;
+        self.mark_session_dirty();
+        true
+    }
+
+    /// Delete a folder: its members become ungrouped and its collapse state is
+    /// dropped. Returns false if the id is unknown.
+    pub fn delete_workspace_group(&mut self, group_id: &str) -> bool {
+        let existed = self.workspace_groups.iter().any(|g| g.id == group_id);
+        if !existed {
+            return false;
+        }
+        self.workspace_groups.retain(|g| g.id != group_id);
+        for ws in &mut self.workspaces {
+            if ws.group_id.as_deref() == Some(group_id) {
+                ws.group_id = None;
+            }
+        }
+        self.collapsed_group_ids.remove(group_id);
+        self.mark_session_dirty();
+        true
+    }
+
+    /// Assign a workspace (and, atomically, any workspaces sharing its worktree
+    /// group) to a folder, or to `None` to remove it from its folder. Returns
+    /// false for an invalid index or an unknown target group.
+    pub fn assign_workspace_to_group(&mut self, ws_idx: usize, group_id: Option<String>) -> bool {
+        if ws_idx >= self.workspaces.len() {
+            return false;
+        }
+        if let Some(id) = &group_id {
+            if !self.workspace_groups.iter().any(|group| &group.id == id) {
+                return false;
+            }
+        }
+
+        // A worktree group moves as a unit: apply to every workspace sharing the
+        // target's worktree key, else just the single workspace.
+        let worktree_key = self.workspaces[ws_idx]
+            .worktree_space()
+            .map(|space| space.key.clone());
+        match worktree_key {
+            Some(key) => {
+                for ws in &mut self.workspaces {
+                    if ws.worktree_space().map(|space| &space.key) == Some(&key) {
+                        ws.group_id = group_id.clone();
+                    }
+                }
+            }
+            None => self.workspaces[ws_idx].group_id = group_id,
+        }
+        self.mark_session_dirty();
+        true
+    }
+
+    /// Toggle a folder's collapsed state.
+    pub fn toggle_workspace_group_collapsed(&mut self, group_id: &str) {
+        if self.collapsed_group_ids.contains(group_id) {
+            self.collapsed_group_ids.remove(group_id);
+        } else {
+            self.collapsed_group_ids.insert(group_id.to_string());
+        }
+        self.mark_session_dirty();
+    }
+
     pub fn scroll_tabs_left(&mut self) {
         self.tab_scroll_follow_active = false;
         self.tab_scroll = self.tab_scroll.saturating_sub(1);
@@ -1567,6 +1654,7 @@ impl AppState {
         let (_, detail_area) = crate::ui::expanded_sidebar_sections(
             self.view.sidebar_rect,
             self.sidebar_section_split,
+            self.agents_section_visible,
         );
         self.agent_panel_scroll = crate::ui::agent_panel_scroll_for_target(
             self,
@@ -3433,6 +3521,61 @@ mod tests {
             state.mode = Mode::Terminal;
         }
         state
+    }
+
+    #[test]
+    fn create_assign_and_delete_workspace_group() {
+        let mut state = app_with_workspaces(&["one", "two"]);
+
+        let gid = state.create_workspace_group("Work".to_string());
+        assert_eq!(state.workspace_groups.len(), 1);
+        assert!(state.assign_workspace_to_group(0, Some(gid.clone())));
+        assert_eq!(state.workspaces[0].group_id.as_deref(), Some(gid.as_str()));
+        assert!(state.workspaces[1].group_id.is_none());
+        state.assert_invariants_for_test();
+
+        // Renaming and collapse.
+        assert!(state.rename_workspace_group(&gid, "Renamed".to_string()));
+        assert_eq!(state.workspace_groups[0].name, "Renamed");
+        state.toggle_workspace_group_collapsed(&gid);
+        assert!(state.collapsed_group_ids.contains(&gid));
+
+        // Deleting the folder ungroups members and drops collapse state.
+        assert!(state.delete_workspace_group(&gid));
+        assert!(state.workspace_groups.is_empty());
+        assert!(state.workspaces[0].group_id.is_none());
+        assert!(state.collapsed_group_ids.is_empty());
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn assign_rejects_unknown_group_and_bad_index() {
+        let mut state = app_with_workspaces(&["one"]);
+        assert!(!state.assign_workspace_to_group(0, Some("nope".to_string())));
+        assert!(!state.assign_workspace_to_group(9, None));
+        assert!(state.workspaces[0].group_id.is_none());
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn assigning_worktree_member_moves_whole_group() {
+        let mut state = app_with_workspaces(&["main", "issue"]);
+        let membership = |checkout: &str| crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: checkout.into(),
+            is_linked_worktree: false,
+        };
+        state.workspaces[0].worktree_space = Some(membership("/repo/herdr"));
+        state.workspaces[1].worktree_space = Some(membership("/repo/herdr-issue"));
+
+        let gid = state.create_workspace_group("Repo".to_string());
+        assert!(state.assign_workspace_to_group(0, Some(gid.clone())));
+        // Both worktree members land in the folder together.
+        assert_eq!(state.workspaces[0].group_id.as_deref(), Some(gid.as_str()));
+        assert_eq!(state.workspaces[1].group_id.as_deref(), Some(gid.as_str()));
+        state.assert_invariants_for_test();
     }
 
     fn mark_linked_worktree(state: &mut AppState, ws_idx: usize) {

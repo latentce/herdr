@@ -424,11 +424,28 @@ impl Default for SpacesSidebarConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+fn default_show_agents() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct SidebarConfig {
+    /// Whether the lower "agents" section is shown on startup. When false, the
+    /// spaces list takes the full sidebar height.
+    pub show_agents: bool,
     pub agents: AgentsSidebarConfig,
     pub spaces: SpacesSidebarConfig,
+}
+
+impl Default for SidebarConfig {
+    fn default() -> Self {
+        Self {
+            show_agents: default_show_agents(),
+            agents: AgentsSidebarConfig::default(),
+            spaces: SpacesSidebarConfig::default(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -578,6 +595,21 @@ rows = [[{ token = "git_status", fg = "#ff00aa" }], [{ token = "$jj", bold = tru
             let input = format!("[ui.sidebar.agents]\\nrows = [[\"{token}\"]]\\n");
             assert!(toml::from_str::<crate::config::Config>(&input).is_err());
         }
+    }
+
+    #[test]
+    fn show_agents_defaults_true_and_parses_override() {
+        let default: crate::config::Config = toml::from_str("").unwrap();
+        assert!(default.ui.sidebar.show_agents);
+
+        let hidden: crate::config::Config = toml::from_str(
+            r#"
+[ui.sidebar]
+show_agents = false
+"#,
+        )
+        .expect("show_agents config");
+        assert!(!hidden.ui.sidebar.show_agents);
     }
 
     #[test]

@@ -104,7 +104,41 @@ impl WorkspaceGitStatusSnapshot {
 }
 
 static NEXT_WORKSPACE_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_WORKSPACE_GROUP_ID: AtomicU64 = AtomicU64::new(1);
 const PUBLIC_ID_ALPHABET: &[u8; 32] = b"123456789ABCDEFGHJKMNPQRSTVWXYZ0";
+
+/// A user-created folder that groups workspaces in the sidebar. Order in the
+/// owning `Vec` defines display order for empty groups.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceGroup {
+    /// Stable id, e.g. "g1". Referenced by `Workspace::group_id`.
+    pub id: String,
+    /// User-visible folder name.
+    pub name: String,
+}
+
+pub(crate) fn generate_workspace_group_id() -> String {
+    let counter = NEXT_WORKSPACE_GROUP_ID.fetch_add(1, Ordering::Relaxed);
+    format!("g{}", encode_public_number(counter as usize))
+}
+
+fn public_workspace_group_number(id: &str) -> Option<usize> {
+    id.strip_prefix('g').and_then(decode_public_number)
+}
+
+/// Bump the group-id counter past any restored group ids so freshly created
+/// folders never collide with persisted ones.
+pub(crate) fn reserve_workspace_group_ids(groups: &[WorkspaceGroup]) {
+    let Some(next) = groups
+        .iter()
+        .filter_map(|group| public_workspace_group_number(&group.id))
+        .max()
+        .and_then(|max| u64::try_from(max.checked_add(1)?).ok())
+    else {
+        return;
+    };
+    NEXT_WORKSPACE_GROUP_ID.fetch_max(next, Ordering::Relaxed);
+}
 
 pub(crate) fn generate_workspace_id() -> String {
     let counter = NEXT_WORKSPACE_ID.fetch_add(1, Ordering::Relaxed);
@@ -196,6 +230,8 @@ pub struct Workspace {
     pub(crate) cached_git_space: Option<GitSpaceMetadata>,
     /// Explicit Herdr-managed worktree grouping provenance.
     pub worktree_space: Option<WorktreeSpaceMembership>,
+    /// User-created folder ("workspace group") membership, if any.
+    pub group_id: Option<String>,
     pub(crate) metadata_tokens: crate::metadata_tokens::MetadataTokens,
     pub(crate) metadata_token_sequences: HashMap<String, u64>,
     /// Public pane numbers within this workspace. Closed pane numbers are not reused.
@@ -262,6 +298,7 @@ impl Workspace {
             cached_git_ahead_behind: None,
             cached_git_space,
             worktree_space: None,
+            group_id: None,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),
             public_pane_numbers,
@@ -461,6 +498,7 @@ impl Workspace {
                 cached_git_ahead_behind: None,
                 cached_git_space,
                 worktree_space: None,
+                group_id: None,
                 metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
                 metadata_token_sequences: HashMap::new(),
                 public_pane_numbers,
@@ -1299,6 +1337,7 @@ impl Workspace {
             cached_git_ahead_behind: None,
             cached_git_space: None,
             worktree_space: None,
+            group_id: None,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),
             public_pane_numbers,

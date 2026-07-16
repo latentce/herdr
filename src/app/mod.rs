@@ -399,6 +399,8 @@ impl App {
             sidebar_width_source,
             sidebar_section_split,
             collapsed_space_keys,
+            workspace_groups,
+            collapsed_group_ids,
         ) = if no_session {
             (
                 Vec::new(),
@@ -407,6 +409,8 @@ impl App {
                 config.ui.sidebar_width,
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
+                std::collections::HashSet::new(),
+                Vec::new(),
                 std::collections::HashSet::new(),
             )
         } else if let Some(snap) = crate::persist::load() {
@@ -444,6 +448,14 @@ impl App {
                     },
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
+                    snap.workspace_groups
+                        .into_iter()
+                        .map(|group| crate::workspace::WorkspaceGroup {
+                            id: group.id,
+                            name: group.name,
+                        })
+                        .collect(),
+                    snap.collapsed_group_ids,
                 )
             } else {
                 crate::logging::session_restored(ws.len(), "ok");
@@ -461,6 +473,14 @@ impl App {
                     },
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
+                    snap.workspace_groups
+                        .into_iter()
+                        .map(|group| crate::workspace::WorkspaceGroup {
+                            id: group.id,
+                            name: group.name,
+                        })
+                        .collect(),
+                    snap.collapsed_group_ids,
                 )
             }
         } else {
@@ -472,8 +492,12 @@ impl App {
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
                 std::collections::HashSet::new(),
+                Vec::new(),
+                std::collections::HashSet::new(),
             )
         };
+
+        crate::workspace::reserve_workspace_group_ids(&workspace_groups);
 
         let agent_panel_sort = agent_panel_sort_from_config(config.ui.agent_panel_sort);
 
@@ -559,11 +583,15 @@ impl App {
             requested_new_tab_name: None,
             pending_workspace_create_cwd: None,
             rename_pane_target: None,
+            workspace_group_name_action: None,
+            workspace_group_picker: None,
             worktree_create: None,
             worktree_open: None,
             worktree_remove: None,
             worktree_directory,
             collapsed_space_keys,
+            workspace_groups,
+            collapsed_group_ids,
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -590,6 +618,7 @@ impl App {
                 layout: state::ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
+                workspace_group_header_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),
@@ -629,6 +658,7 @@ impl App {
             sidebar_width_auto: false,
             sidebar_collapsed: config.ui.sidebar_start_collapsed,
             sidebar_collapsed_mode: config.ui.sidebar_collapsed_mode,
+            agents_section_visible: config.ui.sidebar.show_agents,
             sidebar_section_split,
             agent_panel_sort,
             status_indicators: config.ui.status_indicators,
@@ -861,6 +891,16 @@ impl App {
             app.state.sidebar_section_split = split;
         }
         app.state.collapsed_space_keys = snapshot.collapsed_space_keys.clone();
+        app.state.workspace_groups = snapshot
+            .workspace_groups
+            .iter()
+            .map(|group| crate::workspace::WorkspaceGroup {
+                id: group.id.clone(),
+                name: group.name.clone(),
+            })
+            .collect();
+        app.state.collapsed_group_ids = snapshot.collapsed_group_ids.clone();
+        crate::workspace::reserve_workspace_group_ids(&app.state.workspace_groups);
         app.state.mode = if app.state.active.is_some() {
             state::Mode::Terminal
         } else {
@@ -1898,8 +1938,14 @@ impl App {
             Mode::Copy => {
                 self.handle_copy_mode_key(key);
             }
-            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
+            Mode::RenameWorkspace
+            | Mode::RenameWorkspaceGroup
+            | Mode::RenameTab
+            | Mode::RenamePane => {
                 self.handle_rename_key_via_api(key_event);
+            }
+            Mode::WorkspaceGroupPicker => {
+                self.handle_workspace_group_picker_key_via_api(key_event);
             }
             Mode::NewLinkedWorktree => {
                 self.handle_worktree_create_key(key_event);

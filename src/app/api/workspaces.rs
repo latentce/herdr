@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
 use crate::api::schema::{
-    EventData, EventEnvelope, EventKind, ResponseResult, WorkspaceCreateParams,
-    WorkspaceMoveBlockParams, WorkspaceMoveParams, WorkspaceRenameParams,
-    WorkspaceReportMetadataParams, WorkspaceTarget,
+    EventData, EventEnvelope, EventKind, ResponseResult, WorkspaceAssignGroupParams,
+    WorkspaceCreateParams, WorkspaceGroupCreateParams, WorkspaceGroupDeleteParams,
+    WorkspaceGroupInfo, WorkspaceGroupRenameParams, WorkspaceMoveBlockParams, WorkspaceMoveParams,
+    WorkspaceRenameParams, WorkspaceReportMetadataParams, WorkspaceTarget,
 };
 use crate::app::App;
 
@@ -330,6 +331,138 @@ impl App {
         encode_success(id, ResponseResult::Ok {})
     }
 
+    pub(super) fn handle_workspace_group_list(&mut self, id: String) -> String {
+        encode_success(
+            id,
+            ResponseResult::WorkspaceGroupList {
+                groups: self.workspace_group_infos(),
+            },
+        )
+    }
+
+    pub(super) fn handle_workspace_group_create(
+        &mut self,
+        id: String,
+        params: WorkspaceGroupCreateParams,
+    ) -> String {
+        let group_id = self.state.create_workspace_group(params.name.clone());
+        self.schedule_session_save();
+        self.emit_event(EventEnvelope {
+            event: EventKind::WorkspaceGroupCreated,
+            data: EventData::WorkspaceGroupCreated {
+                group_id: group_id.clone(),
+                name: params.name.clone(),
+            },
+        });
+        encode_success(
+            id,
+            ResponseResult::WorkspaceGroupInfo {
+                group: WorkspaceGroupInfo {
+                    group_id,
+                    name: params.name,
+                },
+            },
+        )
+    }
+
+    pub(super) fn handle_workspace_group_rename(
+        &mut self,
+        id: String,
+        params: WorkspaceGroupRenameParams,
+    ) -> String {
+        if !self
+            .state
+            .rename_workspace_group(&params.group_id, params.name.clone())
+        {
+            return workspace_group_not_found(id, &params.group_id);
+        }
+        self.schedule_session_save();
+        self.emit_event(EventEnvelope {
+            event: EventKind::WorkspaceGroupRenamed,
+            data: EventData::WorkspaceGroupRenamed {
+                group_id: params.group_id.clone(),
+                name: params.name.clone(),
+            },
+        });
+        encode_success(
+            id,
+            ResponseResult::WorkspaceGroupInfo {
+                group: WorkspaceGroupInfo {
+                    group_id: params.group_id,
+                    name: params.name,
+                },
+            },
+        )
+    }
+
+    pub(super) fn handle_workspace_group_delete(
+        &mut self,
+        id: String,
+        params: WorkspaceGroupDeleteParams,
+    ) -> String {
+        if !self.state.delete_workspace_group(&params.group_id) {
+            return workspace_group_not_found(id, &params.group_id);
+        }
+        self.schedule_session_save();
+        let workspaces = self.workspace_list_info();
+        self.emit_event(EventEnvelope {
+            event: EventKind::WorkspaceGroupDeleted,
+            data: EventData::WorkspaceGroupDeleted {
+                group_id: params.group_id,
+                workspaces,
+            },
+        });
+        encode_success(
+            id,
+            ResponseResult::WorkspaceGroupList {
+                groups: self.workspace_group_infos(),
+            },
+        )
+    }
+
+    pub(super) fn handle_workspace_assign_group(
+        &mut self,
+        id: String,
+        params: WorkspaceAssignGroupParams,
+    ) -> String {
+        let Some(index) = self.parse_workspace_id(&params.workspace_id) else {
+            return workspace_not_found(id, &params.workspace_id);
+        };
+        if self.state.workspaces.get(index).is_none() {
+            return workspace_not_found(id, &params.workspace_id);
+        }
+        // Index is valid, so a false result means the target group is unknown.
+        if !self
+            .state
+            .assign_workspace_to_group(index, params.group_id.clone())
+        {
+            return workspace_group_not_found(id, params.group_id.as_deref().unwrap_or_default());
+        }
+        self.schedule_session_save();
+        let workspace_id = self.public_workspace_id(index);
+        let workspaces = self.workspace_list_info();
+        self.emit_event(EventEnvelope {
+            event: EventKind::WorkspaceGroupAssigned,
+            data: EventData::WorkspaceGroupAssigned {
+                workspace_id,
+                group_id: params.group_id,
+                workspaces: workspaces.clone(),
+            },
+        });
+        encode_success(id, ResponseResult::WorkspaceList { workspaces })
+    }
+
+    fn workspace_group_infos(&self) -> Vec<WorkspaceGroupInfo> {
+        self.state
+            .workspace_groups
+            .iter()
+            .map(|group| WorkspaceGroupInfo {
+                group_id: group.id.clone(),
+                name: group.name.clone(),
+            })
+            .collect()
+    }
+
     fn workspace_list_info(&self) -> Vec<crate::api::schema::WorkspaceInfo> {
         self.state
             .workspaces
@@ -345,6 +478,14 @@ fn workspace_not_found(id: String, workspace_id: &str) -> String {
         id,
         "workspace_not_found",
         format!("workspace {workspace_id} not found"),
+    )
+}
+
+fn workspace_group_not_found(id: String, group_id: &str) -> String {
+    encode_error(
+        id,
+        "workspace_group_not_found",
+        format!("workspace group {group_id} not found"),
     )
 }
 
@@ -706,5 +847,103 @@ mod tests {
         };
         assert_eq!(workspaces[0].workspace_id, moved_id);
         assert!(event_hub.events_after(0).is_empty());
+    }
+
+    #[test]
+    fn workspace_group_api_create_assign_list_delete_roundtrip() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());
+        app.state.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+
+        // create
+        let response = app.handle_workspace_group_create(
+            "req".into(),
+            WorkspaceGroupCreateParams {
+                name: "Work".into(),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::WorkspaceGroupInfo { group } = success.result else {
+            panic!("expected workspace group info");
+        };
+        assert_eq!(group.name, "Work");
+        let group_id = group.group_id;
+        assert!(event_hub.events_after(0).iter().any(|(_, event)| matches!(
+            &event.data,
+            EventData::WorkspaceGroupCreated { group_id: gid, name } if gid == &group_id && name == "Work"
+        )));
+
+        // assign workspace a to the folder
+        let ws_a = app.public_workspace_id(0);
+        let response = app.handle_workspace_assign_group(
+            "req".into(),
+            WorkspaceAssignGroupParams {
+                workspace_id: ws_a,
+                group_id: Some(group_id.clone()),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::WorkspaceList { workspaces } = success.result else {
+            panic!("expected workspace list");
+        };
+        assert_eq!(workspaces[0].group_id.as_deref(), Some(group_id.as_str()));
+        assert!(workspaces[1].group_id.is_none());
+
+        // list
+        let response = app.handle_workspace_group_list("req".into());
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::WorkspaceGroupList { groups } = success.result else {
+            panic!("expected workspace group list");
+        };
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].group_id, group_id);
+
+        // delete -> member ungrouped, folder gone
+        let response = app.handle_workspace_group_delete(
+            "req".into(),
+            WorkspaceGroupDeleteParams {
+                group_id: group_id.clone(),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(app.state.workspace_groups.is_empty());
+        assert!(app.state.workspaces[0].group_id.is_none());
+
+        // unknown group id -> error
+        let response = app.handle_workspace_group_delete(
+            "req".into(),
+            WorkspaceGroupDeleteParams {
+                group_id: "gNOPE".into(),
+            },
+        );
+        assert!(response.contains("workspace_group_not_found"));
+    }
+
+    #[test]
+    fn workspace_assign_group_rejects_unknown_group() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![Workspace::test_new("a")];
+        app.state.ensure_test_terminals();
+        let ws_a = app.public_workspace_id(0);
+
+        let response = app.handle_workspace_assign_group(
+            "req".into(),
+            WorkspaceAssignGroupParams {
+                workspace_id: ws_a,
+                group_id: Some("gNOPE".into()),
+            },
+        );
+        assert!(response.contains("workspace_group_not_found"));
     }
 }

@@ -9,7 +9,7 @@ use crate::terminal::TerminalRuntimeRegistry;
 use crate::workspace::Workspace;
 
 /// Current snapshot format version.
-pub(super) const SNAPSHOT_VERSION: u32 = 3;
+pub(super) const SNAPSHOT_VERSION: u32 = 4;
 
 /// Serializable snapshot of the entire herdr session.
 #[derive(Serialize, Deserialize)]
@@ -26,6 +26,17 @@ pub struct SessionSnapshot {
     pub sidebar_section_split: Option<f32>,
     #[serde(default)]
     pub collapsed_space_keys: std::collections::HashSet<String>,
+    #[serde(default)]
+    pub workspace_groups: Vec<WorkspaceGroupSnapshot>,
+    #[serde(default)]
+    pub collapsed_group_ids: std::collections::HashSet<String>,
+}
+
+/// Serializable user folder definition.
+#[derive(Serialize, Deserialize)]
+pub struct WorkspaceGroupSnapshot {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -55,6 +66,8 @@ pub struct WorkspaceSnapshot {
     pub identity_cwd: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_space: Option<crate::workspace::WorktreeSpaceMembership>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
     #[serde(default)]
     pub public_pane_numbers: HashMap<u32, usize>,
     #[serde(default)]
@@ -158,6 +171,7 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
             custom_name: snap.custom_name,
             identity_cwd,
             worktree_space: None,
+            group_id: None,
             public_pane_numbers: HashMap::new(),
             next_public_pane_number: 0,
             public_tab_numbers: Vec::new(),
@@ -184,22 +198,82 @@ struct RawSessionSnapshot {
     sidebar_section_split: Option<f32>,
     #[serde(default)]
     collapsed_space_keys: std::collections::HashSet<String>,
+    #[serde(default)]
+    workspace_groups: Vec<WorkspaceGroupSnapshot>,
+    #[serde(default)]
+    collapsed_group_ids: std::collections::HashSet<String>,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
+    let workspaces = raw
+        .workspaces
+        .into_iter()
+        .map(migrate_workspace)
+        .collect::<Result<Vec<_>, _>>()?;
+    // Drop membership referencing a group that no longer exists, and coerce all
+    // members of a worktree group to the group_id of the first member (the
+    // worktree-atomic invariant) in case the snapshot was hand-edited.
+    let (workspaces, workspace_groups, collapsed_group_ids) =
+        normalize_workspace_groups(workspaces, raw.workspace_groups, raw.collapsed_group_ids);
     Ok(SessionSnapshot {
         version: raw.version,
-        workspaces: raw
-            .workspaces
-            .into_iter()
-            .map(migrate_workspace)
-            .collect::<Result<Vec<_>, _>>()?,
+        workspaces,
         active: raw.active,
         selected: raw.selected,
         sidebar_width: raw.sidebar_width,
         sidebar_section_split: raw.sidebar_section_split,
         collapsed_space_keys: raw.collapsed_space_keys,
+        workspace_groups,
+        collapsed_group_ids,
     })
+}
+
+/// Enforce folder-membership invariants after load: unknown `group_id`s become
+/// `None`, worktree-group members share the parent's `group_id`, and collapsed
+/// ids are pruned to existing groups.
+fn normalize_workspace_groups(
+    mut workspaces: Vec<WorkspaceSnapshot>,
+    groups: Vec<WorkspaceGroupSnapshot>,
+    collapsed_group_ids: std::collections::HashSet<String>,
+) -> (
+    Vec<WorkspaceSnapshot>,
+    Vec<WorkspaceGroupSnapshot>,
+    std::collections::HashSet<String>,
+) {
+    let known: std::collections::HashSet<String> =
+        groups.iter().map(|group| group.id.clone()).collect();
+
+    for ws in &mut workspaces {
+        if let Some(id) = &ws.group_id {
+            if !known.contains(id) {
+                ws.group_id = None;
+            }
+        }
+    }
+
+    // Coerce worktree-group members to a single group_id (first member wins).
+    let mut group_by_worktree: HashMap<String, Option<String>> = HashMap::new();
+    for ws in &workspaces {
+        if let Some(space) = &ws.worktree_space {
+            group_by_worktree
+                .entry(space.key.clone())
+                .or_insert_with(|| ws.group_id.clone());
+        }
+    }
+    for ws in &mut workspaces {
+        if let Some(space) = &ws.worktree_space {
+            if let Some(canonical) = group_by_worktree.get(&space.key) {
+                ws.group_id = canonical.clone();
+            }
+        }
+    }
+
+    let collapsed_group_ids = collapsed_group_ids
+        .into_iter()
+        .filter(|id| known.contains(id))
+        .collect();
+
+    (workspaces, groups, collapsed_group_ids)
 }
 
 fn migrate_workspace(raw: serde_json::Value) -> Result<WorkspaceSnapshot, String> {
@@ -261,6 +335,8 @@ pub fn capture(
     sidebar_width: u16,
     sidebar_section_split: f32,
     collapsed_space_keys: std::collections::HashSet<String>,
+    workspace_groups: &[crate::workspace::WorkspaceGroup],
+    collapsed_group_ids: std::collections::HashSet<String>,
 ) -> SessionSnapshot {
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
@@ -273,6 +349,14 @@ pub fn capture(
         sidebar_width: Some(sidebar_width),
         sidebar_section_split: Some(sidebar_section_split),
         collapsed_space_keys,
+        workspace_groups: workspace_groups
+            .iter()
+            .map(|group| WorkspaceGroupSnapshot {
+                id: group.id.clone(),
+                name: group.name.clone(),
+            })
+            .collect(),
+        collapsed_group_ids,
     }
 }
 
@@ -291,6 +375,7 @@ fn capture_workspace(
             .resolved_identity_cwd_from(terminals, terminal_runtimes)
             .unwrap_or_else(|| ws.identity_cwd.clone()),
         worktree_space: ws.worktree_space.clone(),
+        group_id: ws.group_id.clone(),
         public_pane_numbers: ws
             .public_pane_numbers
             .iter()
@@ -541,6 +626,8 @@ mod tests {
             state.sidebar_width,
             state.sidebar_section_split,
             state.collapsed_space_keys.clone(),
+            &state.workspace_groups,
+            state.collapsed_group_ids.clone(),
         )
     }
 
@@ -605,6 +692,8 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            workspace_groups: Vec::new(),
+            collapsed_group_ids: std::collections::HashSet::new(),
         };
         let json = serde_json::to_string(&snap).unwrap();
         let restored = parse_snapshot(&json).unwrap();
@@ -668,6 +757,7 @@ mod tests {
                 custom_name: Some("pi-mono".to_string()),
                 identity_cwd: PathBuf::from("/home/can/Projects/herdr"),
                 worktree_space: None,
+                group_id: None,
                 public_pane_numbers: HashMap::from([(0, 1), (1, 2)]),
                 next_public_pane_number: 3,
                 public_tab_numbers: vec![1],
@@ -692,6 +782,8 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            workspace_groups: Vec::new(),
+            collapsed_group_ids: std::collections::HashSet::new(),
             version: SNAPSHOT_VERSION,
         };
 
@@ -833,6 +925,61 @@ mod tests {
         assert_eq!(captured_ids, ids);
         assert_eq!(snapshot.active, state.active);
         assert_eq!(snapshot.selected, state.selected);
+    }
+
+    #[test]
+    fn workspace_groups_round_trip_through_capture_and_parse() {
+        let mut state = state_with_workspaces(&["one", "two"]);
+        let gid = state.create_workspace_group("Work".to_string());
+        state.assign_workspace_to_group(0, Some(gid.clone()));
+        state.collapsed_group_ids.insert(gid.clone());
+
+        let snapshot = capture_from_state(&state);
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let parsed = parse_snapshot(&json).expect("parse v4 snapshot");
+
+        assert_eq!(parsed.version, SNAPSHOT_VERSION);
+        assert_eq!(parsed.workspace_groups.len(), 1);
+        assert_eq!(parsed.workspace_groups[0].id, gid);
+        assert_eq!(parsed.workspace_groups[0].name, "Work");
+        assert_eq!(parsed.workspaces[0].group_id.as_deref(), Some(gid.as_str()));
+        assert!(parsed.workspaces[1].group_id.is_none());
+        assert!(parsed.collapsed_group_ids.contains(&gid));
+    }
+
+    #[test]
+    fn pre_v4_snapshot_loads_as_ungrouped() {
+        // A v3 snapshot has no group fields at all.
+        let json = r#"{
+            "version": 3,
+            "workspaces": [
+                { "id": "w1", "identity_cwd": "/tmp/a", "tabs": [], "active_tab": 0 }
+            ],
+            "active": null,
+            "selected": 0
+        }"#;
+        let parsed = parse_snapshot(json).expect("migrate v3 snapshot");
+        assert!(parsed.workspace_groups.is_empty());
+        assert!(parsed.collapsed_group_ids.is_empty());
+        assert!(parsed.workspaces[0].group_id.is_none());
+    }
+
+    #[test]
+    fn parse_drops_dangling_group_membership() {
+        // group_id references a group that isn't defined -> coerced to None.
+        let json = r#"{
+            "version": 4,
+            "workspaces": [
+                { "id": "w1", "identity_cwd": "/tmp/a", "group_id": "gGONE", "tabs": [], "active_tab": 0 }
+            ],
+            "active": null,
+            "selected": 0,
+            "workspace_groups": [],
+            "collapsed_group_ids": ["gGONE"]
+        }"#;
+        let parsed = parse_snapshot(json).expect("parse snapshot");
+        assert!(parsed.workspaces[0].group_id.is_none());
+        assert!(parsed.collapsed_group_ids.is_empty());
     }
 
     #[test]
@@ -1230,6 +1377,7 @@ mod tests {
                 custom_name: Some("fallback test".to_string()),
                 identity_cwd: PathBuf::from("/tmp"),
                 worktree_space: None,
+                group_id: None,
                 public_pane_numbers: HashMap::new(),
                 next_public_pane_number: 0,
                 public_tab_numbers: Vec::new(),
@@ -1254,6 +1402,8 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            workspace_groups: Vec::new(),
+            collapsed_group_ids: std::collections::HashSet::new(),
         };
 
         let json = serde_json::to_string(&snap).unwrap();

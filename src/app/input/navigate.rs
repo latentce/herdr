@@ -479,6 +479,21 @@ impl App {
         self.runtime_workspace_move_block("tui.workspace.move_block", params);
     }
 
+    pub(crate) fn assign_workspace_to_group_via_api(
+        &mut self,
+        ws_idx: usize,
+        group_id: Option<String>,
+    ) {
+        let workspace_id = self.public_workspace_id(ws_idx);
+        self.runtime_workspace_assign_group(
+            "tui.workspace.assign_group",
+            crate::api::schema::WorkspaceAssignGroupParams {
+                workspace_id,
+                group_id,
+            },
+        );
+    }
+
     pub(crate) fn focus_tab_idx_via_api(&mut self, tab_idx: usize) {
         let Some(ws_idx) = self.state.active else {
             return;
