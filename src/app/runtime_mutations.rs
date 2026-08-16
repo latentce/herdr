@@ -69,6 +69,14 @@ impl App {
         self.dispatch_runtime_mutation(id, Method::WorkspaceClose(WorkspaceTarget { workspace_id }))
     }
 
+    pub(crate) fn runtime_workspace_close_confirmed(
+        &mut self,
+        id: &'static str,
+        workspace_id: String,
+    ) -> String {
+        self.handle_confirmed_workspace_close(id.to_string(), WorkspaceTarget { workspace_id })
+    }
+
     pub(crate) fn runtime_tab_create(
         &mut self,
         id: &'static str,

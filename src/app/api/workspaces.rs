@@ -296,11 +296,35 @@ impl App {
     }
 
     pub(super) fn handle_workspace_close(&mut self, id: String, target: WorkspaceTarget) -> String {
+        self.handle_workspace_close_inner(id, target, false)
+    }
+
+    pub(crate) fn handle_confirmed_workspace_close(
+        &mut self,
+        id: String,
+        target: WorkspaceTarget,
+    ) -> String {
+        self.handle_workspace_close_inner(id, target, true)
+    }
+
+    fn handle_workspace_close_inner(
+        &mut self,
+        id: String,
+        target: WorkspaceTarget,
+        confirmed: bool,
+    ) -> String {
         let Some(index) = self.parse_workspace_id(&target.workspace_id) else {
             return workspace_not_found(id, &target.workspace_id);
         };
         if self.state.workspaces.get(index).is_none() {
             return workspace_not_found(id, &target.workspace_id);
+        }
+        if !confirmed && self.state.confirm_implicit_worktree_group_close(index) {
+            return encode_error(
+                id,
+                "confirmation_required",
+                "closing this workspace would close a worktree group",
+            );
         }
         let workspace_id = self.public_workspace_id(index);
         let workspace = self.workspace_info(index);
@@ -453,6 +477,41 @@ mod tests {
             is_linked_worktree: true,
         });
         app
+    }
+
+    #[test]
+    fn api_workspace_close_parent_worktree_group_requires_confirmation() {
+        let mut app = app_with_linked_worktree();
+        let mut parent = Workspace::test_new("parent");
+        parent.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: "/repo/herdr".into(),
+            is_linked_worktree: false,
+        });
+        let parent_id = parent.id.clone();
+        let workspace_ids = [parent.id.clone(), app.state.workspaces[0].id.clone()];
+        app.state.workspaces.insert(0, parent);
+
+        let response = app.handle_workspace_close(
+            "req".into(),
+            WorkspaceTarget {
+                workspace_id: parent_id,
+            },
+        );
+
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["error"]["code"], "confirmation_required");
+        assert!(app.event_hub.events_after(0).is_empty());
+        assert_eq!(
+            app.state
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.id.clone())
+                .collect::<Vec<_>>(),
+            workspace_ids
+        );
     }
 
     #[test]

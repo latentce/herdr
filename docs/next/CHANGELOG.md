@@ -23,6 +23,7 @@
 - Experimental pane graphics now support bounded named layers, acknowledged full-RGBA primary-layer direct file frames on audited local terminals, owned BGRA fallback, exact pixel mouse input, and placement-only resize replay.
 
 ### Fixed
+- `workspace close` now requires confirmation before closing a primary checkout's linked-worktree workspace group. (#2874)
 - Herdr no longer sends the full OSC 4 palette query burst under WSL, preventing reply fragments from leaking into the shell through ConPTY. (#2440)
 - Qwen Code panes now use locale-independent terminal-title states and localized confirmation fallbacks, preventing active or blocked turns from appearing idle. (#2756)
 - Closing a terminal running `herdr --remote` no longer produces a local client core dump while the remote session stays alive. (#2424)

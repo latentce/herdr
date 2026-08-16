@@ -1115,7 +1115,8 @@ impl App {
     pub(super) fn confirm_close_accept_via_api(&mut self) {
         let ws_idx = self.state.selected;
         if ws_idx < self.state.workspaces.len() {
-            self.close_workspace_idx_via_api(ws_idx);
+            let workspace_id = self.public_workspace_id(ws_idx);
+            self.runtime_workspace_close_confirmed("tui.workspace.close", workspace_id);
         }
         self.state.mode = if self.state.active.is_some() {
             Mode::Terminal
@@ -2302,6 +2303,20 @@ mod tests {
         assert_eq!(state.selected, 0);
         assert_eq!(state.mode, Mode::ConfirmClose);
         assert_eq!(state.workspaces.len(), 2);
+    }
+
+    #[test]
+    fn api_confirm_close_accept_closes_parent_worktree_group() {
+        let mut app = app_with_test_workspaces(&["main", "issue"]);
+        mark_worktree_space_member(&mut app.state, 0, "repo-key");
+        mark_worktree_space_member(&mut app.state, 1, "repo-key");
+        app.state.mode = Mode::ConfirmClose;
+        app.state.selected = 0;
+
+        app.confirm_close_accept_via_api();
+
+        assert!(app.state.workspaces.is_empty());
+        assert_eq!(app.state.mode, Mode::Navigate);
     }
 
     #[test]
