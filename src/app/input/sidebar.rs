@@ -464,6 +464,7 @@ impl AppState {
                 crate::ui::WorkspaceListEntry::Workspace {
                     ws_idx,
                     indented: false,
+                    ..
                 } => Some(ws_idx),
                 _ => None,
             })
@@ -621,12 +622,14 @@ mod tests {
             WorkspaceCardArea {
                 ws_idx: 0,
                 rect: Rect::new(0, 1, 20, 1),
-                indented: true,
+                indented: false,
+                in_folder: true,
             },
             WorkspaceCardArea {
                 ws_idx: 1,
                 rect: Rect::new(0, 2, 20, 1),
                 indented: false,
+                in_folder: false,
             },
         ];
 

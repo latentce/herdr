@@ -593,7 +593,10 @@ fn render_mobile_switcher_content(
     doc_y += 1;
     let space_entries = workspace_list_entries_mobile(app);
     for (entry_idx, entry) in space_entries.iter().enumerate() {
-        let WorkspaceListEntry::Workspace { ws_idx, indented } = entry else {
+        let WorkspaceListEntry::Workspace {
+            ws_idx, indented, ..
+        } = entry
+        else {
             continue;
         };
         let Some(ws) = app.workspaces.get(*ws_idx) else {

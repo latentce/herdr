@@ -651,7 +651,12 @@ impl Palette {
 pub struct WorkspaceCardArea {
     pub ws_idx: usize,
     pub rect: Rect,
+    /// Rendered as a worktree-group child (branch label, git details
+    /// suppressed, tree connector prefix).
     pub indented: bool,
+    /// Member of a user folder: rendered as a normal card, indented under
+    /// the folder header.
+    pub in_folder: bool,
 }
 
 /// Hit-test rect for a folder ("workspace group") header row in the sidebar.

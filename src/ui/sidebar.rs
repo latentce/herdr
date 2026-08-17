@@ -316,13 +316,13 @@ pub(crate) fn grouped_child_display_label(
 pub(crate) enum WorkspaceListEntry {
     Workspace {
         ws_idx: usize,
+        /// Worktree-group child row (branch label, tree connector).
         indented: bool,
+        /// Member of a user folder (normal card, indented under the header).
+        in_folder: bool,
     },
     /// A user folder header row.
-    GroupHeader {
-        group_id: String,
-        collapsed: bool,
-    },
+    GroupHeader { group_id: String, collapsed: bool },
 }
 
 pub(crate) fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) -> bool {
@@ -384,7 +384,10 @@ fn apply_folder_grouping(
     let mut result = Vec::new();
     let mut emitted = std::collections::HashSet::<String>::new();
     for entry in base {
-        let WorkspaceListEntry::Workspace { ws_idx, .. } = &entry else {
+        let WorkspaceListEntry::Workspace {
+            ws_idx, indented, ..
+        } = &entry
+        else {
             result.push(entry);
             continue;
         };
@@ -405,7 +408,8 @@ fn apply_folder_grouping(
                 if !collapsed {
                     result.push(WorkspaceListEntry::Workspace {
                         ws_idx: *ws_idx,
-                        indented: true,
+                        indented: *indented,
+                        in_folder: true,
                     });
                 }
             }
@@ -468,6 +472,7 @@ fn worktree_grouped_entries(app: &AppState, force_expanded: bool) -> Vec<Workspa
             entries.push(WorkspaceListEntry::Workspace {
                 ws_idx,
                 indented: false,
+                in_folder: false,
             });
             continue;
         };
@@ -488,6 +493,7 @@ fn worktree_grouped_entries(app: &AppState, force_expanded: bool) -> Vec<Workspa
             entries.push(WorkspaceListEntry::Workspace {
                 ws_idx,
                 indented: false,
+                in_folder: false,
             });
             continue;
         };
@@ -495,6 +501,7 @@ fn worktree_grouped_entries(app: &AppState, force_expanded: bool) -> Vec<Workspa
         entries.push(WorkspaceListEntry::Workspace {
             ws_idx: parent_idx,
             indented: false,
+            in_folder: false,
         });
 
         if collapsed {
@@ -505,6 +512,7 @@ fn worktree_grouped_entries(app: &AppState, force_expanded: bool) -> Vec<Workspa
                 entries.push(WorkspaceListEntry::Workspace {
                     ws_idx: active_idx,
                     indented: true,
+                    in_folder: false,
                 });
             }
         } else {
@@ -515,6 +523,7 @@ fn worktree_grouped_entries(app: &AppState, force_expanded: bool) -> Vec<Workspa
                 entries.push(WorkspaceListEntry::Workspace {
                     ws_idx: *member_idx,
                     indented: true,
+                    in_folder: false,
                 });
             }
         }
@@ -550,7 +559,9 @@ fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> us
     let entries = workspace_list_entries(app);
     for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
         let (row_height, gap) = match entry {
-            WorkspaceListEntry::Workspace { ws_idx, indented } => {
+            WorkspaceListEntry::Workspace {
+                ws_idx, indented, ..
+            } => {
                 let Some(ws) = app.workspaces.get(*ws_idx) else {
                     continue;
                 };
@@ -578,7 +589,9 @@ fn workspace_list_bottom_start(app: &AppState, area: Rect) -> usize {
     let mut start = entries.len();
     for (entry_idx, entry) in entries.iter().enumerate().rev() {
         let needed = match entry {
-            WorkspaceListEntry::Workspace { ws_idx, indented } => {
+            WorkspaceListEntry::Workspace {
+                ws_idx, indented, ..
+            } => {
                 let Some(workspace) = app.workspaces.get(*ws_idx) else {
                     continue;
                 };
@@ -782,7 +795,11 @@ pub(crate) fn compute_workspace_list_areas(
     let entries = workspace_list_entries(app);
     for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
         match entry {
-            WorkspaceListEntry::Workspace { ws_idx, indented } => {
+            WorkspaceListEntry::Workspace {
+                ws_idx,
+                indented,
+                in_folder,
+            } => {
                 let Some(ws) = app.workspaces.get(*ws_idx) else {
                     continue;
                 };
@@ -795,6 +812,7 @@ pub(crate) fn compute_workspace_list_areas(
                     ws_idx: *ws_idx,
                     rect: Rect::new(body.x, row_y, body.width, row_height),
                     indented: *indented,
+                    in_folder: *in_folder,
                 });
                 row_y = row_y
                     .saturating_add(row_height)
@@ -1021,6 +1039,7 @@ pub(crate) fn workspace_drop_slots(
                 WorkspaceListEntry::Workspace {
                     ws_idx,
                     indented: false,
+                    ..
                 } => Some(*ws_idx),
                 _ => None,
             })
@@ -1456,29 +1475,36 @@ fn render_workspace_list(
                 break;
             }
             let mut spans = Vec::new();
-            let prefix_width = if card.indented {
-                spans.push(Span::raw("   "));
-                if row_index == 0 {
-                    spans.push(Span::styled(
-                        if is_last_child { "└─ " } else { "├─ " },
-                        Style::default().fg(p.overlay0),
-                    ));
-                    6
-                } else if is_last_child {
-                    spans.push(Span::raw("     "));
-                    8
-                } else {
-                    spans.push(Span::styled("│", Style::default().fg(p.overlay0)));
-                    spans.push(Span::raw("    "));
-                    8
-                }
-            } else if row_index == 0 {
-                spans.push(Span::raw(" "));
-                1
+            let folder_indent: u16 = if card.in_folder {
+                spans.push(Span::raw("  "));
+                2
             } else {
-                spans.push(Span::raw("   "));
-                3
+                0
             };
+            let prefix_width = folder_indent
+                + if card.indented {
+                    spans.push(Span::raw("   "));
+                    if row_index == 0 {
+                        spans.push(Span::styled(
+                            if is_last_child { "└─ " } else { "├─ " },
+                            Style::default().fg(p.overlay0),
+                        ));
+                        6
+                    } else if is_last_child {
+                        spans.push(Span::raw("     "));
+                        8
+                    } else {
+                        spans.push(Span::styled("│", Style::default().fg(p.overlay0)));
+                        spans.push(Span::raw("    "));
+                        8
+                    }
+                } else if row_index == 0 {
+                    spans.push(Span::raw(" "));
+                    1
+                } else {
+                    spans.push(Span::raw("   "));
+                    3
+                };
             let trailing_width = if row_index == 0 && parent_group.is_some() {
                 2
             } else {
@@ -1785,7 +1811,8 @@ mod tests {
             entry,
             WorkspaceListEntry::Workspace {
                 ws_idx: 0,
-                indented: true
+                indented: false,
+                in_folder: true,
             }
         )));
         // Workspace b is loose (not in a folder).
@@ -1793,7 +1820,8 @@ mod tests {
             entry,
             WorkspaceListEntry::Workspace {
                 ws_idx: 1,
-                indented: false
+                indented: false,
+                in_folder: false,
             }
         )));
 
@@ -2810,6 +2838,54 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn folder_member_git_workspace_renders_name_not_branch() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut ws = Workspace::test_new("myproject");
+        ws.cached_git_branch = Some("feature/some-branch".into());
+        app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        let gid = app.create_workspace_group("Work".to_string());
+        assert!(app.assign_workspace_to_group(0, Some(gid)));
+
+        let area = Rect::new(0, 0, 30, 12);
+        app.view.workspace_card_areas = compute_workspace_card_areas(&app, area);
+        assert_eq!(app.view.workspace_card_areas.len(), 1);
+        let card = app.view.workspace_card_areas[0];
+        // A folder member that is not a worktree child keeps its own name and
+        // git details; it is only indented under the folder header.
+        assert!(card.in_folder);
+        assert!(!card.indented);
+
+        let list_area =
+            workspace_list_rect(area, app.sidebar_section_split, app.agents_section_visible);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        let runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        terminal
+            .draw(|frame| render_workspace_list(&app, &runtimes, frame, list_area, false))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let mut rendered = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                rendered.push_str(buffer[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+        assert!(
+            rendered.contains("myproject"),
+            "folder member should render its workspace name:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("some-branch"),
+            "folder member should still show its git branch token:\n{rendered}"
+        );
+    }
+
+    #[test]
     fn workspace_list_truncates_cjk_branch_without_panic() {
         let mut app = crate::app::state::AppState::test_new();
         let mut ws = Workspace::test_new("repo");
@@ -2822,6 +2898,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             ws_idx: 0,
             rect: Rect::new(0, 1, 15, 2),
             indented: false,
+            in_folder: false,
         }];
 
         let mut terminal = Terminal::new(TestBackend::new(15, 6)).expect("test terminal");
@@ -3068,11 +3145,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             vec![
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
-                    indented: false
+                    indented: false,
+                    in_folder: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
-                    indented: false
+                    indented: false,
+                    in_folder: false,
                 },
             ]
         );
@@ -3154,10 +3233,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
                     indented: false,
+                    in_folder: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
                     indented: true,
+                    in_folder: false,
                 },
             ]
         );
@@ -3178,14 +3259,17 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
                     indented: false,
+                    in_folder: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 2,
                     indented: true,
+                    in_folder: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
                     indented: false,
+                    in_folder: false,
                 },
             ]
         );
@@ -3205,10 +3289,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
                     indented: false,
+                    in_folder: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
                     indented: false,
+                    in_folder: false,
                 },
             ]
         );
@@ -3229,14 +3315,17 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
                     indented: false,
+                    in_folder: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 2,
                     indented: true,
+                    in_folder: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
                     indented: false,
+                    in_folder: false,
                 },
             ]
         );
@@ -3256,10 +3345,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
                     indented: false,
+                    in_folder: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
                     indented: false,
+                    in_folder: false,
                 },
             ]
         );
@@ -3282,10 +3373,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
                     indented: false,
+                    in_folder: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
                     indented: true,
+                    in_folder: false,
                 },
             ]
         );
@@ -3297,6 +3390,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             vec![WorkspaceListEntry::Workspace {
                 ws_idx: 0,
                 indented: false,
+                in_folder: false,
             }]
         );
     }
@@ -3319,10 +3413,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
                     indented: false,
+                    in_folder: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
                     indented: true,
+                    in_folder: false,
                 },
             ]
         );
