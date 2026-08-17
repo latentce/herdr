@@ -149,7 +149,10 @@ pub struct App {
     /// Parsed `ui.window_title` plus the hostname resolved when it was applied.
     window_title_template: Option<(crate::config::WindowTitleTemplate, String)>,
     pub(crate) persist_pane_history: bool,
+    /// Last render-loop attempt, including a throttled hidden-only PTY skip.
     pub(crate) last_render_at: Option<Instant>,
+    /// Last attempt that could update a connected presentation surface.
+    pub(crate) last_presentation_at: Option<Instant>,
     pub(crate) input_leases: input::InputLeaseTable,
     pub render_notify: Arc<Notify>,
     pub(crate) render_dirty: Arc<crate::render_signal::RenderSignal>,
@@ -783,6 +786,7 @@ impl App {
             selection_highlight_clear_deadline: None,
             persist_pane_history: config.experimental.pane_history,
             last_render_at: None,
+            last_presentation_at: None,
             input_leases: input::InputLeaseTable::default(),
             api_rx,
             event_hub,
@@ -1133,7 +1137,7 @@ impl App {
                     self.render_dirty.request_generic();
                     self.render_notify.notify_one();
                 }
-                self.last_render_at = Some(now);
+                self.record_render_attempt(now, true);
                 needs_render = false;
                 continue;
             }
