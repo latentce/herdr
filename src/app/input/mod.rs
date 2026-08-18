@@ -895,6 +895,7 @@ fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
         state.collapsed_space_keys.clone(),
         &state.workspace_groups,
         state.collapsed_group_ids.clone(),
+        state.collapsed_agent_space_ids.clone(),
     )
 }
 

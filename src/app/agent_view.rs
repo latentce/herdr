@@ -61,19 +61,26 @@ pub(crate) fn apply_agent_view(app: &AppState, entries: &mut Vec<AgentPanelEntry
         }
     }
 
-    if matches!(
-        app.agent_panel_sort,
-        crate::app::state::AgentPanelSort::Priority
-    ) {
-        entries.sort_by_key(|entry| {
-            (
-                std::cmp::Reverse(super::api_helpers::tab_attention_priority(
-                    entry.state,
-                    entry.seen,
-                )),
-                std::cmp::Reverse(entry.last_agent_state_change_seq),
-            )
-        });
+    match app.agent_panel_sort {
+        crate::app::state::AgentPanelSort::Spaces => {}
+        crate::app::state::AgentPanelSort::Priority => {
+            entries.sort_by_key(|entry| {
+                (
+                    std::cmp::Reverse(super::api_helpers::tab_attention_priority(
+                        entry.state,
+                        entry.seen,
+                    )),
+                    std::cmp::Reverse(entry.last_agent_state_change_seq),
+                )
+            });
+        }
+        crate::app::state::AgentPanelSort::Folder => {
+            // Order agents by their workspace's position in the spaces panel
+            // (folders first-member order, then worktree grouping). Stable, so
+            // pane order within a workspace is preserved.
+            let ranks = crate::ui::folder_ordered_workspace_ranks(app);
+            entries.sort_by_key(|entry| ranks.get(&entry.ws_idx).copied().unwrap_or(usize::MAX));
+        }
     }
 }
 

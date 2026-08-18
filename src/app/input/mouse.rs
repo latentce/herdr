@@ -629,7 +629,8 @@ impl AppState {
                     if self.on_agent_panel_sort_toggle(mouse.column, mouse.row) {
                         self.agent_panel_sort = match self.agent_panel_sort {
                             AgentPanelSort::Spaces => AgentPanelSort::Priority,
-                            AgentPanelSort::Priority => AgentPanelSort::Spaces,
+                            AgentPanelSort::Priority => AgentPanelSort::Folder,
+                            AgentPanelSort::Folder => AgentPanelSort::Spaces,
                         };
                         self.agent_panel_scroll = 0;
                         self.mark_session_dirty();
@@ -652,11 +653,27 @@ impl AppState {
                         return None;
                     }
 
-                    if let Some((ws_idx, _tab_idx, pane_id)) =
-                        self.agent_detail_target_at(mouse.row)
-                    {
-                        self.mode = Mode::Terminal;
-                        return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                    if let Some(target) = self.agent_detail_target_at(mouse.row) {
+                        match target {
+                            crate::ui::AgentPanelClickTarget::Pane {
+                                ws_idx,
+                                tab_idx: _,
+                                pane_id,
+                            } => {
+                                self.mode = Mode::Terminal;
+                                return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                            }
+                            crate::ui::AgentPanelClickTarget::GroupHeader { group_id } => {
+                                // Shared with the spaces panel: collapsing here
+                                // collapses the folder there too.
+                                self.toggle_workspace_group_collapsed(&group_id);
+                                return None;
+                            }
+                            crate::ui::AgentPanelClickTarget::SpaceHeader { workspace_id } => {
+                                self.toggle_agent_space_collapsed(&workspace_id);
+                                return None;
+                            }
+                        }
                     }
                 } else if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
                     if self.mode != Mode::Terminal {

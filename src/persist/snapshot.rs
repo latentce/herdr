@@ -30,6 +30,8 @@ pub struct SessionSnapshot {
     pub workspace_groups: Vec<WorkspaceGroupSnapshot>,
     #[serde(default)]
     pub collapsed_group_ids: std::collections::HashSet<String>,
+    #[serde(default)]
+    pub collapsed_agent_space_ids: std::collections::HashSet<String>,
 }
 
 /// Serializable user folder definition.
@@ -202,6 +204,8 @@ struct RawSessionSnapshot {
     workspace_groups: Vec<WorkspaceGroupSnapshot>,
     #[serde(default)]
     collapsed_group_ids: std::collections::HashSet<String>,
+    #[serde(default)]
+    collapsed_agent_space_ids: std::collections::HashSet<String>,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
@@ -215,6 +219,15 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
     // worktree-atomic invariant) in case the snapshot was hand-edited.
     let (workspaces, workspace_groups, collapsed_group_ids) =
         normalize_workspace_groups(workspaces, raw.workspace_groups, raw.collapsed_group_ids);
+    // Drop agents-panel space collapse state for workspaces that no longer
+    // exist in the snapshot.
+    let known_workspace_ids: std::collections::HashSet<&String> =
+        workspaces.iter().filter_map(|ws| ws.id.as_ref()).collect();
+    let collapsed_agent_space_ids = raw
+        .collapsed_agent_space_ids
+        .into_iter()
+        .filter(|id| known_workspace_ids.contains(id))
+        .collect();
     Ok(SessionSnapshot {
         version: raw.version,
         workspaces,
@@ -225,6 +238,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         collapsed_space_keys: raw.collapsed_space_keys,
         workspace_groups,
         collapsed_group_ids,
+        collapsed_agent_space_ids,
     })
 }
 
@@ -337,6 +351,7 @@ pub fn capture(
     collapsed_space_keys: std::collections::HashSet<String>,
     workspace_groups: &[crate::workspace::WorkspaceGroup],
     collapsed_group_ids: std::collections::HashSet<String>,
+    collapsed_agent_space_ids: std::collections::HashSet<String>,
 ) -> SessionSnapshot {
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
@@ -357,6 +372,7 @@ pub fn capture(
             })
             .collect(),
         collapsed_group_ids,
+        collapsed_agent_space_ids,
     }
 }
 
@@ -628,6 +644,7 @@ mod tests {
             state.collapsed_space_keys.clone(),
             &state.workspace_groups,
             state.collapsed_group_ids.clone(),
+            state.collapsed_agent_space_ids.clone(),
         )
     }
 
@@ -694,6 +711,7 @@ mod tests {
             collapsed_space_keys: std::collections::HashSet::new(),
             workspace_groups: Vec::new(),
             collapsed_group_ids: std::collections::HashSet::new(),
+            collapsed_agent_space_ids: std::collections::HashSet::new(),
         };
         let json = serde_json::to_string(&snap).unwrap();
         let restored = parse_snapshot(&json).unwrap();
@@ -784,6 +802,7 @@ mod tests {
             collapsed_space_keys: std::collections::HashSet::new(),
             workspace_groups: Vec::new(),
             collapsed_group_ids: std::collections::HashSet::new(),
+            collapsed_agent_space_ids: std::collections::HashSet::new(),
             version: SNAPSHOT_VERSION,
         };
 
@@ -945,6 +964,23 @@ mod tests {
         assert_eq!(parsed.workspaces[0].group_id.as_deref(), Some(gid.as_str()));
         assert!(parsed.workspaces[1].group_id.is_none());
         assert!(parsed.collapsed_group_ids.contains(&gid));
+    }
+
+    #[test]
+    fn agent_space_collapse_round_trips_and_prunes_unknown_ids() {
+        let mut state = state_with_workspaces(&["one", "two"]);
+        let ws_id = state.workspaces[0].id.clone();
+        state.collapsed_agent_space_ids.insert(ws_id.clone());
+        state.collapsed_agent_space_ids.insert("wGONE".to_string());
+
+        let snapshot = capture_from_state(&state);
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let parsed = parse_snapshot(&json).expect("parse snapshot");
+
+        assert!(parsed.collapsed_agent_space_ids.contains(&ws_id));
+        // Ids for workspaces no longer in the snapshot are dropped on load.
+        assert!(!parsed.collapsed_agent_space_ids.contains("wGONE"));
+        assert_eq!(parsed.collapsed_agent_space_ids.len(), 1);
     }
 
     #[test]
@@ -1404,6 +1440,7 @@ mod tests {
             collapsed_space_keys: std::collections::HashSet::new(),
             workspace_groups: Vec::new(),
             collapsed_group_ids: std::collections::HashSet::new(),
+            collapsed_agent_space_ids: std::collections::HashSet::new(),
         };
 
         let json = serde_json::to_string(&snap).unwrap();

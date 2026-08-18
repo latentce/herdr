@@ -1059,6 +1059,7 @@ pub enum AgentPanelSort {
     #[default]
     Spaces,
     Priority,
+    Folder,
 }
 
 // ---------------------------------------------------------------------------
@@ -1491,6 +1492,9 @@ pub struct AppState {
     pub workspace_groups: Vec<crate::workspace::WorkspaceGroup>,
     /// Folder ids currently collapsed in the sidebar.
     pub collapsed_group_ids: std::collections::HashSet<String>,
+    /// Workspace ids whose agents are hidden under their space folder in the
+    /// agents panel's "folder" mode. Keyed by stable `Workspace::id`.
+    pub collapsed_agent_space_ids: std::collections::HashSet<String>,
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
@@ -1863,6 +1867,7 @@ impl AppState {
             collapsed_space_keys: std::collections::HashSet::new(),
             workspace_groups: Vec::new(),
             collapsed_group_ids: std::collections::HashSet::new(),
+            collapsed_agent_space_ids: std::collections::HashSet::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,

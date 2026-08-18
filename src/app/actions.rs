@@ -1554,6 +1554,18 @@ impl AppState {
         self.mark_session_dirty();
     }
 
+    /// Toggle a space folder's collapsed state in the agents panel's "folder"
+    /// mode. Keyed by the stable workspace id.
+    pub fn toggle_agent_space_collapsed(&mut self, workspace_id: &str) {
+        if self.collapsed_agent_space_ids.contains(workspace_id) {
+            self.collapsed_agent_space_ids.remove(workspace_id);
+        } else {
+            self.collapsed_agent_space_ids
+                .insert(workspace_id.to_string());
+        }
+        self.mark_session_dirty();
+    }
+
     pub fn scroll_tabs_left(&mut self) {
         self.tab_scroll_follow_active = false;
         self.tab_scroll = self.tab_scroll.saturating_sub(1);

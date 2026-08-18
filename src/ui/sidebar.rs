@@ -39,6 +39,137 @@ pub(crate) struct AgentPanelEntry {
     pub tokens: std::collections::HashMap<String, String>,
 }
 
+/// A renderable row in the agents panel. In "folder" mode the panel mirrors
+/// the spaces panel: custom folder headers, a sub-folder per space, and each
+/// space's agent entries indented beneath it. In other modes the list is a
+/// flat sequence of `Agent` rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentPanelListEntry {
+    /// A custom folder (workspace group) header row, shared with the spaces
+    /// panel: collapse state mirrors `collapsed_group_ids` in both panels.
+    GroupHeader { group_id: String, collapsed: bool },
+    /// A per-space folder header row, agents-panel only.
+    SpaceHeader {
+        ws_idx: usize,
+        in_folder: bool,
+        collapsed: bool,
+    },
+    /// An agent row; `entry_idx` indexes into the flat entry list.
+    Agent { entry_idx: usize, indent: u16 },
+}
+
+/// What a click in the agents panel body landed on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentPanelClickTarget {
+    Pane {
+        ws_idx: usize,
+        tab_idx: usize,
+        pane_id: crate::layout::PaneId,
+    },
+    GroupHeader {
+        group_id: String,
+    },
+    SpaceHeader {
+        workspace_id: String,
+    },
+}
+
+/// Layer folder/space headers over the flat agent entries. Outside "folder"
+/// mode (or while an API agent view override is active) the list stays flat.
+pub(crate) fn agent_panel_list_entries(
+    app: &AppState,
+    entries: &[AgentPanelEntry],
+) -> Vec<AgentPanelListEntry> {
+    if !matches!(app.agent_panel_sort, AgentPanelSort::Folder) || app.agent_view_override.is_some()
+    {
+        return (0..entries.len())
+            .map(|entry_idx| AgentPanelListEntry::Agent {
+                entry_idx,
+                indent: 0,
+            })
+            .collect();
+    }
+
+    let mut entry_idxs_by_ws = std::collections::HashMap::<usize, Vec<usize>>::new();
+    for (entry_idx, entry) in entries.iter().enumerate() {
+        entry_idxs_by_ws
+            .entry(entry.ws_idx)
+            .or_default()
+            .push(entry_idx);
+    }
+    let group_has_agents = |group_id: &str| {
+        app.workspaces.iter().enumerate().any(|(ws_idx, ws)| {
+            ws.group_id.as_deref() == Some(group_id) && entry_idxs_by_ws.contains_key(&ws_idx)
+        })
+    };
+
+    let mut result = Vec::new();
+    // Walk the fully expanded spaces-panel order (folder + worktree grouping),
+    // then apply the agents panel's own collapse rules: folder collapse is
+    // shared with the spaces panel, space collapse is agents-panel only.
+    for ws_entry in workspace_list_entries_inner(app, true) {
+        match ws_entry {
+            WorkspaceListEntry::GroupHeader { group_id, .. } => {
+                if group_has_agents(&group_id) {
+                    let collapsed = app.collapsed_group_ids.contains(&group_id);
+                    result.push(AgentPanelListEntry::GroupHeader {
+                        group_id,
+                        collapsed,
+                    });
+                }
+            }
+            WorkspaceListEntry::Workspace {
+                ws_idx, in_folder, ..
+            } => {
+                let Some(agent_idxs) = entry_idxs_by_ws.get(&ws_idx) else {
+                    continue;
+                };
+                let Some(ws) = app.workspaces.get(ws_idx) else {
+                    continue;
+                };
+                if in_folder
+                    && ws
+                        .group_id
+                        .as_ref()
+                        .is_some_and(|gid| app.collapsed_group_ids.contains(gid))
+                {
+                    continue;
+                }
+                let collapsed = app.collapsed_agent_space_ids.contains(&ws.id);
+                result.push(AgentPanelListEntry::SpaceHeader {
+                    ws_idx,
+                    in_folder,
+                    collapsed,
+                });
+                if collapsed {
+                    continue;
+                }
+                let indent = if in_folder { 4 } else { 2 };
+                for &entry_idx in agent_idxs {
+                    result.push(AgentPanelListEntry::Agent { entry_idx, indent });
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Rank of each workspace in the fully expanded spaces-panel order (folders
+/// then worktree grouping). Used to order flat agent entries in "folder" mode.
+pub(crate) fn folder_ordered_workspace_ranks(
+    app: &AppState,
+) -> std::collections::HashMap<usize, usize> {
+    workspace_list_entries_inner(app, true)
+        .into_iter()
+        .filter_map(|entry| match entry {
+            WorkspaceListEntry::Workspace { ws_idx, .. } => Some(ws_idx),
+            WorkspaceListEntry::GroupHeader { .. } => None,
+        })
+        .enumerate()
+        .map(|(rank, ws_idx)| (ws_idx, rank))
+        .collect()
+}
+
 fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
     if total_h == 0 {
         return (0, 0);
@@ -96,6 +227,7 @@ fn agent_panel_sort_label(sort: AgentPanelSort) -> &'static str {
     match sort {
         AgentPanelSort::Spaces => "grouped",
         AgentPanelSort::Priority => "priority",
+        AgentPanelSort::Folder => "folder",
     }
 }
 
@@ -676,6 +808,23 @@ pub(crate) fn agent_entry_gap(app: &AppState, entry_idx: usize, entry_count: usi
     }
 }
 
+pub(crate) fn agent_list_entry_height_in_body(
+    app: &AppState,
+    entries: &[AgentPanelEntry],
+    item: &AgentPanelListEntry,
+    body_height: u16,
+) -> u16 {
+    match item {
+        AgentPanelListEntry::GroupHeader { .. } | AgentPanelListEntry::SpaceHeader { .. } => {
+            1.min(body_height)
+        }
+        AgentPanelListEntry::Agent { entry_idx, .. } => entries
+            .get(*entry_idx)
+            .map(|entry| agent_entry_height_in_body(app, entry, body_height))
+            .unwrap_or_else(|| 1.min(body_height)),
+    }
+}
+
 fn agent_panel_visible_count_from(app: &AppState, area: Rect, scroll: usize) -> usize {
     let body = agent_panel_body_rect(area, false);
     if body.width == 0 || body.height == 0 {
@@ -685,15 +834,16 @@ fn agent_panel_visible_count_from(app: &AppState, area: Rect, scroll: usize) -> 
     let mut used_rows = 0u16;
     let mut visible = 0usize;
     let entries = agent_panel_entries(app);
-    for (index, entry) in entries.iter().enumerate().skip(scroll) {
-        let height = agent_entry_height_in_body(app, entry, body.height);
+    let list = agent_panel_list_entries(app, &entries);
+    for (index, item) in list.iter().enumerate().skip(scroll) {
+        let height = agent_list_entry_height_in_body(app, &entries, item, body.height);
         if used_rows.saturating_add(height) > body.height {
             break;
         }
         used_rows = used_rows.saturating_add(height);
         visible += 1;
         used_rows = used_rows
-            .saturating_add(agent_entry_gap(app, index, entries.len()))
+            .saturating_add(agent_entry_gap(app, index, list.len()))
             .min(body.height);
     }
     visible
@@ -702,18 +852,20 @@ fn agent_panel_visible_count_from(app: &AppState, area: Rect, scroll: usize) -> 
 fn agent_panel_bottom_start(app: &AppState, area: Rect) -> usize {
     let body = agent_panel_body_rect(area, false);
     let entries = agent_panel_entries(app);
+    let list = agent_panel_list_entries(app, &entries);
     let mut used_rows = 0u16;
-    let mut start = entries.len();
-    for (index, entry) in entries.iter().enumerate().rev() {
-        let gap = agent_entry_gap(app, index, entries.len());
-        let needed = agent_entry_height_in_body(app, entry, body.height).saturating_add(gap);
+    let mut start = list.len();
+    for (index, item) in list.iter().enumerate().rev() {
+        let gap = agent_entry_gap(app, index, list.len());
+        let needed =
+            agent_list_entry_height_in_body(app, &entries, item, body.height).saturating_add(gap);
         if used_rows.saturating_add(needed) > body.height {
             break;
         }
         used_rows = used_rows.saturating_add(needed);
         start = index;
     }
-    start.min(entries.len().saturating_sub(1))
+    start.min(list.len().saturating_sub(1))
 }
 
 pub(crate) fn agent_panel_scroll_for_target(
@@ -722,6 +874,14 @@ pub(crate) fn agent_panel_scroll_for_target(
     current_scroll: usize,
     target: usize,
 ) -> usize {
+    // `target` indexes the flat entry list; map it to its list-entry position
+    // (identical outside "folder" mode).
+    let entries = agent_panel_entries(app);
+    let list = agent_panel_list_entries(app, &entries);
+    let target = list
+        .iter()
+        .position(|item| matches!(item, AgentPanelListEntry::Agent { entry_idx, .. } if *entry_idx == target))
+        .unwrap_or(target);
     let max_scroll = agent_panel_bottom_start(app, area);
     if target < current_scroll {
         return target.min(max_scroll);
@@ -1683,56 +1843,113 @@ fn render_agent_detail(
     }
 
     let scroll = app.agent_panel_scroll.min(metrics.max_offset_from_bottom);
+    let list = agent_panel_list_entries(app, &details);
     let mut row_y = body.y;
     let body_bottom = body.y + body.height;
-    for (index, detail) in details.iter().enumerate().skip(scroll) {
-        let label_color = state_label_color(detail.state, detail.seen, p);
-        let rows = resolved_agent_rows(app, detail);
-        let height = (rows.len().max(1) as u16).min(body.height);
+    for (index, item) in list.iter().enumerate().skip(scroll) {
+        let height = agent_list_entry_height_in_body(app, &details, item, body.height);
         if row_y.saturating_add(height) > body_bottom {
             break;
         }
 
-        let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
-        let row_style = if is_active {
-            Style::default().bg(p.active_row_bg)
-        } else {
-            Style::default()
-        };
-        let name_style = if is_active {
-            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
-        };
-        let status_style = if is_active {
-            Style::default().fg(label_color)
-        } else {
-            Style::default().fg(label_color).add_modifier(Modifier::DIM)
-        };
-        let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
-        let state_icon = state_icon(detail.state, detail.seen, app.status_indicators, p);
+        match item {
+            AgentPanelListEntry::GroupHeader {
+                group_id,
+                collapsed,
+            } => {
+                let name = app
+                    .workspace_groups
+                    .iter()
+                    .find(|group| &group.id == group_id)
+                    .map(|group| group.name.as_str())
+                    .unwrap_or("");
+                let chevron = if *collapsed { "▸" } else { "▾" };
+                let budget = body.width.saturating_sub(3) as usize;
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(format!(" {chevron} "), Style::default().fg(p.accent)),
+                        Span::styled(
+                            truncate_end(name, budget),
+                            Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+                        ),
+                    ])),
+                    Rect::new(body.x, row_y, body.width, 1),
+                );
+            }
+            AgentPanelListEntry::SpaceHeader {
+                ws_idx,
+                in_folder,
+                collapsed,
+            } => {
+                let Some(ws) = app.workspaces.get(*ws_idx) else {
+                    continue;
+                };
+                let name = ws.display_name_from(&app.terminals, terminal_runtimes);
+                let chevron = if *collapsed { "▸" } else { "▾" };
+                let prefix = if *in_folder { "   " } else { " " };
+                let budget = body.width.saturating_sub(prefix.len() as u16 + 2) as usize;
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::raw(prefix),
+                        Span::styled(format!("{chevron} "), Style::default().fg(p.accent)),
+                        Span::styled(
+                            truncate_end(&name, budget),
+                            Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD),
+                        ),
+                    ])),
+                    Rect::new(body.x, row_y, body.width, 1),
+                );
+            }
+            AgentPanelListEntry::Agent { entry_idx, indent } => {
+                let Some(detail) = details.get(*entry_idx) else {
+                    continue;
+                };
+                let label_color = state_label_color(detail.state, detail.seen, p);
+                let rows = resolved_agent_rows(app, detail);
 
-        for (row_index, resolved) in rows.iter().take(height as usize).enumerate() {
-            let mut spans = vec![Span::raw(if row_index == 0 { " " } else { "   " })];
-            spans.extend(resolved_token_spans(
-                resolved,
-                state_icon,
-                status_style,
-                name_style,
-                agent_style,
-                agent_style,
-                p,
-                body.width
-                    .saturating_sub(if row_index == 0 { 1 } else { 3 }) as usize,
-            ));
-            frame.render_widget(
-                Paragraph::new(Line::from(spans)).style(row_style),
-                Rect::new(body.x, row_y + row_index as u16, body.width, 1),
-            );
+                let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
+                let row_style = if is_active {
+                    Style::default().bg(p.active_row_bg)
+                } else {
+                    Style::default()
+                };
+                let name_style = if is_active {
+                    Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
+                };
+                let status_style = if is_active {
+                    Style::default().fg(label_color)
+                } else {
+                    Style::default().fg(label_color).add_modifier(Modifier::DIM)
+                };
+                let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
+                let state_icon = state_icon(detail.state, detail.seen, app.status_indicators, p);
+
+                for (row_index, resolved) in rows.iter().take(height as usize).enumerate() {
+                    let base_prefix: u16 = if row_index == 0 { 1 } else { 3 };
+                    let prefix_width = base_prefix.saturating_add(*indent);
+                    let mut spans = vec![Span::raw(" ".repeat(prefix_width as usize))];
+                    spans.extend(resolved_token_spans(
+                        resolved,
+                        state_icon,
+                        status_style,
+                        name_style,
+                        agent_style,
+                        agent_style,
+                        p,
+                        body.width.saturating_sub(prefix_width) as usize,
+                    ));
+                    frame.render_widget(
+                        Paragraph::new(Line::from(spans)).style(row_style),
+                        Rect::new(body.x, row_y + row_index as u16, body.width, 1),
+                    );
+                }
+            }
         }
         row_y = row_y
             .saturating_add(height)
-            .saturating_add(agent_entry_gap(app, index, details.len()))
+            .saturating_add(agent_entry_gap(app, index, list.len()))
             .min(body_bottom);
     }
 
@@ -2444,6 +2661,203 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .collect();
 
         assert_eq!(labels, ["four", "two", "one", "three"]);
+    }
+
+    fn attach_agent(app: &mut crate::app::state::AppState, ws_idx: usize) {
+        let pane = app.workspaces[ws_idx].tabs[0].root_pane;
+        let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Claude);
+    }
+
+    #[test]
+    fn folder_sort_builds_two_level_headers_mirroring_spaces_panel() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("alpha"),
+            Workspace::test_new("beta"),
+            Workspace::test_new("gamma"),
+        ];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Folder;
+        attach_agent(&mut app, 0);
+        attach_agent(&mut app, 1);
+        attach_agent(&mut app, 2);
+
+        let gid = app.create_workspace_group("Work".to_string());
+        assert!(app.assign_workspace_to_group(0, Some(gid.clone())));
+        // A folder whose members have no agents is skipped entirely.
+        let empty_gid = app.create_workspace_group("Empty".to_string());
+
+        let entries = agent_panel_entries(&app);
+        let list = agent_panel_list_entries(&app, &entries);
+        assert_eq!(
+            list,
+            vec![
+                AgentPanelListEntry::GroupHeader {
+                    group_id: gid.clone(),
+                    collapsed: false,
+                },
+                AgentPanelListEntry::SpaceHeader {
+                    ws_idx: 0,
+                    in_folder: true,
+                    collapsed: false,
+                },
+                AgentPanelListEntry::Agent {
+                    entry_idx: 0,
+                    indent: 4,
+                },
+                AgentPanelListEntry::SpaceHeader {
+                    ws_idx: 1,
+                    in_folder: false,
+                    collapsed: false,
+                },
+                AgentPanelListEntry::Agent {
+                    entry_idx: 1,
+                    indent: 2,
+                },
+                AgentPanelListEntry::SpaceHeader {
+                    ws_idx: 2,
+                    in_folder: false,
+                    collapsed: false,
+                },
+                AgentPanelListEntry::Agent {
+                    entry_idx: 2,
+                    indent: 2,
+                },
+            ]
+        );
+        assert!(!list.iter().any(|item| matches!(
+            item,
+            AgentPanelListEntry::GroupHeader { group_id, .. } if group_id == &empty_gid
+        )));
+    }
+
+    #[test]
+    fn folder_sort_collapse_hides_folder_members_and_space_agents() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("alpha"), Workspace::test_new("beta")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Folder;
+        attach_agent(&mut app, 0);
+        attach_agent(&mut app, 1);
+        let gid = app.create_workspace_group("Work".to_string());
+        assert!(app.assign_workspace_to_group(0, Some(gid.clone())));
+
+        // Folder collapse is shared with the spaces panel and hides the
+        // member space header and its agents.
+        app.collapsed_group_ids.insert(gid.clone());
+        let entries = agent_panel_entries(&app);
+        let list = agent_panel_list_entries(&app, &entries);
+        assert!(matches!(
+            &list[0],
+            AgentPanelListEntry::GroupHeader { group_id, collapsed: true } if group_id == &gid
+        ));
+        assert!(!list
+            .iter()
+            .any(|item| matches!(item, AgentPanelListEntry::SpaceHeader { ws_idx: 0, .. })));
+        assert!(!list.iter().any(
+            |item| matches!(item, AgentPanelListEntry::Agent { entry_idx, .. } if entries[*entry_idx].ws_idx == 0)
+        ));
+        app.collapsed_group_ids.remove(&gid);
+
+        // Space collapse is agents-panel only, keyed by stable workspace id.
+        let beta_id = app.workspaces[1].id.clone();
+        app.collapsed_agent_space_ids.insert(beta_id);
+        let entries = agent_panel_entries(&app);
+        let list = agent_panel_list_entries(&app, &entries);
+        assert!(list.iter().any(|item| matches!(
+            item,
+            AgentPanelListEntry::SpaceHeader {
+                ws_idx: 1,
+                collapsed: true,
+                ..
+            }
+        )));
+        assert!(!list.iter().any(
+            |item| matches!(item, AgentPanelListEntry::Agent { entry_idx, .. } if entries[*entry_idx].ws_idx == 1)
+        ));
+    }
+
+    #[test]
+    fn folder_sort_orders_flat_entries_like_the_spaces_panel() {
+        // Raw workspace order: [linked worktree child, loose, worktree main].
+        // The spaces panel groups the worktree pair (main first), so folder
+        // mode must order agents main, child, loose.
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![
+            workspace_with_worktree_space("child", Some("k1"), "/wt/child"),
+            workspace_with_worktree_space("loose", None, "/wt/loose"),
+            workspace_with_worktree_space("main", Some("k1"), "/wt/main"),
+        ];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Folder;
+        attach_agent(&mut app, 0);
+        attach_agent(&mut app, 1);
+        attach_agent(&mut app, 2);
+
+        let order: Vec<usize> = agent_panel_entries(&app)
+            .into_iter()
+            .map(|entry| entry.ws_idx)
+            .collect();
+        assert_eq!(order, [2, 0, 1]);
+    }
+
+    #[test]
+    fn folder_sort_renders_headers_and_indented_agent_rows() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("alpha"), Workspace::test_new("beta")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Folder;
+        attach_agent(&mut app, 0);
+        attach_agent(&mut app, 1);
+        let gid = app.create_workspace_group("Work".to_string());
+        assert!(app.assign_workspace_to_group(0, Some(gid)));
+
+        let area = Rect::new(0, 0, 30, 14);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        let runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        terminal
+            .draw(|frame| render_agent_detail(&app, &runtimes, frame, area))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let mut lines = Vec::new();
+        for y in 0..area.height {
+            let mut line = String::new();
+            for x in 0..area.width {
+                line.push_str(buffer[(x, y)].symbol());
+            }
+            lines.push(line);
+        }
+        let rendered = lines.join("\n");
+        assert!(
+            rendered.contains(" ▾ Work"),
+            "folder header should render:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("   ▾ alpha"),
+            "in-folder space header should render indented:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(" ▾ beta"),
+            "loose space header should render:\n{rendered}"
+        );
+        let alpha_header = lines.iter().position(|l| l.contains("▾ alpha")).unwrap();
+        let agent_row = &lines[alpha_header + 1];
+        assert!(
+            agent_row.starts_with("     "),
+            "agent row under an in-folder space should be indented: {agent_row:?}"
+        );
+        assert!(
+            agent_row.contains("alpha"),
+            "agent row keeps its usual content: {agent_row:?}"
+        );
     }
 
     #[test]

@@ -552,7 +552,7 @@ impl AppState {
     pub(super) fn agent_detail_target_at(
         &self,
         row: u16,
-    ) -> Option<(usize, usize, crate::layout::PaneId)> {
+    ) -> Option<crate::ui::AgentPanelClickTarget> {
         if self.sidebar_collapsed {
             return None;
         }
@@ -570,18 +570,39 @@ impl AppState {
         let mut row_y = body.y;
         let body_bottom = body.y + body.height;
         let entries = crate::ui::agent_panel_entries(self);
+        let list = crate::ui::agent_panel_list_entries(self, &entries);
         let scroll = self.agent_panel_scroll.min(metrics.max_offset_from_bottom);
-        for (index, detail) in entries.iter().enumerate().skip(scroll) {
-            let height = crate::ui::agent_entry_height_in_body(self, detail, body.height);
+        for (index, item) in list.iter().enumerate().skip(scroll) {
+            let height =
+                crate::ui::agent_list_entry_height_in_body(self, &entries, item, body.height);
             if row_y.saturating_add(height) > body_bottom {
                 break;
             }
             if row >= row_y && row < row_y.saturating_add(height) {
-                return Some((detail.ws_idx, detail.tab_idx, detail.pane_id));
+                return match item {
+                    crate::ui::AgentPanelListEntry::GroupHeader { group_id, .. } => {
+                        Some(crate::ui::AgentPanelClickTarget::GroupHeader {
+                            group_id: group_id.clone(),
+                        })
+                    }
+                    crate::ui::AgentPanelListEntry::SpaceHeader { ws_idx, .. } => self
+                        .workspaces
+                        .get(*ws_idx)
+                        .map(|ws| crate::ui::AgentPanelClickTarget::SpaceHeader {
+                            workspace_id: ws.id.clone(),
+                        }),
+                    crate::ui::AgentPanelListEntry::Agent { entry_idx, .. } => entries
+                        .get(*entry_idx)
+                        .map(|detail| crate::ui::AgentPanelClickTarget::Pane {
+                            ws_idx: detail.ws_idx,
+                            tab_idx: detail.tab_idx,
+                            pane_id: detail.pane_id,
+                        }),
+                };
             }
             row_y = row_y
                 .saturating_add(height)
-                .saturating_add(crate::ui::agent_entry_gap(self, index, entries.len()))
+                .saturating_add(crate::ui::agent_entry_gap(self, index, list.len()))
                 .min(body_bottom);
         }
         None
@@ -902,18 +923,30 @@ mod tests {
 
         assert_eq!(
             app.state.agent_detail_target_at(body.y),
-            Some((0, 0, first_pane))
+            Some(crate::ui::AgentPanelClickTarget::Pane {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: first_pane
+            })
         );
         assert_eq!(app.state.agent_detail_target_at(body.y + 1), None);
         assert_eq!(
             app.state.agent_detail_target_at(body.y + 3),
-            Some((1, 0, second_pane))
+            Some(crate::ui::AgentPanelClickTarget::Pane {
+                ws_idx: 1,
+                tab_idx: 0,
+                pane_id: second_pane
+            })
         );
 
         app.state.sidebar_agents.row_gap = 0;
         assert_eq!(
             app.state.agent_detail_target_at(body.y + 1),
-            Some((1, 0, second_pane))
+            Some(crate::ui::AgentPanelClickTarget::Pane {
+                ws_idx: 1,
+                tab_idx: 0,
+                pane_id: second_pane
+            })
         );
     }
 
@@ -957,7 +990,11 @@ mod tests {
 
         assert_eq!(
             app.state.agent_detail_target_at(body.y),
-            Some((0, 0, first_pane))
+            Some(crate::ui::AgentPanelClickTarget::Pane {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: first_pane
+            })
         );
     }
 
@@ -984,6 +1021,23 @@ mod tests {
 
         assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Priority);
         assert_eq!(app.state.agent_panel_scroll, 0);
+
+        // The label cycles priority -> folder -> spaces.
+        let toggle = crate::ui::agent_panel_toggle_rect(detail_area, app.state.agent_panel_sort);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+        assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Folder);
+
+        let toggle = crate::ui::agent_panel_toggle_rect(detail_area, app.state.agent_panel_sort);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+        assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Spaces);
     }
 
     #[test]
@@ -1035,6 +1089,91 @@ mod tests {
             app.state.workspaces[1].tabs[0].layout.focused(),
             second_pane
         );
+    }
+
+    #[test]
+    fn clicking_agent_folder_headers_toggles_collapse() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        for ws_idx in 0..2 {
+            let pane = app.state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[ws_idx].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .detected_agent = Some(Agent::Claude);
+        }
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.agent_panel_sort = AgentPanelSort::Folder;
+        app.state.sidebar_agents.row_gap = 0;
+        let gid = app.state.create_workspace_group("Work".to_string());
+        assert!(app.state.assign_workspace_to_group(0, Some(gid.clone())));
+
+        let detail_area = app.state.agent_panel_rect();
+        let metrics = crate::ui::agent_panel_scroll_metrics(&app.state, detail_area);
+        let body = crate::ui::agent_panel_body_rect(
+            detail_area,
+            crate::ui::should_show_scrollbar(metrics),
+        );
+
+        // Row 0: folder header. Clicking collapses the folder, shared with
+        // the spaces panel.
+        assert_eq!(
+            app.state.agent_detail_target_at(body.y),
+            Some(crate::ui::AgentPanelClickTarget::GroupHeader {
+                group_id: gid.clone()
+            })
+        );
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x,
+            body.y,
+        ));
+        assert!(app.state.collapsed_group_ids.contains(&gid));
+        // Clicking a header must not change the focused pane.
+        assert_eq!(app.state.active, Some(0));
+
+        // Collapsed folder: [GroupHeader, SpaceHeader two, Agent two].
+        let two_id = app.state.workspaces[1].id.clone();
+        assert_eq!(
+            app.state.agent_detail_target_at(body.y + 1),
+            Some(crate::ui::AgentPanelClickTarget::SpaceHeader {
+                workspace_id: two_id.clone()
+            })
+        );
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x,
+            body.y + 1,
+        ));
+        assert!(app.state.collapsed_agent_space_ids.contains(&two_id));
+
+        // Toggling again restores both.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x,
+            body.y + 1,
+        ));
+        assert!(!app.state.collapsed_agent_space_ids.contains(&two_id));
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x,
+            body.y,
+        ));
+        assert!(!app.state.collapsed_group_ids.contains(&gid));
+
+        // With everything expanded, agent rows still focus their pane.
+        let expanded_target = app.state.agent_detail_target_at(body.y + 2);
+        assert!(matches!(
+            expanded_target,
+            Some(crate::ui::AgentPanelClickTarget::Pane { ws_idx: 0, .. })
+        ));
     }
 
     #[test]

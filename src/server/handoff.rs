@@ -487,6 +487,7 @@ mod tests {
             collapsed_space_keys: Default::default(),
             workspace_groups: Vec::new(),
             collapsed_group_ids: Default::default(),
+            collapsed_agent_space_ids: Default::default(),
         }
     }
 

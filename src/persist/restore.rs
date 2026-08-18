@@ -1215,6 +1215,7 @@ mod tests {
             collapsed_space_keys: Default::default(),
             workspace_groups: Vec::new(),
             collapsed_group_ids: Default::default(),
+            collapsed_agent_space_ids: Default::default(),
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1311,6 +1312,7 @@ mod tests {
             collapsed_space_keys: Default::default(),
             workspace_groups: Vec::new(),
             collapsed_group_ids: Default::default(),
+            collapsed_agent_space_ids: Default::default(),
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1421,6 +1423,7 @@ mod tests {
             collapsed_space_keys: Default::default(),
             workspace_groups: Vec::new(),
             collapsed_group_ids: Default::default(),
+            collapsed_agent_space_ids: Default::default(),
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1536,6 +1539,7 @@ mod tests {
             collapsed_space_keys: Default::default(),
             workspace_groups: Vec::new(),
             collapsed_group_ids: Default::default(),
+            collapsed_agent_space_ids: Default::default(),
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1733,6 +1737,7 @@ mod tests {
             collapsed_space_keys: Default::default(),
             workspace_groups: Vec::new(),
             collapsed_group_ids: Default::default(),
+            collapsed_agent_space_ids: Default::default(),
         };
         (snapshot, history)
     }

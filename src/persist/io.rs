@@ -209,6 +209,7 @@ mod tests {
             collapsed_space_keys: std::collections::HashSet::new(),
             workspace_groups: Vec::new(),
             collapsed_group_ids: std::collections::HashSet::new(),
+            collapsed_agent_space_ids: std::collections::HashSet::new(),
         }
     }
 

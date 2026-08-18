@@ -51,6 +51,7 @@ impl App {
                 self.state.collapsed_space_keys.clone(),
                 &self.state.workspace_groups,
                 self.state.collapsed_group_ids.clone(),
+                self.state.collapsed_agent_space_ids.clone(),
             );
             let history = self.persist_pane_history.then(|| {
                 crate::persist::capture_history(&self.state.workspaces, &self.terminal_runtimes)

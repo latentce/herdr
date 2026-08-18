@@ -253,6 +253,7 @@ fn agent_panel_sort_from_config(
     match sort {
         crate::config::AgentPanelSortConfig::Spaces => state::AgentPanelSort::Spaces,
         crate::config::AgentPanelSortConfig::Priority => state::AgentPanelSort::Priority,
+        crate::config::AgentPanelSortConfig::Folder => state::AgentPanelSort::Folder,
     }
 }
 
@@ -401,6 +402,7 @@ impl App {
             collapsed_space_keys,
             workspace_groups,
             collapsed_group_ids,
+            collapsed_agent_space_ids,
         ) = if no_session {
             (
                 Vec::new(),
@@ -411,6 +413,7 @@ impl App {
                 0.5_f32,
                 std::collections::HashSet::new(),
                 Vec::new(),
+                std::collections::HashSet::new(),
                 std::collections::HashSet::new(),
             )
         } else if let Some(snap) = crate::persist::load() {
@@ -456,6 +459,7 @@ impl App {
                         })
                         .collect(),
                     snap.collapsed_group_ids,
+                    snap.collapsed_agent_space_ids,
                 )
             } else {
                 crate::logging::session_restored(ws.len(), "ok");
@@ -481,6 +485,7 @@ impl App {
                         })
                         .collect(),
                     snap.collapsed_group_ids,
+                    snap.collapsed_agent_space_ids,
                 )
             }
         } else {
@@ -493,6 +498,7 @@ impl App {
                 0.5_f32,
                 std::collections::HashSet::new(),
                 Vec::new(),
+                std::collections::HashSet::new(),
                 std::collections::HashSet::new(),
             )
         };
@@ -592,6 +598,7 @@ impl App {
             collapsed_space_keys,
             workspace_groups,
             collapsed_group_ids,
+            collapsed_agent_space_ids,
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -900,6 +907,7 @@ impl App {
             })
             .collect();
         app.state.collapsed_group_ids = snapshot.collapsed_group_ids.clone();
+        app.state.collapsed_agent_space_ids = snapshot.collapsed_agent_space_ids.clone();
         crate::workspace::reserve_workspace_group_ids(&app.state.workspace_groups);
         app.state.mode = if app.state.active.is_some() {
             state::Mode::Terminal
