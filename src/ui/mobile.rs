@@ -96,8 +96,12 @@ pub(crate) fn mobile_switcher_max_scroll_for_height(app: &AppState, viewport_hei
 }
 
 /// Doc-row height of the agents section. An active query keeps its title and an
-/// empty-state row visible even when no agents match.
+/// empty-state row visible even when no agents match. Hidden entirely (like the
+/// sidebar agents section) when the agents toggle is off.
 fn mobile_agents_block_height(app: &AppState) -> usize {
+    if !app.agents_section_visible {
+        return 0;
+    }
     let count = agent_panel_entries(app).len();
     if count == 0 {
         usize::from(app.agent_view_override.is_some()) * 2
@@ -149,8 +153,9 @@ pub(crate) fn mobile_switcher_target_at(
 
     // Agents lead the switcher: the primary job is switching between running
     // agents. Spaces/tabs/create actions follow for navigation and management.
+    // The agents block honors the "hide agents" toggle like the sidebar does.
     let agents = agent_panel_entries(app);
-    if !agents.is_empty() || app.agent_view_override.is_some() {
+    if app.agents_section_visible && (!agents.is_empty() || app.agent_view_override.is_some()) {
         cursor += 1; // agents title
         if agents.is_empty() {
             cursor += 1; // active-query empty state
@@ -498,7 +503,7 @@ fn render_mobile_switcher_content(
     let mut doc_y = 0usize;
 
     let entries = agent_panel_entries_from(app, terminal_runtimes);
-    if !entries.is_empty() || app.agent_view_override.is_some() {
+    if app.agents_section_visible && (!entries.is_empty() || app.agent_view_override.is_some()) {
         let focused_agent = app.active.and_then(|ws_idx| {
             let ws = app.workspaces.get(ws_idx)?;
             ws.focused_pane_id()
@@ -1493,6 +1498,36 @@ mod tests {
         // No attached terminals -> no agents -> no agents header, spaces lead.
         assert_eq!(agent_panel_entries(&app).len(), 0);
         assert_eq!(mobile_switcher_workspace_doc_range(&app, 0).start, 2);
+    }
+
+    #[test]
+    fn hiding_agents_removes_the_switcher_agents_block() {
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("agents-hidden");
+        workspace.test_add_tab(None); // two tabs -> two agent panes
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        for terminal in app.terminals.values_mut() {
+            terminal.agent_name = Some("pi".to_string());
+            terminal.state = AgentState::Working;
+        }
+        app.active = Some(0);
+        app.selected = 0;
+        app.view.mobile_header_rect = Rect::new(0, 0, 40, 2);
+        app.view.terminal_area = Rect::new(0, 2, 40, 18);
+        app.agents_section_visible = false;
+
+        // Agents exist but the toggle hides them: spaces lead like the sidebar.
+        assert_eq!(agent_panel_entries(&app).len(), 2);
+        assert_eq!(mobile_switcher_workspace_doc_range(&app, 0).start, 2);
+
+        // The row that would hit an agent with the block visible now resolves
+        // within the spaces section instead.
+        let viewport = mobile_switcher_areas(&app).viewport;
+        let hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 1);
+        assert!(!matches!(hit, Some(MobileSwitcherTarget::Agent { .. })));
+        let workspace_hit = mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 2);
+        assert_eq!(workspace_hit, Some(MobileSwitcherTarget::Workspace(0)));
     }
 
     #[test]

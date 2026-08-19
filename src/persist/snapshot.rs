@@ -8,8 +8,11 @@ use crate::layout::Node;
 use crate::terminal::TerminalRuntimeRegistry;
 use crate::workspace::Workspace;
 
-/// Current snapshot format version.
-pub(super) const SNAPSHOT_VERSION: u32 = 4;
+/// Current snapshot format version. Folder ("workspace group") fields were
+/// added within version 3: they all have serde defaults, older builds ignore
+/// unknown JSON fields, and bumping the version would make downgraded builds
+/// refuse the whole snapshot instead of just dropping folder state.
+pub(super) const SNAPSHOT_VERSION: u32 = 3;
 
 /// Serializable snapshot of the entire herdr session.
 #[derive(Serialize, Deserialize)]
@@ -955,7 +958,7 @@ mod tests {
 
         let snapshot = capture_from_state(&state);
         let json = serde_json::to_string(&snapshot).unwrap();
-        let parsed = parse_snapshot(&json).expect("parse v4 snapshot");
+        let parsed = parse_snapshot(&json).expect("parse snapshot with folders");
 
         assert_eq!(parsed.version, SNAPSHOT_VERSION);
         assert_eq!(parsed.workspace_groups.len(), 1);
@@ -984,8 +987,8 @@ mod tests {
     }
 
     #[test]
-    fn pre_v4_snapshot_loads_as_ungrouped() {
-        // A v3 snapshot has no group fields at all.
+    fn snapshot_without_group_fields_loads_as_ungrouped() {
+        // A snapshot written before folders existed has no group fields at all.
         let json = r#"{
             "version": 3,
             "workspaces": [
@@ -994,7 +997,7 @@ mod tests {
             "active": null,
             "selected": 0
         }"#;
-        let parsed = parse_snapshot(json).expect("migrate v3 snapshot");
+        let parsed = parse_snapshot(json).expect("parse group-less snapshot");
         assert!(parsed.workspace_groups.is_empty());
         assert!(parsed.collapsed_group_ids.is_empty());
         assert!(parsed.workspaces[0].group_id.is_none());
@@ -1004,7 +1007,7 @@ mod tests {
     fn parse_drops_dangling_group_membership() {
         // group_id references a group that isn't defined -> coerced to None.
         let json = r#"{
-            "version": 4,
+            "version": 3,
             "workspaces": [
                 { "id": "w1", "identity_cwd": "/tmp/a", "group_id": "gGONE", "tabs": [], "active_tab": 0 }
             ],

@@ -471,7 +471,9 @@ pub enum EventData {
     },
     WorkspaceGroupAssigned {
         workspace_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// Serialized as an explicit `null` (not omitted) when the workspace
+        /// was removed from its folder, matching the documented event shape.
+        #[serde(default)]
         group_id: Option<String>,
         workspaces: Vec<WorkspaceInfo>,
     },

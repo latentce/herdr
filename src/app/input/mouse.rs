@@ -1341,10 +1341,11 @@ impl AppState {
     pub(crate) fn workspace_group_picker_rect(&self) -> Option<Rect> {
         let picker = self.workspace_group_picker.as_ref()?;
         let screen = self.screen_rect();
+        // Folder names are user-provided, so size by display width, not bytes.
         let max_item_w = picker
             .options
             .iter()
-            .map(|option| option.label.len() as u16)
+            .map(|option| crate::ui::display_width_u16(&option.label))
             .max()
             .unwrap_or(0);
         let menu_w = (max_item_w + 4).max(16).min(screen.width.max(1));

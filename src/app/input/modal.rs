@@ -398,11 +398,14 @@ pub(crate) fn open_new_workspace_dialog(state: &mut AppState, cwd: std::path::Pa
     state.mode = Mode::RenameWorkspace;
 }
 
-/// Open the name-input modal to create a new folder and assign `ws_idx` to it.
-pub(super) fn open_new_workspace_group(state: &mut AppState, ws_idx: usize) {
+/// Open the name-input modal to create a new folder and assign the workspace
+/// with this stable id to it. The id is captured when the flow starts because
+/// workspaces can close or reorder while the modal is open (e.g. from another
+/// attached client).
+pub(super) fn open_new_workspace_group_by_id(state: &mut AppState, workspace_id: String) {
     state.rename_pane_target = None;
     state.workspace_group_name_action =
-        Some(crate::app::state::WorkspaceGroupNameAction::Create { ws_idx });
+        Some(crate::app::state::WorkspaceGroupNameAction::Create { workspace_id });
     state.name_input = String::new();
     state.name_input_replace_on_type = true;
     state.mode = Mode::RenameWorkspaceGroup;
@@ -423,19 +426,19 @@ pub(super) fn open_rename_workspace_group(state: &mut AppState, group_id: String
     state.mode = Mode::RenameWorkspaceGroup;
 }
 
-/// Open the "Move to folder" picker for `ws_idx`.
+/// Open the "Move to folder" picker for `ws_idx`. The stable workspace id is
+/// captured at open time; the index may go stale while the picker is open.
 pub(super) fn open_workspace_group_picker(state: &mut AppState, ws_idx: usize, x: u16, y: u16) {
     use crate::app::state::{GroupPickChoice, GroupPickOption, WorkspaceGroupPickerState};
+    let Some(workspace) = state.workspaces.get(ws_idx) else {
+        return;
+    };
+    let workspace_id = workspace.id.clone();
     let mut options = vec![GroupPickOption {
         label: "New folder...".to_string(),
         choice: GroupPickChoice::NewFolder,
     }];
-    if state
-        .workspaces
-        .get(ws_idx)
-        .and_then(|ws| ws.group_id.as_ref())
-        .is_some()
-    {
+    if workspace.group_id.is_some() {
         options.push(GroupPickOption {
             label: "Remove from folder".to_string(),
             choice: GroupPickChoice::RemoveFromFolder,
@@ -448,7 +451,7 @@ pub(super) fn open_workspace_group_picker(state: &mut AppState, ws_idx: usize, x
         });
     }
     state.workspace_group_picker = Some(WorkspaceGroupPickerState {
-        ws_idx,
+        workspace_id,
         options,
         list: MenuListState::new(0),
         x,
@@ -494,25 +497,23 @@ impl App {
         };
         match option.choice {
             GroupPickChoice::NewFolder => {
-                open_new_workspace_group(&mut self.state, picker.ws_idx);
+                open_new_workspace_group_by_id(&mut self.state, picker.workspace_id);
                 return;
             }
             GroupPickChoice::Existing(group_id) => {
-                let workspace_id = self.public_workspace_id(picker.ws_idx);
                 self.runtime_workspace_assign_group(
                     "tui.workspace.assign_group",
                     crate::api::schema::WorkspaceAssignGroupParams {
-                        workspace_id,
+                        workspace_id: picker.workspace_id,
                         group_id: Some(group_id),
                     },
                 );
             }
             GroupPickChoice::RemoveFromFolder => {
-                let workspace_id = self.public_workspace_id(picker.ws_idx);
                 self.runtime_workspace_assign_group(
                     "tui.workspace.assign_group",
                     crate::api::schema::WorkspaceAssignGroupParams {
-                        workspace_id,
+                        workspace_id: picker.workspace_id,
                         group_id: None,
                     },
                 );
@@ -656,10 +657,18 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                 Mode::RenameWorkspaceGroup => {
                     if let Some(action) = state.workspace_group_name_action.take() {
                         match action {
-                            crate::app::state::WorkspaceGroupNameAction::Create { ws_idx } => {
+                            crate::app::state::WorkspaceGroupNameAction::Create {
+                                workspace_id,
+                            } => {
                                 if !new_name.is_empty() {
-                                    let gid = state.create_workspace_group(new_name);
-                                    state.assign_workspace_to_group(ws_idx, Some(gid));
+                                    let ws_idx = state
+                                        .workspaces
+                                        .iter()
+                                        .position(|ws| ws.id == workspace_id);
+                                    if let Some(ws_idx) = ws_idx {
+                                        let gid = state.create_workspace_group(new_name);
+                                        state.assign_workspace_to_group(ws_idx, Some(gid));
+                                    }
                                 }
                             }
                             crate::app::state::WorkspaceGroupNameAction::Rename { group_id } => {
@@ -1264,8 +1273,14 @@ impl App {
                 // API so events fire (collapse, by contrast, stays TUI-local).
                 if let Some(action) = self.state.workspace_group_name_action.take() {
                     match action {
-                        crate::app::state::WorkspaceGroupNameAction::Create { ws_idx } => {
-                            if !new_name.is_empty() {
+                        crate::app::state::WorkspaceGroupNameAction::Create { workspace_id } => {
+                            if !new_name.is_empty()
+                                && self
+                                    .state
+                                    .workspaces
+                                    .iter()
+                                    .any(|workspace| workspace.id == workspace_id)
+                            {
                                 self.runtime_workspace_group_create(
                                     "tui.workspace_group.create",
                                     crate::api::schema::WorkspaceGroupCreateParams {
@@ -1280,7 +1295,6 @@ impl App {
                                     .last()
                                     .map(|group| group.id.clone())
                                 {
-                                    let workspace_id = self.public_workspace_id(ws_idx);
                                     self.runtime_workspace_assign_group(
                                         "tui.workspace.assign_group",
                                         crate::api::schema::WorkspaceAssignGroupParams {
@@ -1693,6 +1707,20 @@ mod tests {
             workspace_create_label("  logs  ", "project").as_deref(),
             Some("logs")
         );
+    }
+
+    #[test]
+    fn saving_new_folder_modal_after_workspace_closes_does_not_create_folder() {
+        let mut app = app_with_test_workspaces(&["test"]);
+        let workspace_id = app.state.workspaces[0].id.clone();
+        open_new_workspace_group_by_id(&mut app.state, workspace_id);
+        app.state.name_input = "Work".into();
+        app.state.close_selected_workspace();
+
+        app.save_rename_modal_via_api();
+
+        assert!(app.state.workspace_groups.is_empty());
+        assert!(app.state.workspace_group_name_action.is_none());
     }
 
     fn mark_worktree_space_member(state: &mut AppState, ws_idx: usize, key: &str) {

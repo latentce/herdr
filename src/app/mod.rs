@@ -4092,9 +4092,33 @@ mod tests {
                 crate::api::schema::AgentViewClearParams::default(),
             ),
         };
+        let workspace_group_list = crate::api::schema::Request {
+            id: "req_10".into(),
+            method: crate::api::schema::Method::WorkspaceGroupList(
+                crate::api::schema::EmptyParams::default(),
+            ),
+        };
+        let workspace_group_create = crate::api::schema::Request {
+            id: "req_11".into(),
+            method: crate::api::schema::Method::WorkspaceGroupCreate(
+                crate::api::schema::WorkspaceGroupCreateParams {
+                    name: "Work".into(),
+                },
+            ),
+        };
+        let workspace_assign_group = crate::api::schema::Request {
+            id: "req_12".into(),
+            method: crate::api::schema::Method::WorkspaceAssignGroup(
+                crate::api::schema::WorkspaceAssignGroupParams {
+                    workspace_id: "w1".into(),
+                    group_id: Some("g1".into()),
+                },
+            ),
+        };
 
         assert!(!crate::api::request_changes_ui(&read_only));
         assert!(!crate::api::request_changes_ui(&worktree_list));
+        assert!(!crate::api::request_changes_ui(&workspace_group_list));
         assert!(crate::api::request_changes_ui(&mutating));
         assert!(crate::api::request_changes_ui(&pane_rename));
         assert!(crate::api::request_changes_ui(&worktree_create));
@@ -4102,6 +4126,8 @@ mod tests {
         assert!(crate::api::request_changes_ui(&pane_focus_direction));
         assert!(crate::api::request_changes_ui(&pane_resize));
         assert!(crate::api::request_changes_ui(&agent_view));
+        assert!(crate::api::request_changes_ui(&workspace_group_create));
+        assert!(crate::api::request_changes_ui(&workspace_assign_group));
     }
 
     #[test]

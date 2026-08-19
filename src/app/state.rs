@@ -669,8 +669,10 @@ pub struct GroupHeaderArea {
 /// Pending folder name-input action driving `Mode::RenameWorkspaceGroup`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceGroupNameAction {
-    /// Create a new folder from the entered name and assign this workspace to it.
-    Create { ws_idx: usize },
+    /// Create a new folder from the entered name and assign this workspace to
+    /// it. Keyed by the stable workspace id: workspaces can close or reorder
+    /// while the modal is open (e.g. from another attached client).
+    Create { workspace_id: String },
     /// Rename an existing folder.
     Rename { group_id: String },
 }
@@ -691,7 +693,10 @@ pub struct GroupPickOption {
 
 /// State for the "Move to folder" picker (`Mode::WorkspaceGroupPicker`).
 pub struct WorkspaceGroupPickerState {
-    pub ws_idx: usize,
+    /// Stable id of the workspace being moved. Workspaces can close or reorder
+    /// while the picker is open (e.g. from another attached client), so the
+    /// picker must not hold a positional index.
+    pub workspace_id: String,
     pub options: Vec<GroupPickOption>,
     pub list: MenuListState,
     pub x: u16,

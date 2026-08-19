@@ -814,7 +814,7 @@
           "key": "ui.sidebar.show_agents",
           "type": "boolean",
           "default": "true",
-          "description": "Whether the lower Agents section is shown on startup. When false, the Spaces list uses the full sidebar height. Can be toggled at runtime from the Agents section header context menu."
+          "description": "Whether the lower Agents section is shown on startup. When false, the Spaces list uses the full sidebar height and the narrow-layout switcher omits the agents block. Can be toggled at runtime from the global launcher menu."
         },
         {
           "key": "ui.sidebar.agents.row_gap",

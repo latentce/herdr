@@ -333,6 +333,12 @@ impl AppState {
 
     /// Hit-test a folder header row, returning its (group_id, collapsed) state.
     pub(super) fn workspace_group_header_at(&self, row: u16) -> Option<(String, bool)> {
+        // Common case: no folders exist, so no header can be hit. Without this
+        // early-out the empty computed-areas sentinel below would recompute
+        // the full list layout on every sidebar click and drag-motion event.
+        if self.workspace_groups.is_empty() {
+            return None;
+        }
         let headers = if self.view.workspace_group_header_areas.is_empty() {
             crate::ui::compute_workspace_group_header_areas(self, self.view.sidebar_rect)
         } else {
@@ -354,6 +360,10 @@ impl AppState {
         source_ws_idx: usize,
         row: u16,
     ) -> Option<Option<String>> {
+        // No folders -> no membership change is possible.
+        if self.workspace_groups.is_empty() {
+            return None;
+        }
         let source_group = self
             .workspaces
             .get(source_ws_idx)
@@ -362,10 +372,15 @@ impl AppState {
         if let Some((group_id, _)) = self.workspace_group_header_at(row) {
             return (source_group.as_deref() != Some(group_id.as_str())).then_some(Some(group_id));
         }
-        // Otherwise mirror the membership of the row under the cursor.
+        // Otherwise mirror the membership of the card under the cursor. Rows
+        // that hit neither a header nor a card (row gaps, empty space below
+        // the list) imply no membership change: without this, configured row
+        // gaps between two members of the same folder would silently ungroup
+        // a workspace being reordered within its folder.
+        let target_idx = self.workspace_at_row(row)?;
         let target_group = self
-            .workspace_at_row(row)
-            .and_then(|idx| self.workspaces.get(idx))
+            .workspaces
+            .get(target_idx)
             .and_then(|ws| ws.group_id.clone());
         match (source_group, target_group) {
             (source, target) if source == target => None,
@@ -635,6 +650,7 @@ mod tests {
         assert!(state.assign_workspace_to_group(0, Some(gid.clone())));
 
         // Fake sidebar geometry: folder header row 0, member `a` row 1, loose `b` row 2.
+        state.view.sidebar_rect = Rect::new(0, 0, 20, 20);
         state.view.workspace_group_header_areas = vec![GroupHeaderArea {
             group_id: gid.clone(),
             rect: Rect::new(0, 0, 20, 1),
@@ -665,6 +681,9 @@ mod tests {
         assert_eq!(state.resolve_workspace_group_drop(0, 0), None);
         // Drag loose `b` onto another loose row -> pure reorder.
         assert_eq!(state.resolve_workspace_group_drop(1, 2), None);
+        // Drag member `a` onto a row that hits neither a header nor a card
+        // (row gap / empty space below the list) -> pure reorder, not ungroup.
+        assert_eq!(state.resolve_workspace_group_drop(0, 3), None);
     }
 
     #[test]

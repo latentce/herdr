@@ -1544,6 +1544,35 @@ impl AppState {
         true
     }
 
+    /// Re-establish worktree-atomic folder membership for the worktree family
+    /// that `ws_idx` belongs to: the workspace adopts the folder of the other
+    /// members sharing its worktree key. Call after a workspace joins a
+    /// worktree family (e.g. a newly created or opened worktree) so the family
+    /// never splits across folders. Returns true when a membership changed.
+    pub fn sync_worktree_group_membership(&mut self, ws_idx: usize) -> bool {
+        let Some(key) = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.worktree_space())
+            .map(|space| space.key.clone())
+        else {
+            return false;
+        };
+        let Some(family_group) = self.workspaces.iter().enumerate().find_map(|(idx, ws)| {
+            (idx != ws_idx && ws.worktree_space().is_some_and(|space| space.key == key))
+                .then(|| ws.group_id.clone())
+        }) else {
+            return false;
+        };
+        let workspace = &mut self.workspaces[ws_idx];
+        if workspace.group_id == family_group {
+            return false;
+        }
+        workspace.group_id = family_group;
+        self.mark_session_dirty();
+        true
+    }
+
     /// Toggle a folder's collapsed state.
     pub fn toggle_workspace_group_collapsed(&mut self, group_id: &str) {
         if self.collapsed_group_ids.contains(group_id) {
@@ -3587,6 +3616,44 @@ mod tests {
         // Both worktree members land in the folder together.
         assert_eq!(state.workspaces[0].group_id.as_deref(), Some(gid.as_str()));
         assert_eq!(state.workspaces[1].group_id.as_deref(), Some(gid.as_str()));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn workspace_joining_worktree_family_adopts_family_folder() {
+        let mut state = app_with_workspaces(&["main", "issue"]);
+        mark_parent_worktree(&mut state, 0);
+        let gid = state.create_workspace_group("Repo".to_string());
+        assert!(state.assign_workspace_to_group(0, Some(gid.clone())));
+
+        // A new worktree workspace joins the family ungrouped (as the worktree
+        // create/open paths leave it) and must adopt the parent's folder.
+        mark_linked_worktree(&mut state, 1);
+        assert!(state.workspaces[1].group_id.is_none());
+        assert!(state.sync_worktree_group_membership(1));
+        assert_eq!(state.workspaces[1].group_id.as_deref(), Some(gid.as_str()));
+        state.assert_invariants_for_test();
+
+        // Re-sync is a no-op, and non-worktree workspaces are untouched.
+        assert!(!state.sync_worktree_group_membership(1));
+        state.workspaces.push(Workspace::test_new("loose"));
+        state.ensure_test_terminals();
+        assert!(!state.sync_worktree_group_membership(2));
+        assert!(state.workspaces[2].group_id.is_none());
+    }
+
+    #[test]
+    fn workspace_joining_ungrouped_worktree_family_drops_own_folder() {
+        let mut state = app_with_workspaces(&["main", "issue"]);
+        mark_parent_worktree(&mut state, 0);
+        let gid = state.create_workspace_group("Repo".to_string());
+        assert!(state.assign_workspace_to_group(1, Some(gid)));
+
+        // The joining workspace was in a folder but the family is not: the
+        // family's (empty) membership wins so the family never splits.
+        mark_linked_worktree(&mut state, 1);
+        assert!(state.sync_worktree_group_membership(1));
+        assert!(state.workspaces[1].group_id.is_none());
         state.assert_invariants_for_test();
     }
 

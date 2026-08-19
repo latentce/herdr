@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 21,
+  "protocol": 20,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -239,6 +239,8 @@
             {
               "properties": {
                 "group_id": {
+                  "default": null,
+                  "description": "Serialized as an explicit `null` (not omitted) when the workspace\nwas removed from its folder, matching the documented event shape.",
                   "type": [
                     "string",
                     "null"
@@ -6799,6 +6801,8 @@
             {
               "properties": {
                 "group_id": {
+                  "default": null,
+                  "description": "Serialized as an explicit `null` (not omitted) when the workspace\nwas removed from its folder, matching the documented event shape.",
                   "type": [
                     "string",
                     "null"

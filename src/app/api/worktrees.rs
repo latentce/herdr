@@ -452,7 +452,7 @@ impl App {
         membership: crate::workspace::WorktreeSpaceMembership,
         emit_update: bool,
     ) {
-        let changed = if let Some(workspace) = self.state.workspaces.get_mut(ws_idx) {
+        let mut changed = if let Some(workspace) = self.state.workspaces.get_mut(ws_idx) {
             if workspace.worktree_space.as_ref() == Some(&membership) {
                 false
             } else {
@@ -462,6 +462,9 @@ impl App {
         } else {
             false
         };
+        // Folders are worktree-atomic: a workspace joining a worktree family
+        // adopts the family's folder.
+        changed |= self.state.sync_worktree_group_membership(ws_idx);
         if changed {
             self.state.mark_session_dirty();
             if emit_update {

@@ -504,47 +504,64 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
     apply_folder_grouping(app, base, force_expanded)
 }
 
-/// Layer user folders over the worktree-grouped entries: emit a folder header at
-/// the position of each folder's first member, indent its members, and honor
-/// per-folder collapse. Empty folders are appended at the end.
+/// Layer user folders over the worktree-grouped entries: emit a folder header
+/// at the position of each folder's first member with all of the folder's
+/// members hoisted beneath it (mirroring how worktree families are hoisted),
+/// indent members, and honor per-folder collapse. Empty folders are appended
+/// at the end.
 fn apply_folder_grouping(
     app: &AppState,
     base: Vec<WorkspaceListEntry>,
     force_expanded: bool,
 ) -> Vec<WorkspaceListEntry> {
     let is_collapsed = |gid: &str| !force_expanded && app.collapsed_group_ids.contains(gid);
+    let group_of = |entry: &WorkspaceListEntry| -> Option<String> {
+        let WorkspaceListEntry::Workspace { ws_idx, .. } = entry else {
+            return None;
+        };
+        app.workspaces
+            .get(*ws_idx)
+            .and_then(|ws| ws.group_id.clone())
+    };
+    // Bucket each folder's members in base order so they always render
+    // contiguously under their header, even when the underlying workspace
+    // order interleaves them with loose workspaces.
+    let mut members_by_group = std::collections::HashMap::<String, Vec<WorkspaceListEntry>>::new();
+    for entry in &base {
+        if let Some(gid) = group_of(entry) {
+            members_by_group.entry(gid).or_default().push(entry.clone());
+        }
+    }
     let mut result = Vec::new();
     let mut emitted = std::collections::HashSet::<String>::new();
     for entry in base {
-        let WorkspaceListEntry::Workspace {
-            ws_idx, indented, ..
-        } = &entry
-        else {
+        let Some(gid) = group_of(&entry) else {
             result.push(entry);
             continue;
         };
-        let group_id = app
-            .workspaces
-            .get(*ws_idx)
-            .and_then(|ws| ws.group_id.clone());
-        match group_id {
-            None => result.push(entry),
-            Some(gid) => {
-                let collapsed = is_collapsed(&gid);
-                if emitted.insert(gid.clone()) {
-                    result.push(WorkspaceListEntry::GroupHeader {
-                        group_id: gid.clone(),
-                        collapsed,
-                    });
-                }
-                if !collapsed {
-                    result.push(WorkspaceListEntry::Workspace {
-                        ws_idx: *ws_idx,
-                        indented: *indented,
-                        in_folder: true,
-                    });
-                }
-            }
+        if !emitted.insert(gid.clone()) {
+            continue;
+        }
+        let collapsed = is_collapsed(&gid);
+        result.push(WorkspaceListEntry::GroupHeader {
+            group_id: gid.clone(),
+            collapsed,
+        });
+        if collapsed {
+            continue;
+        }
+        for member in members_by_group.remove(&gid).unwrap_or_default() {
+            let WorkspaceListEntry::Workspace {
+                ws_idx, indented, ..
+            } = member
+            else {
+                continue;
+            };
+            result.push(WorkspaceListEntry::Workspace {
+                ws_idx,
+                indented,
+                in_folder: true,
+            });
         }
     }
     for group in &app.workspace_groups {
@@ -1526,7 +1543,9 @@ fn render_workspace_list(
             drop_target: Some(drop_target),
             group_change,
             ..
-        }) if !matches!(group_change, Some(Some(_))) => {
+        }) if group_change.is_none() => {
+            // Any membership change (join or leave a folder) wins over the
+            // reorder on drop, so only pure reorders show the insertion line.
             workspace_drop_indicator_row(app, &app.view.workspace_card_areas, area, *drop_target)
         }
         _ => None,
@@ -2055,6 +2074,63 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn folder_members_are_hoisted_contiguously_under_their_header() {
+        // Workspace order: a (folder), b (loose), c (folder). Folder members
+        // must render contiguously under the header even though the underlying
+        // order interleaves them with a loose workspace.
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("a"),
+            Workspace::test_new("b"),
+            Workspace::test_new("c"),
+        ];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        let gid = app.create_workspace_group("Work".to_string());
+        assert!(app.assign_workspace_to_group(0, Some(gid.clone())));
+        assert!(app.assign_workspace_to_group(2, Some(gid.clone())));
+
+        let entries = workspace_list_entries(&app);
+        assert_eq!(
+            entries,
+            vec![
+                WorkspaceListEntry::GroupHeader {
+                    group_id: gid.clone(),
+                    collapsed: false,
+                },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false,
+                    in_folder: true,
+                },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 2,
+                    indented: false,
+                    in_folder: true,
+                },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 1,
+                    indented: false,
+                    in_folder: false,
+                },
+            ]
+        );
+
+        // Collapsing hides every member, including the hoisted one.
+        app.collapsed_group_ids.insert(gid);
+        let entries = workspace_list_entries(&app);
+        assert!(!entries
+            .iter()
+            .any(|entry| matches!(entry, WorkspaceListEntry::Workspace { ws_idx: 0, .. })));
+        assert!(!entries
+            .iter()
+            .any(|entry| matches!(entry, WorkspaceListEntry::Workspace { ws_idx: 2, .. })));
+        assert!(entries
+            .iter()
+            .any(|entry| matches!(entry, WorkspaceListEntry::Workspace { ws_idx: 1, .. })));
     }
 
     #[test]
