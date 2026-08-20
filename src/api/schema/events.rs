@@ -32,6 +32,10 @@ pub enum Subscription {
     WorkspaceClosed {},
     #[serde(rename = "workspace.focused")]
     WorkspaceFocused {},
+    #[serde(rename = "folder.created")]
+    FolderCreated {},
+    #[serde(rename = "folder.assigned")]
+    FolderAssigned {},
     #[serde(rename = "worktree.created")]
     WorktreeCreated {},
     #[serde(rename = "worktree.opened")]
@@ -200,6 +204,8 @@ pub enum EventKind {
     WorkspaceMoved,
     WorkspaceReordered,
     WorkspaceFocused,
+    FolderCreated,
+    FolderAssigned,
     WorktreeCreated,
     WorktreeOpened,
     WorktreeRemoved,
@@ -231,6 +237,8 @@ impl EventKind {
             EventKind::WorkspaceMoved => "workspace.moved",
             EventKind::WorkspaceReordered => "workspace.reordered",
             EventKind::WorkspaceFocused => "workspace.focused",
+            EventKind::FolderCreated => "folder.created",
+            EventKind::FolderAssigned => "folder.assigned",
             EventKind::WorktreeCreated => "worktree.created",
             EventKind::WorktreeOpened => "worktree.opened",
             EventKind::WorktreeRemoved => "worktree.removed",
@@ -263,6 +271,8 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::WorkspaceMoved,
     EventKind::WorkspaceReordered,
     EventKind::WorkspaceFocused,
+    EventKind::FolderCreated,
+    EventKind::FolderAssigned,
     EventKind::WorktreeCreated,
     EventKind::WorktreeOpened,
     EventKind::WorktreeRemoved,
@@ -451,6 +461,16 @@ pub enum EventData {
     },
     WorkspaceFocused {
         workspace_id: String,
+    },
+    FolderCreated {
+        folder: super::folders::FolderInfo,
+    },
+    FolderAssigned {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        folder_id: Option<String>,
+        /// All workspaces moved by this assignment (whole worktree families
+        /// move together), in canonical order.
+        workspace_ids: Vec<String>,
     },
     WorktreeCreated {
         workspace: WorkspaceInfo,

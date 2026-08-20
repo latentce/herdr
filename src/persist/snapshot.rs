@@ -9,7 +9,8 @@ use crate::terminal::TerminalRuntimeRegistry;
 use crate::workspace::Workspace;
 
 /// Current snapshot format version.
-pub(super) const SNAPSHOT_VERSION: u32 = 3;
+/// v4 added folders and the top-level space order.
+pub(super) const SNAPSHOT_VERSION: u32 = 4;
 
 /// Serializable snapshot of the entire herdr session.
 #[derive(Serialize, Deserialize)]
@@ -26,6 +27,53 @@ pub struct SessionSnapshot {
     pub sidebar_section_split: Option<f32>,
     #[serde(default)]
     pub collapsed_space_keys: std::collections::HashSet<String>,
+    /// Space order: folders and loose spaces in top-level order. Snapshots
+    /// from before v4 have no folders; the empty default restores every
+    /// workspace loose in its prior order.
+    #[serde(default)]
+    pub space_order: Vec<SpaceOrderEntrySnapshot>,
+}
+
+/// One persisted entry of the top-level space order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpaceOrderEntrySnapshot {
+    Folder(FolderSnapshot),
+    Workspace(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FolderSnapshot {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub members: Vec<String>,
+}
+
+impl From<&crate::folder::SpaceOrderEntry> for SpaceOrderEntrySnapshot {
+    fn from(entry: &crate::folder::SpaceOrderEntry) -> Self {
+        match entry {
+            crate::folder::SpaceOrderEntry::Folder(folder) => Self::Folder(FolderSnapshot {
+                id: folder.id.clone(),
+                name: folder.name.clone(),
+                members: folder.members.clone(),
+            }),
+            crate::folder::SpaceOrderEntry::Workspace(id) => Self::Workspace(id.clone()),
+        }
+    }
+}
+
+impl From<SpaceOrderEntrySnapshot> for crate::folder::SpaceOrderEntry {
+    fn from(entry: SpaceOrderEntrySnapshot) -> Self {
+        match entry {
+            SpaceOrderEntrySnapshot::Folder(folder) => Self::Folder(crate::folder::Folder {
+                id: folder.id,
+                name: folder.name,
+                members: folder.members,
+            }),
+            SpaceOrderEntrySnapshot::Workspace(id) => Self::Workspace(id),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -184,6 +232,8 @@ struct RawSessionSnapshot {
     sidebar_section_split: Option<f32>,
     #[serde(default)]
     collapsed_space_keys: std::collections::HashSet<String>,
+    #[serde(default)]
+    space_order: Vec<SpaceOrderEntrySnapshot>,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
@@ -199,6 +249,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         sidebar_width: raw.sidebar_width,
         sidebar_section_split: raw.sidebar_section_split,
         collapsed_space_keys: raw.collapsed_space_keys,
+        space_order: raw.space_order,
     })
 }
 
@@ -249,6 +300,9 @@ fn first_pane_id_in_layout(layout: &LayoutSnapshot) -> Option<u32> {
 }
 
 /// Capture the current app state into a serializable snapshot.
+// Capture mirrors the persisted session fields one-to-one; bundling them into
+// a struct would just duplicate SessionSnapshot's shape at every call site.
+#[allow(clippy::too_many_arguments)]
 pub fn capture(
     workspaces: &[Workspace],
     terminals: &std::collections::HashMap<
@@ -261,7 +315,9 @@ pub fn capture(
     sidebar_width: u16,
     sidebar_section_split: f32,
     collapsed_space_keys: std::collections::HashSet<String>,
+    space_order: &[crate::folder::SpaceOrderEntry],
 ) -> SessionSnapshot {
+    let workspace_ids: Vec<&str> = workspaces.iter().map(|ws| ws.id.as_str()).collect();
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
         workspaces: workspaces
@@ -273,6 +329,12 @@ pub fn capture(
         sidebar_width: Some(sidebar_width),
         sidebar_section_split: Some(sidebar_section_split),
         collapsed_space_keys,
+        // Persist the normalized order: stale references dropped and every
+        // workspace explicit, so restore sees the full organizational picture.
+        space_order: crate::folder::normalized_space_order(space_order, &workspace_ids)
+            .iter()
+            .map(SpaceOrderEntrySnapshot::from)
+            .collect(),
     }
 }
 
@@ -541,6 +603,7 @@ mod tests {
             state.sidebar_width,
             state.sidebar_section_split,
             state.collapsed_space_keys.clone(),
+            &state.space_order,
         )
     }
 
@@ -605,6 +668,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            space_order: Vec::new(),
         };
         let json = serde_json::to_string(&snap).unwrap();
         let restored = parse_snapshot(&json).unwrap();
@@ -612,6 +676,84 @@ mod tests {
         assert_eq!(restored.active, None);
         assert_eq!(restored.sidebar_width, Some(26));
         assert_eq!(restored.sidebar_section_split, Some(0.5));
+    }
+
+    #[test]
+    fn space_order_round_trips_through_capture_and_parse() {
+        let mut state = state_with_workspaces(&["one", "two", "three"]);
+        let target = state.workspaces[0].id.clone();
+        let folder_id = state.create_folder("work").expect("create folder");
+        state
+            .assign_workspace_to_folder(&target, Some(&folder_id))
+            .expect("assign");
+        // Canonical order after assign: two, three, [work: one]
+        let canonical: Vec<Option<String>> = state
+            .workspaces
+            .iter()
+            .map(|ws| Some(ws.id.clone()))
+            .collect();
+
+        let snap = capture_from_state(&state);
+        assert_eq!(snap.version, SNAPSHOT_VERSION);
+        let json = serde_json::to_string(&snap).unwrap();
+        let restored = parse_snapshot(&json).unwrap();
+
+        let restored_ids: Vec<Option<String>> =
+            restored.workspaces.iter().map(|ws| ws.id.clone()).collect();
+        assert_eq!(
+            restored_ids, canonical,
+            "snapshot must list workspaces in canonical order"
+        );
+        assert_eq!(
+            restored.space_order,
+            vec![
+                SpaceOrderEntrySnapshot::Workspace(state.workspaces[0].id.clone()),
+                SpaceOrderEntrySnapshot::Workspace(state.workspaces[1].id.clone()),
+                SpaceOrderEntrySnapshot::Folder(FolderSnapshot {
+                    id: folder_id,
+                    name: "work".into(),
+                    members: vec![target],
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn capture_lists_unlisted_workspaces_loose_at_the_end_of_space_order() {
+        let mut state = state_with_workspaces(&["one"]);
+        state.create_folder("work").expect("create folder");
+        // A workspace added outside the folder mutations is implicitly loose.
+        state.workspaces.push(Workspace::test_new("late"));
+        state.ensure_test_terminals();
+
+        let snap = capture_from_state(&state);
+
+        assert_eq!(
+            snap.space_order,
+            vec![
+                SpaceOrderEntrySnapshot::Workspace(state.workspaces[0].id.clone()),
+                SpaceOrderEntrySnapshot::Folder(FolderSnapshot {
+                    id: match &state.space_order[1] {
+                        crate::folder::SpaceOrderEntry::Folder(folder) => folder.id.clone(),
+                        other => panic!("expected folder entry, got {other:?}"),
+                    },
+                    name: "work".into(),
+                    members: Vec::new(),
+                }),
+                SpaceOrderEntrySnapshot::Workspace(state.workspaces[1].id.clone()),
+            ]
+        );
+    }
+
+    #[test]
+    fn pre_v4_snapshot_loads_with_empty_space_order() {
+        let snap = parse_snapshot(session_fixture("current-herdr")).unwrap();
+
+        assert_eq!(snap.version, 3);
+        assert!(
+            snap.space_order.is_empty(),
+            "v3 snapshots migrate to no folders with the prior workspace order"
+        );
     }
 
     #[test]
@@ -693,6 +835,7 @@ mod tests {
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
             version: SNAPSHOT_VERSION,
+            space_order: Vec::new(),
         };
 
         let json = serde_json::to_string_pretty(&snap).unwrap();
@@ -1254,6 +1397,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            space_order: Vec::new(),
         };
 
         let json = serde_json::to_string(&snap).unwrap();

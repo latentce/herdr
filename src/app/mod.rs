@@ -14,6 +14,7 @@ mod api_helpers;
 pub(crate) use api_helpers::limit_snapshot_lines;
 mod config_io;
 mod creation;
+pub(crate) mod folders;
 mod git_refresh;
 mod ids;
 mod input;
@@ -402,6 +403,7 @@ impl App {
             sidebar_width_source,
             sidebar_section_split,
             collapsed_space_keys,
+            restored_space_order,
         ) = if no_session {
             (
                 Vec::new(),
@@ -411,6 +413,7 @@ impl App {
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
                 std::collections::HashSet::new(),
+                Vec::new(),
             )
         } else if let Some(snap) = crate::persist::load() {
             let history = config
@@ -447,6 +450,10 @@ impl App {
                     },
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
+                    snap.space_order
+                        .into_iter()
+                        .map(crate::folder::SpaceOrderEntry::from)
+                        .collect(),
                 )
             } else {
                 crate::logging::session_restored(ws.len(), "ok");
@@ -464,6 +471,10 @@ impl App {
                     },
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
+                    snap.space_order
+                        .into_iter()
+                        .map(crate::folder::SpaceOrderEntry::from)
+                        .collect(),
                 )
             }
         } else {
@@ -475,6 +486,7 @@ impl App {
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
                 std::collections::HashSet::new(),
+                Vec::new(),
             )
         };
 
@@ -539,6 +551,7 @@ impl App {
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces,
+            space_order: Vec::new(),
             active,
             previous_pane_focus: None,
             selected,
@@ -593,6 +606,7 @@ impl App {
                 layout: state::ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
+                folder_header_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),
@@ -705,6 +719,7 @@ impl App {
         };
 
         state.terminals = restored_terminals;
+        state.install_space_order(restored_space_order);
 
         for ws_idx in 0..state.workspaces.len() {
             let cwd = state.workspaces[ws_idx]
@@ -865,6 +880,14 @@ impl App {
             app.state.sidebar_section_split = split;
         }
         app.state.collapsed_space_keys = snapshot.collapsed_space_keys.clone();
+        app.state.install_space_order(
+            snapshot
+                .space_order
+                .iter()
+                .cloned()
+                .map(crate::folder::SpaceOrderEntry::from)
+                .collect(),
+        );
         app.state.mode = if app.state.active.is_some() {
             state::Mode::Terminal
         } else {

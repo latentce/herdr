@@ -19,6 +19,8 @@ use crate::terminal::TerminalRuntimeRegistry;
 
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
 const AGENT_PANEL_HEADER_ROWS: u16 = 3;
+/// Height of a folder header row in the spaces panel.
+const FOLDER_HEADER_ROWS: u16 = 1;
 
 pub(crate) struct AgentPanelEntry {
     pub ws_idx: usize,
@@ -231,11 +233,20 @@ fn workspace_row_height_in_body(
 }
 
 fn workspace_entry_gap(app: &AppState, entries: &[WorkspaceListEntry], entry_idx: usize) -> u16 {
-    if entry_idx + 1 < entries.len() && !next_entry_is_indented_workspace(entries, entry_idx) {
-        app.sidebar_spaces.row_gap
-    } else {
-        0
+    if entry_idx + 1 >= entries.len() || next_entry_is_indented_workspace(entries, entry_idx) {
+        return 0;
     }
+    // A folder header hugs its first member.
+    if matches!(
+        entries.get(entry_idx),
+        Some(WorkspaceListEntry::FolderHeader { .. })
+    ) && matches!(
+        entries.get(entry_idx + 1),
+        Some(WorkspaceListEntry::Workspace { foldered: true, .. })
+    ) {
+        return 0;
+    }
+    app.sidebar_spaces.row_gap
 }
 
 fn workspace_attention_priority(state: AgentState, seen: bool) -> u8 {
@@ -300,7 +311,16 @@ pub(crate) fn grouped_child_display_label(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkspaceListEntry {
-    Workspace { ws_idx: usize, indented: bool },
+    /// A folder header row. `order_idx` indexes into `AppState::space_order`
+    /// (always a `SpaceOrderEntry::Folder` entry).
+    FolderHeader { order_idx: usize },
+    Workspace {
+        ws_idx: usize,
+        /// Indented as a worktree family child under its parent checkout.
+        indented: bool,
+        /// Nested under a folder header.
+        foldered: bool,
+    },
 }
 
 pub(crate) fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) -> bool {
@@ -371,9 +391,29 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
             .map(|space| space.key.clone())
     });
 
+    let idx_by_id: std::collections::HashMap<&str, usize> = if app.space_order.is_empty() {
+        // Fast path: sessions without folders never look up ids by name.
+        std::collections::HashMap::new()
+    } else {
+        app.workspaces
+            .iter()
+            .enumerate()
+            .map(|(ws_idx, ws)| (ws.id.as_str(), ws_idx))
+            .collect()
+    };
+    let mut listed = vec![false; app.workspaces.len()];
     let mut emitted_groups = std::collections::HashSet::<String>::new();
     let mut entries = Vec::new();
-    for (ws_idx, ws) in app.workspaces.iter().enumerate() {
+
+    // Emit one workspace at this position — hoisting its whole worktree
+    // family (parent first, children indented) when it belongs to one.
+    let emit_workspace = |ws_idx: usize,
+                          foldered: bool,
+                          emitted_groups: &mut std::collections::HashSet<String>,
+                          entries: &mut Vec<WorkspaceListEntry>| {
+        let Some(ws) = app.workspaces.get(ws_idx) else {
+            return;
+        };
         let Some(space) = ws
             .worktree_space()
             .filter(|space| grouped_keys.contains(&space.key))
@@ -381,16 +421,17 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
             entries.push(WorkspaceListEntry::Workspace {
                 ws_idx,
                 indented: false,
+                foldered,
             });
-            continue;
+            return;
         };
 
         if !emitted_groups.insert(space.key.clone()) {
-            continue;
+            return;
         }
 
         let Some(members) = members_by_key.get(&space.key) else {
-            continue;
+            return;
         };
         let Some(parent_idx) = members.iter().copied().find(|idx| {
             app.workspaces
@@ -401,13 +442,15 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
             entries.push(WorkspaceListEntry::Workspace {
                 ws_idx,
                 indented: false,
+                foldered,
             });
-            continue;
+            return;
         };
         let collapsed = !force_expanded && app.collapsed_space_keys.contains(&space.key);
         entries.push(WorkspaceListEntry::Workspace {
             ws_idx: parent_idx,
             indented: false,
+            foldered,
         });
 
         if collapsed {
@@ -418,6 +461,7 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
                 entries.push(WorkspaceListEntry::Workspace {
                     ws_idx: active_idx,
                     indented: true,
+                    foldered,
                 });
             }
         } else {
@@ -428,8 +472,43 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
                 entries.push(WorkspaceListEntry::Workspace {
                     ws_idx: *member_idx,
                     indented: true,
+                    foldered,
                 });
             }
+        }
+    };
+
+    // Walk the explicit space order: loose spaces flat, folder members under
+    // their header. Stale/duplicate references are skipped; workspaces missing
+    // from the order are implicitly loose at the end.
+    for (order_idx, order_entry) in app.space_order.iter().enumerate() {
+        match order_entry {
+            crate::folder::SpaceOrderEntry::Workspace(id) => {
+                let Some(&ws_idx) = idx_by_id.get(id.as_str()) else {
+                    continue;
+                };
+                if std::mem::replace(&mut listed[ws_idx], true) {
+                    continue;
+                }
+                emit_workspace(ws_idx, false, &mut emitted_groups, &mut entries);
+            }
+            crate::folder::SpaceOrderEntry::Folder(folder) => {
+                entries.push(WorkspaceListEntry::FolderHeader { order_idx });
+                for member in &folder.members {
+                    let Some(&ws_idx) = idx_by_id.get(member.as_str()) else {
+                        continue;
+                    };
+                    if std::mem::replace(&mut listed[ws_idx], true) {
+                        continue;
+                    }
+                    emit_workspace(ws_idx, true, &mut emitted_groups, &mut entries);
+                }
+            }
+        }
+    }
+    for (ws_idx, ws_listed) in listed.iter().enumerate() {
+        if !ws_listed {
+            emit_workspace(ws_idx, false, &mut emitted_groups, &mut entries);
         }
     }
     entries
@@ -463,7 +542,13 @@ fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> us
     let entries = workspace_list_entries(app);
     for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
         let (row_height, gap) = match entry {
-            WorkspaceListEntry::Workspace { ws_idx, indented } => {
+            WorkspaceListEntry::FolderHeader { .. } => (
+                FOLDER_HEADER_ROWS.min(body.height),
+                workspace_entry_gap(app, &entries, entry_idx),
+            ),
+            WorkspaceListEntry::Workspace {
+                ws_idx, indented, ..
+            } => {
                 let Some(ws) = app.workspaces.get(*ws_idx) else {
                     continue;
                 };
@@ -489,13 +574,19 @@ fn workspace_list_bottom_start(app: &AppState, area: Rect) -> usize {
     let mut used_rows = 0u16;
     let mut start = entries.len();
     for (entry_idx, entry) in entries.iter().enumerate().rev() {
-        let WorkspaceListEntry::Workspace { ws_idx, indented } = entry;
-        let Some(workspace) = app.workspaces.get(*ws_idx) else {
-            continue;
+        let row_height = match entry {
+            WorkspaceListEntry::FolderHeader { .. } => FOLDER_HEADER_ROWS.min(body.height),
+            WorkspaceListEntry::Workspace {
+                ws_idx, indented, ..
+            } => {
+                let Some(workspace) = app.workspaces.get(*ws_idx) else {
+                    continue;
+                };
+                workspace_row_height_in_body(app, workspace, *indented, body.height)
+            }
         };
         let gap = workspace_entry_gap(app, &entries, entry_idx);
-        let needed = workspace_row_height_in_body(app, workspace, *indented, body.height)
-            .saturating_add(gap);
+        let needed = row_height.saturating_add(gap);
         if used_rows.saturating_add(needed) > body.height {
             break;
         }
@@ -658,7 +749,10 @@ pub(crate) fn agent_panel_scrollbar_rect(app: &AppState, area: Rect) -> Option<R
 pub(crate) fn compute_workspace_list_areas(
     app: &AppState,
     area: Rect,
-) -> (Vec<crate::app::state::WorkspaceCardArea>, Vec<()>) {
+) -> (
+    Vec<crate::app::state::WorkspaceCardArea>,
+    Vec<crate::app::state::FolderHeaderArea>,
+) {
     let ws_area = workspace_list_rect(area, app.sidebar_section_split);
     if ws_area == Rect::default() {
         return (Vec::new(), Vec::new());
@@ -674,12 +768,36 @@ pub(crate) fn compute_workspace_list_areas(
     let mut row_y = body.y;
     let body_bottom = body.y + body.height;
     let mut cards = Vec::new();
-    let headers = Vec::new();
+    let mut headers = Vec::new();
 
     let entries = workspace_list_entries(app);
     for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
         match entry {
-            WorkspaceListEntry::Workspace { ws_idx, indented } => {
+            WorkspaceListEntry::FolderHeader { order_idx } => {
+                let Some(crate::folder::SpaceOrderEntry::Folder(folder)) =
+                    app.space_order.get(*order_idx)
+                else {
+                    continue;
+                };
+                let row_height = FOLDER_HEADER_ROWS.min(body.height);
+                let gap = workspace_entry_gap(app, &entries, entry_idx);
+                if row_y.saturating_add(row_height) > body_bottom {
+                    break;
+                }
+                headers.push(crate::app::state::FolderHeaderArea {
+                    folder_id: folder.id.clone(),
+                    rect: Rect::new(body.x, row_y, body.width, row_height),
+                });
+                row_y = row_y
+                    .saturating_add(row_height)
+                    .saturating_add(gap)
+                    .min(body_bottom);
+            }
+            WorkspaceListEntry::Workspace {
+                ws_idx,
+                indented,
+                foldered,
+            } => {
                 let Some(ws) = app.workspaces.get(*ws_idx) else {
                     continue;
                 };
@@ -692,6 +810,7 @@ pub(crate) fn compute_workspace_list_areas(
                     ws_idx: *ws_idx,
                     rect: Rect::new(body.x, row_y, body.width, row_height),
                     indented: *indented,
+                    foldered: *foldered,
                 });
                 row_y = row_y
                     .saturating_add(row_height)
@@ -911,8 +1030,11 @@ pub(crate) fn workspace_drop_slots(
                 WorkspaceListEntry::Workspace {
                     ws_idx,
                     indented: false,
+                    ..
                 } => Some(*ws_idx),
-                WorkspaceListEntry::Workspace { .. } => None,
+                WorkspaceListEntry::Workspace { .. } | WorkspaceListEntry::FolderHeader { .. } => {
+                    None
+                }
             })
     };
 
@@ -954,7 +1076,11 @@ pub(crate) fn workspace_drop_slots(
         Some(WorkspaceListEntry::Workspace { ws_idx, .. }) => {
             crate::app::state::WorkspaceDropTarget::Before(*ws_idx)
         }
-        None => crate::app::state::WorkspaceDropTarget::End,
+        // Drop-before-folder placement is handled by the drag-and-drop work;
+        // for now dropping past the last card of the list appends.
+        Some(WorkspaceListEntry::FolderHeader { .. }) | None => {
+            crate::app::state::WorkspaceDropTarget::End
+        }
     };
     let row = last.rect.y.saturating_add(last.rect.height);
     if row < list_bottom
@@ -1244,6 +1370,26 @@ fn render_workspace_list(
     let cards = &app.view.workspace_card_areas;
     let entries = workspace_list_entries(app);
 
+    for header in &app.view.folder_header_areas {
+        if header.rect.y >= list_bottom || header.rect.width == 0 {
+            continue;
+        }
+        let Some(folder) = app.folder(&header.folder_id) else {
+            continue;
+        };
+        let name = truncate_end(&folder.name, header.rect.width.saturating_sub(1) as usize);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw(" "),
+                Span::styled(
+                    name,
+                    Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+                ),
+            ])),
+            header.rect,
+        );
+    }
+
     for card in cards {
         let i = card.ws_idx;
         let ws = &app.workspaces[i];
@@ -1331,29 +1477,38 @@ fn render_workspace_list(
                 break;
             }
             let mut spans = Vec::new();
-            let prefix_width = if card.indented {
-                spans.push(Span::raw("   "));
-                if row_index == 0 {
-                    spans.push(Span::styled(
-                        if is_last_child { "└─ " } else { "├─ " },
-                        Style::default().fg(p.overlay0),
-                    ));
-                    6
-                } else if is_last_child {
-                    spans.push(Span::raw("     "));
-                    8
-                } else {
-                    spans.push(Span::styled("│", Style::default().fg(p.overlay0)));
-                    spans.push(Span::raw("    "));
-                    8
-                }
-            } else if row_index == 0 {
-                spans.push(Span::raw(" "));
-                1
+            // Foldered cards are nested under their folder header with a
+            // fixed margin; card content is otherwise identical.
+            let folder_margin: u16 = if card.foldered {
+                spans.push(Span::raw("  "));
+                2
             } else {
-                spans.push(Span::raw("   "));
-                3
+                0
             };
+            let prefix_width = folder_margin
+                + if card.indented {
+                    spans.push(Span::raw("   "));
+                    if row_index == 0 {
+                        spans.push(Span::styled(
+                            if is_last_child { "└─ " } else { "├─ " },
+                            Style::default().fg(p.overlay0),
+                        ));
+                        6
+                    } else if is_last_child {
+                        spans.push(Span::raw("     "));
+                        8
+                    } else {
+                        spans.push(Span::styled("│", Style::default().fg(p.overlay0)));
+                        spans.push(Span::raw("    "));
+                        8
+                    }
+                } else if row_index == 0 {
+                    spans.push(Span::raw(" "));
+                    1
+                } else {
+                    spans.push(Span::raw("   "));
+                    3
+                };
             let trailing_width = if row_index == 0 && parent_group.is_some() {
                 2
             } else {
@@ -2674,6 +2829,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             ws_idx: 0,
             rect: Rect::new(0, 1, 15, 2),
             indented: false,
+            foldered: false,
         }];
 
         let mut terminal = Terminal::new(TestBackend::new(15, 6)).expect("test terminal");
@@ -2916,11 +3072,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             vec![
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
-                    indented: false
+                    indented: false,
+                    foldered: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
-                    indented: false
+                    indented: false,
+                    foldered: false,
                 },
             ]
         );
@@ -3002,10 +3160,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
                     indented: false,
+                    foldered: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
                     indented: true,
+                    foldered: false,
                 },
             ]
         );
@@ -3026,14 +3186,17 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
                     indented: false,
+                    foldered: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 2,
                     indented: true,
+                    foldered: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
                     indented: false,
+                    foldered: false,
                 },
             ]
         );
@@ -3053,10 +3216,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
                     indented: false,
+                    foldered: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
                     indented: false,
+                    foldered: false,
                 },
             ]
         );
@@ -3077,14 +3242,17 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
                     indented: false,
+                    foldered: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 2,
                     indented: true,
+                    foldered: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
                     indented: false,
+                    foldered: false,
                 },
             ]
         );
@@ -3104,12 +3272,190 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
                     indented: false,
+                    foldered: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
                     indented: false,
+                    foldered: false,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn workspace_list_entries_nest_folder_members_under_header() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("one"),
+            Workspace::test_new("two"),
+            Workspace::test_new("three"),
+        ];
+        let target = app.workspaces[0].id.clone();
+        let folder_id = app.create_folder("work").expect("create folder");
+        app.assign_workspace_to_folder(&target, Some(&folder_id))
+            .expect("assign");
+        // Canonical order after assign: two, three, [work: one]
+
+        let entries = workspace_list_entries(&app);
+
+        assert_eq!(
+            entries,
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false,
+                    foldered: false,
+                },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 1,
+                    indented: false,
+                    foldered: false,
+                },
+                WorkspaceListEntry::FolderHeader { order_idx: 2 },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 2,
+                    indented: false,
+                    foldered: true,
+                },
+            ]
+        );
+        assert!(matches!(
+            app.space_order.get(2),
+            Some(crate::folder::SpaceOrderEntry::Folder(folder)) if folder.id == folder_id
+        ));
+    }
+
+    #[test]
+    fn workspace_list_entries_render_empty_folder_header() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.create_folder("empty").expect("create folder");
+
+        let entries = workspace_list_entries(&app);
+
+        assert_eq!(
+            entries,
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false,
+                    foldered: false,
+                },
+                WorkspaceListEntry::FolderHeader { order_idx: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn workspace_list_entries_nest_worktree_family_inside_folder() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
+            workspace_with_worktree_space("issue", Some("repo-key"), "/repo/herdr-issue"),
+            Workspace::test_new("notes"),
+        ];
+        let parent = app.workspaces[0].id.clone();
+        let folder_id = app.create_folder("work").expect("create folder");
+        app.assign_workspace_to_folder(&parent, Some(&folder_id))
+            .expect("assign family");
+        // Canonical order after assign: notes, [work: main, issue]
+
+        let entries = workspace_list_entries(&app);
+
+        assert_eq!(
+            entries,
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false,
+                    foldered: false,
+                },
+                WorkspaceListEntry::FolderHeader { order_idx: 1 },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 1,
+                    indented: false,
+                    foldered: true,
+                },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 2,
+                    indented: true,
+                    foldered: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn foldered_space_card_renders_same_content_as_loose_card() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("alpha"), Workspace::test_new("alpha")];
+        for ws in &mut app.workspaces {
+            ws.cached_git_branch = Some("feature/x".into());
+        }
+        let foldered = app.workspaces[1].id.clone();
+        let folder_id = app.create_folder("work").expect("create folder");
+        app.assign_workspace_to_folder(&foldered, Some(&folder_id))
+            .expect("assign");
+        app.sidebar_spaces.rows = vec![
+            vec![
+                crate::config::SpaceSidebarToken::StateIcon,
+                crate::config::SpaceSidebarToken::Workspace,
+            ],
+            vec![crate::config::SpaceSidebarToken::Branch],
+        ];
+        app.sidebar_spaces.row_gap = 0;
+        let area = Rect::new(0, 0, 30, 20);
+        let (cards, headers) = compute_workspace_list_areas(&app, area);
+        app.view.workspace_card_areas = cards;
+        app.view.folder_header_areas = headers;
+        let list_area = workspace_list_rect(area, app.sidebar_section_split);
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_workspace_list(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    list_area,
+                    false,
+                )
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cards = &app.view.workspace_card_areas;
+        assert_eq!(cards.len(), 2, "both space cards must be visible");
+        let row_text = |y: u16| -> String {
+            (0..area.width)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect::<String>()
+        };
+        // Every card row — name and git information — must carry identical
+        // content, differing only in the folder-nesting margin.
+        assert!(cards[0].rect.height >= 2, "cards must include the git row");
+        assert_eq!(cards[0].rect.height, cards[1].rect.height);
+        for row in 0..cards[0].rect.height {
+            let loose_row = row_text(cards[0].rect.y + row);
+            let foldered_row = row_text(cards[1].rect.y + row);
+            assert_eq!(
+                foldered_row.trim(),
+                loose_row.trim(),
+                "foldered card row {row} content must match the loose card"
+            );
+        }
+        assert!(
+            find_symbol_x(buffer, cards[1].rect.y, area.width, "a")
+                > find_symbol_x(buffer, cards[0].rect.y, area.width, "a"),
+            "foldered card must be indented under its folder header"
+        );
+        let headers = &app.view.folder_header_areas;
+        assert_eq!(headers.len(), 1, "folder header must be visible");
+        let header_row = row_text(headers[0].rect.y);
+        assert!(
+            header_row.contains("work"),
+            "folder header row must show the folder name: {header_row:?}"
         );
     }
 
@@ -3130,10 +3476,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
                     indented: false,
+                    foldered: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
                     indented: true,
+                    foldered: false,
                 },
             ]
         );
@@ -3145,6 +3493,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             vec![WorkspaceListEntry::Workspace {
                 ws_idx: 0,
                 indented: false,
+                foldered: false,
             }]
         );
     }
@@ -3167,10 +3516,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
                     indented: false,
+                    foldered: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
                     indented: true,
+                    foldered: false,
                 },
             ]
         );

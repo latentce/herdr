@@ -719,6 +719,7 @@ fn worktree_request_and_response_round_trip() {
                     checkout_path: "/worktrees/herdr/worktree-api".into(),
                     is_linked_worktree: true,
                 }),
+                folder_id: None,
             },
             tab: TabInfo {
                 tab_id: "w_1:1".into(),
@@ -805,6 +806,7 @@ fn worktree_lifecycle_events_round_trip() {
             checkout_path: "/worktrees/herdr/worktree-api".into(),
             is_linked_worktree: true,
         }),
+        folder_id: None,
     };
     let worktree = WorktreeInfo {
         path: "/worktrees/herdr/worktree-api".into(),
@@ -1317,4 +1319,183 @@ fn popup_close_request_round_trips() {
 
     assert_eq!(json["method"], "popup.close");
     assert_eq!(json["params"], serde_json::json!({}));
+}
+
+#[test]
+fn folder_requests_round_trip() {
+    let create = Request {
+        id: "folder-create".into(),
+        method: Method::FolderCreate(FolderCreateParams {
+            name: "work".into(),
+        }),
+    };
+    let json = serde_json::to_value(&create).unwrap();
+    assert_eq!(json["method"], "folder.create");
+    assert_eq!(json["params"]["name"], "work");
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), create);
+
+    let list = Request {
+        id: "folder-list".into(),
+        method: Method::FolderList(EmptyParams::default()),
+    };
+    let json = serde_json::to_value(&list).unwrap();
+    assert_eq!(json["method"], "folder.list");
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), list);
+
+    let assign = Request {
+        id: "folder-assign".into(),
+        method: Method::FolderAssign(FolderAssignParams {
+            workspace_id: "w1".into(),
+            folder_id: Some("f1".into()),
+        }),
+    };
+    let json = serde_json::to_value(&assign).unwrap();
+    assert_eq!(json["method"], "folder.assign");
+    assert_eq!(json["params"]["workspace_id"], "w1");
+    assert_eq!(json["params"]["folder_id"], "f1");
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), assign);
+
+    // Omitting folder_id assigns back to the top level.
+    let unassign: Request = serde_json::from_value(serde_json::json!({
+        "id": "folder-unassign",
+        "method": "folder.assign",
+        "params": { "workspace_id": "w1" },
+    }))
+    .unwrap();
+    assert_eq!(
+        unassign.method,
+        Method::FolderAssign(FolderAssignParams {
+            workspace_id: "w1".into(),
+            folder_id: None,
+        })
+    );
+}
+
+#[test]
+fn folder_responses_round_trip() {
+    let created = SuccessResponse {
+        id: "folder-create".into(),
+        result: ResponseResult::FolderCreated {
+            folder_id: "f1".into(),
+        },
+    };
+    let json = serde_json::to_string(&created).unwrap();
+    assert!(json.contains("\"type\":\"folder_created\""));
+    let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, created);
+
+    let list = SuccessResponse {
+        id: "folder-list".into(),
+        result: ResponseResult::FolderList {
+            folders: vec![FolderInfo {
+                folder_id: "f1".into(),
+                name: "work".into(),
+                members: vec!["w2".into(), "w3".into()],
+            }],
+            order: vec![
+                SpaceOrderEntryInfo {
+                    kind: SpaceOrderEntryKind::Workspace,
+                    id: "w1".into(),
+                },
+                SpaceOrderEntryInfo {
+                    kind: SpaceOrderEntryKind::Folder,
+                    id: "f1".into(),
+                },
+            ],
+        },
+    };
+    let json = serde_json::to_string(&list).unwrap();
+    assert!(json.contains("\"type\":\"folder_list\""));
+    assert!(json.contains("\"kind\":\"folder\""));
+    assert!(json.contains("\"kind\":\"workspace\""));
+    let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, list);
+
+    let assigned = SuccessResponse {
+        id: "folder-assign".into(),
+        result: ResponseResult::FolderAssigned {
+            folder_id: None,
+            workspace_ids: vec!["w1".into(), "w2".into()],
+        },
+    };
+    let json = serde_json::to_string(&assigned).unwrap();
+    assert!(json.contains("\"type\":\"folder_assigned\""));
+    let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, assigned);
+}
+
+#[test]
+fn folder_events_round_trip() {
+    let created = EventEnvelope {
+        event: EventKind::FolderCreated,
+        data: EventData::FolderCreated {
+            folder: FolderInfo {
+                folder_id: "f1".into(),
+                name: "work".into(),
+                members: Vec::new(),
+            },
+        },
+    };
+    let json = serde_json::to_string(&created).unwrap();
+    assert!(json.contains("\"event\":\"folder_created\""));
+    let restored: EventEnvelope = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, created);
+
+    let assigned = EventEnvelope {
+        event: EventKind::FolderAssigned,
+        data: EventData::FolderAssigned {
+            folder_id: Some("f1".into()),
+            workspace_ids: vec!["w1".into(), "w2".into()],
+        },
+    };
+    let json = serde_json::to_string(&assigned).unwrap();
+    assert!(json.contains("\"event\":\"folder_assigned\""));
+    let restored: EventEnvelope = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, assigned);
+
+    let subscription = Request {
+        id: "sub-folders".into(),
+        method: Method::EventsSubscribe(EventsSubscribeParams {
+            subscriptions: vec![
+                Subscription::FolderCreated {},
+                Subscription::FolderAssigned {},
+            ],
+        }),
+    };
+    let json = serde_json::to_string(&subscription).unwrap();
+    assert!(json.contains("\"type\":\"folder.created\""));
+    assert!(json.contains("\"type\":\"folder.assigned\""));
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, subscription);
+}
+
+#[test]
+fn workspace_info_omits_absent_folder_id() {
+    let workspace = WorkspaceInfo {
+        workspace_id: "w1".into(),
+        number: 1,
+        label: "herdr".into(),
+        focused: false,
+        pane_count: 1,
+        tab_count: 1,
+        active_tab_id: "w1:1".into(),
+        agent_status: AgentStatus::Unknown,
+        tokens: HashMap::new(),
+        worktree: None,
+        folder_id: None,
+    };
+    let json = serde_json::to_value(&workspace).unwrap();
+    assert!(
+        json.get("folder_id").is_none(),
+        "loose workspaces omit folder_id: {json}"
+    );
+
+    let foldered = WorkspaceInfo {
+        folder_id: Some("f1".into()),
+        ..workspace
+    };
+    let json = serde_json::to_value(&foldered).unwrap();
+    assert_eq!(json["folder_id"], "f1");
+    let restored: WorkspaceInfo = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, foldered);
 }

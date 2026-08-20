@@ -651,7 +651,17 @@ impl Palette {
 pub struct WorkspaceCardArea {
     pub ws_idx: usize,
     pub rect: Rect,
+    /// Indented as a worktree family child under its parent checkout.
     pub indented: bool,
+    /// Nested under a folder header.
+    pub foldered: bool,
+}
+
+/// Screen area of one folder header row in the spaces panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderHeaderArea {
+    pub folder_id: String,
+    pub rect: Rect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -809,6 +819,7 @@ pub struct ViewState {
     pub layout: ViewLayout,
     pub sidebar_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
+    pub folder_header_areas: Vec<FolderHeaderArea>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
     pub tab_scroll_left_hit_area: Rect,
@@ -1379,6 +1390,11 @@ pub struct AppState {
     pub(crate) pane_id_aliases: std::collections::HashMap<u32, PaneId>,
     pub(crate) public_pane_id_aliases: std::collections::HashMap<String, PaneId>,
     pub workspaces: Vec<Workspace>,
+    /// Space order — the explicit top-level sequence interleaving folders and
+    /// loose spaces. Workspaces absent from it are implicitly loose at the
+    /// end. `workspaces` is kept sorted to the canonical flattening of this
+    /// order (see `canonical_workspace_order`).
+    pub space_order: Vec<crate::folder::SpaceOrderEntry>,
     pub active: Option<usize>,
     pub(crate) previous_pane_focus: Option<PaneFocusTarget>,
     pub selected: usize,
@@ -1770,6 +1786,7 @@ impl AppState {
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces: Vec::new(),
+            space_order: Vec::new(),
             active: None,
             previous_pane_focus: None,
             selected: 0,
@@ -1815,6 +1832,7 @@ impl AppState {
                 layout: ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
+                folder_header_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),
@@ -2044,9 +2062,11 @@ impl AppState {
                 self.host_mouse_pixels.is_none(),
                 "empty app state must not keep host mouse pixel provenance"
             );
+            self.assert_space_order_invariants_for_test();
             return;
         }
 
+        self.assert_space_order_invariants_for_test();
         assert!(
             self.selected < self.workspaces.len(),
             "selected workspace {} out of bounds for {} workspaces",
