@@ -1,0 +1,262 @@
+name: Fork Release
+
+# Tracks upstream herdrdev/herdr stable releases, merges them into the `fork`
+# branch (which carries local patches), builds binaries, and publishes a
+# GitHub release on this fork together with a `latest.json` update manifest.
+#
+# The patched binary points its stable update channel at:
+#   https://github.com/latentce/herdr/releases/latest/download/latest.json
+# so installed fork builds self-update from these releases.
+#
+# Requirements:
+# - This workflow must live on the repository's default branch for the cron
+#   schedule to fire (set `fork` as the default branch of this fork).
+# - A repository secret FORK_SYNC_TOKEN containing a fine-grained PAT with
+#   Contents: read/write and Workflows: read/write on this repo. The default
+#   GITHUB_TOKEN cannot push merges that touch .github/workflows files.
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: herdrdev/herdr
+  FORK_BRANCH: fork
+  RUST_TOOLCHAIN_VERSION: 1.96.1
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      build_needed: ${{ steps.decide.outputs.build_needed }}
+      version: ${{ steps.decide.outputs.version }}
+      fork_tag: ${{ steps.decide.outputs.fork_tag }}
+      commit: ${{ steps.merge.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FORK_BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.FORK_SYNC_TOKEN }}
+
+      - name: Find latest upstream stable release
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          UPSTREAM_TAG=$(git ls-remote --tags "https://github.com/${UPSTREAM_REPO}" 'v*' \
+            | awk '{print $2}' \
+            | sed 's|refs/tags/||; s|\^{}||' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -Vu | tail -1)
+          if [ -z "$UPSTREAM_TAG" ]; then
+            echo "error: could not determine latest upstream release tag" >&2
+            exit 1
+          fi
+          VERSION="${UPSTREAM_TAG#v}"
+          FORK_TAG="fork-${UPSTREAM_TAG}"
+          echo "Latest upstream release: $UPSTREAM_TAG (fork tag: $FORK_TAG)"
+          if gh release view "$FORK_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $FORK_TAG already exists; nothing to do."
+            echo "build_needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build_needed=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "fork_tag=$FORK_TAG" >> "$GITHUB_OUTPUT"
+          echo "upstream_tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Merge upstream release into fork branch
+        id: merge
+        if: steps.decide.outputs.build_needed == 'true'
+        env:
+          UPSTREAM_TAG: ${{ steps.decide.outputs.upstream_tag }}
+          VERSION: ${{ steps.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}"
+          git fetch upstream "refs/tags/${UPSTREAM_TAG}:refs/tags/${UPSTREAM_TAG}" --no-tags
+          if ! git merge --no-edit "$UPSTREAM_TAG"; then
+            echo "::error::Merge of $UPSTREAM_TAG into $FORK_BRANCH has conflicts." \
+              "Resolve locally: git fetch upstream; git merge $UPSTREAM_TAG; push $FORK_BRANCH; then re-run this workflow."
+            exit 1
+          fi
+          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$CARGO_VERSION" != "$VERSION" ]; then
+            echo "::error::Cargo.toml version $CARGO_VERSION does not match upstream tag v$VERSION after merge."
+            exit 1
+          fi
+          git push origin "HEAD:${FORK_BRANCH}"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: sync
+    if: needs.sync.outputs.build_needed == 'true'
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            name: herdr-linux-x86_64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            name: herdr-linux-aarch64
+          # To also build macOS assets, uncomment:
+          # - target: x86_64-apple-darwin
+          #   os: macos-latest
+          #   name: herdr-macos-x86_64
+          # - target: aarch64-apple-darwin
+          #   os: macos-latest
+          #   name: herdr-macos-aarch64
+    runs-on: ${{ matrix.os }}
+    env:
+      LIBGHOSTTY_VT_OPTIMIZE: ReleaseFast
+      LIBGHOSTTY_VT_SIMD: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.commit }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          targets: ${{ matrix.target }}
+
+      - name: Install Zig
+        if: runner.os != 'macOS'
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Install patched Zig on macOS
+        if: runner.os == 'macOS'
+        run: |
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install zig@0.15 cmake ninja
+          echo "$(brew --prefix zig@0.15)/bin" >> "$GITHUB_PATH"
+
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build musl-tools gcc-aarch64-linux-gnu crossbuild-essential-arm64
+
+      - name: Set Linux aarch64 linker
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: fork-release-${{ matrix.target }}
+
+      - name: Remove Zig caches
+        shell: bash
+        run: rm -rf .zig-cache vendor/libghostty-vt/.zig-cache vendor/libghostty-vt/zig-out
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package artifact
+        shell: bash
+        run: cp target/${{ matrix.target }}/release/herdr ${{ matrix.name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}
+
+  release:
+    needs: [sync, build]
+    if: needs.sync.outputs.build_needed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.commit }}
+          persist-credentials: false
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Generate latest.json
+        env:
+          VERSION: ${{ needs.sync.outputs.version }}
+          FORK_TAG: ${{ needs.sync.outputs.fork_tag }}
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF'
+          import hashlib, json, os, re
+
+          version = os.environ["VERSION"]
+          fork_tag = os.environ["FORK_TAG"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          base = f"https://github.com/{repo}/releases/download/{fork_tag}"
+
+          wire = open("src/protocol/wire.rs").read()
+          match = re.search(r"pub const PROTOCOL_VERSION: u32 = (\d+);", wire)
+          if match is None:
+              raise SystemExit("could not extract PROTOCOL_VERSION")
+          protocol = int(match.group(1))
+
+          platforms = {
+              "linux-x86_64": "herdr-linux-x86_64",
+              "linux-aarch64": "herdr-linux-aarch64",
+              "macos-x86_64": "herdr-macos-x86_64",
+              "macos-aarch64": "herdr-macos-aarch64",
+          }
+          assets, sha256 = {}, {}
+          for key, filename in platforms.items():
+              if not os.path.exists(filename):
+                  continue
+              digest = hashlib.sha256(open(filename, "rb").read()).hexdigest()
+              assets[key] = f"{base}/{filename}"
+              sha256[key] = digest
+          if not assets:
+              raise SystemExit("no release assets found")
+
+          manifest = {
+              "version": version,
+              "protocol": protocol,
+              "notes": (
+                  f"Fork build of herdr v{version} with latentce patches.\n"
+                  f"Upstream release notes: "
+                  f"https://github.com/herdrdev/herdr/releases/tag/v{version}"
+              ),
+              "assets": assets,
+              "sha256": sha256,
+          }
+          with open("latest.json", "w") as f:
+              json.dump(manifest, f, indent=2)
+          print(json.dumps(manifest, indent=2))
+          EOF
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.sync.outputs.version }}
+          FORK_TAG: ${{ needs.sync.outputs.fork_tag }}
+          COMMIT: ${{ needs.sync.outputs.commit }}
+        run: |
+          set -euo pipefail
+          FILES=(latest.json)
+          for f in herdr-linux-x86_64 herdr-linux-aarch64 herdr-macos-x86_64 herdr-macos-aarch64; do
+            [ -f "$f" ] && FILES+=("$f")
+          done
+          gh release create "$FORK_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$COMMIT" \
+            --title "herdr v$VERSION (fork)" \
+            --notes "Fork build of herdr v$VERSION with latentce patches. Upstream notes: https://github.com/herdrdev/herdr/releases/tag/v$VERSION" \
+            "${FILES[@]}"

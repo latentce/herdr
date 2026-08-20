@@ -22,7 +22,11 @@ use std::time::{Duration, Instant};
 use interprocess::local_socket::traits::Stream as _;
 use serde::{Deserialize, Deserializer};
 
-const STABLE_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
+// Fork patch: stable updates come from the latentce/herdr fork releases
+// instead of the official herdr.dev manifest. The preview channel still
+// points at upstream.
+const STABLE_UPDATE_MANIFEST_URL: &str =
+    "https://github.com/latentce/herdr/releases/latest/download/latest.json";
 const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
 const HOMEBREW_FORMULA_API_URL: &str = "https://formulae.brew.sh/api/formula/herdr.json";
 const HERDR_UPDATE_COMMAND: &str = "herdr update";
