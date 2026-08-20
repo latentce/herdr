@@ -4,7 +4,7 @@
 > Install the fork build (Linux):
 >
 > ```bash
-> curl -fsSL https://raw.githubusercontent.com/latentce/herdr/fork/website/install.sh | sh
+> curl -fsSL https://latentce.github.io/herdr/install.sh | sh
 > ```
 >
 > Upstream's README follows below.
