@@ -257,6 +257,7 @@ fn agent_panel_sort_from_config(
     match sort {
         crate::config::AgentPanelSortConfig::Spaces => state::AgentPanelSort::Spaces,
         crate::config::AgentPanelSortConfig::Priority => state::AgentPanelSort::Priority,
+        crate::config::AgentPanelSortConfig::Folders => state::AgentPanelSort::Folders,
     }
 }
 
@@ -2787,6 +2788,17 @@ mod tests {
     }
 
     #[test]
+    fn startup_uses_configured_folder_view_agent_panel_sort() {
+        let mut config = Config::default();
+        config.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Folders;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+
+        assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Folders);
+    }
+
+    #[test]
     fn startup_uses_configured_sidebar_state() {
         let mut config = Config::default();
         config.ui.sidebar_start_collapsed = true;
@@ -3651,6 +3663,13 @@ mod tests {
         assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Priority);
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("agent_panel_sort = \"priority\""));
+        assert!(app.state.config_diagnostic.is_none());
+
+        app.save_agent_panel_sort(state::AgentPanelSort::Folders);
+
+        assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Folders);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("agent_panel_sort = \"folders\""));
         assert!(app.state.config_diagnostic.is_none());
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);

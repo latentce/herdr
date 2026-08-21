@@ -99,6 +99,7 @@ pub enum AgentPanelSortConfig {
     #[serde(alias = "workspaces")]
     Spaces,
     Priority,
+    Folders,
 }
 
 impl AgentPanelSortConfig {
@@ -106,6 +107,7 @@ impl AgentPanelSortConfig {
         match self {
             Self::Spaces => "spaces",
             Self::Priority => "priority",
+            Self::Folders => "folders",
         }
     }
 }
@@ -1364,6 +1366,13 @@ agent_panel_sort = "workspaces"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.ui.agent_panel_sort, AgentPanelSortConfig::Spaces);
+
+        let toml = r#"
+[ui]
+agent_panel_sort = "folders"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.agent_panel_sort, AgentPanelSortConfig::Folders);
 
         let toml = r#"
 [ui]

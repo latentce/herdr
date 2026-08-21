@@ -697,18 +697,24 @@ impl AppState {
         let mut row_y = body.y;
         let body_bottom = body.y + body.height;
         let entries = crate::ui::agent_panel_entries(self);
+        let rows = crate::ui::agent_panel_list_entries(self, &entries);
         let scroll = self.agent_panel_scroll.min(metrics.max_offset_from_bottom);
-        for (index, detail) in entries.iter().enumerate().skip(scroll) {
-            let height = crate::ui::agent_entry_height_in_body(self, detail, body.height);
+        for (index, list_row) in rows.iter().enumerate().skip(scroll) {
+            let height = crate::ui::agent_row_height_in_body(self, &entries, list_row, body.height);
             if row_y.saturating_add(height) > body_bottom {
                 break;
             }
             if row >= row_y && row < row_y.saturating_add(height) {
-                return Some((detail.ws_idx, detail.tab_idx, detail.pane_id));
+                return match list_row {
+                    crate::ui::AgentPanelListEntry::Agent { entry_idx } => entries
+                        .get(*entry_idx)
+                        .map(|detail| (detail.ws_idx, detail.tab_idx, detail.pane_id)),
+                    _ => None,
+                };
             }
             row_y = row_y
                 .saturating_add(height)
-                .saturating_add(crate::ui::agent_entry_gap(self, index, entries.len()))
+                .saturating_add(crate::ui::agent_row_gap(self, &rows, index))
                 .min(body_bottom);
         }
         None
@@ -1039,7 +1045,52 @@ mod tests {
     }
 
     #[test]
-    fn clicking_agent_panel_toggle_switches_sort() {
+    fn folder_view_agent_hit_testing_skips_headers_and_targets_agents() {
+        let mut app = app_for_mouse_test();
+        let first = Workspace::test_new("one");
+        let first_pane = first.tabs[0].root_pane;
+        let second = Workspace::test_new("two");
+        let second_pane = second.tabs[0].root_pane;
+        app.state.workspaces = vec![first, second];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        for (ws_idx, pane_id) in [(0, first_pane), (1, second_pane)] {
+            let terminal_id = app.state.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .detected_agent = Some(Agent::Claude);
+        }
+        app.state.sidebar_agents.rows = vec![vec![crate::config::AgentSidebarToken::StateIcon]];
+        app.state.sidebar_agents.row_gap = 0;
+        app.state.agent_panel_sort = AgentPanelSort::Folders;
+
+        let detail_area = app.state.agent_panel_rect();
+        let metrics = crate::ui::agent_panel_scroll_metrics(&app.state, detail_area);
+        let body = crate::ui::agent_panel_body_rect(
+            detail_area,
+            crate::ui::should_show_scrollbar(metrics),
+        );
+
+        // Rows: header(one), agent, header(two), agent.
+        assert_eq!(app.state.agent_detail_target_at(body.y), None);
+        assert_eq!(
+            app.state.agent_detail_target_at(body.y + 1),
+            Some((0, 0, first_pane))
+        );
+        assert_eq!(app.state.agent_detail_target_at(body.y + 2), None);
+        assert_eq!(
+            app.state.agent_detail_target_at(body.y + 3),
+            Some((1, 0, second_pane))
+        );
+    }
+
+    #[test]
+    fn clicking_agent_panel_toggle_cycles_grouped_priority_folders() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
@@ -1047,19 +1098,29 @@ mod tests {
         app.state.mode = Mode::Terminal;
         app.state.agent_panel_scroll = 3;
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
-            app.state.view.sidebar_rect,
-            app.state.sidebar_section_split,
-        );
-        let toggle = crate::ui::agent_panel_toggle_rect(detail_area, app.state.agent_panel_sort);
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            toggle.x,
-            toggle.y,
-        ));
+        let click_toggle = |app: &mut crate::app::App| {
+            let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+                app.state.view.sidebar_rect,
+                app.state.sidebar_section_split,
+            );
+            let toggle =
+                crate::ui::agent_panel_toggle_rect(detail_area, app.state.agent_panel_sort);
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                toggle.x,
+                toggle.y,
+            ));
+        };
 
+        click_toggle(&mut app);
         assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Priority);
         assert_eq!(app.state.agent_panel_scroll, 0);
+
+        click_toggle(&mut app);
+        assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Folders);
+
+        click_toggle(&mut app);
+        assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Spaces);
     }
 
     #[test]

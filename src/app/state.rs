@@ -1024,6 +1024,9 @@ pub enum AgentPanelSort {
     #[default]
     Spaces,
     Priority,
+    /// Folder view: agents nested under their space, spaces under their
+    /// folder, mirroring the spaces panel's organization.
+    Folders,
 }
 
 // ---------------------------------------------------------------------------

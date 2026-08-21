@@ -1571,11 +1571,14 @@ impl AppState {
             self.view.sidebar_rect,
             self.sidebar_section_split,
         );
+        // Scroll targets address display rows; in the folder view an agent
+        // entry sits below the headers that precede it.
+        let target = crate::ui::agent_panel_row_for_entry(self, idx);
         self.agent_panel_scroll = crate::ui::agent_panel_scroll_for_target(
             self,
             detail_area,
             self.agent_panel_scroll,
-            idx,
+            target,
         );
     }
 
@@ -4321,6 +4324,78 @@ mod tests {
         assert!(state.focus_agent_entry(0));
         assert_eq!(state.active, Some(0));
         assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
+        state.assert_invariants_for_test();
+    }
+
+    /// Non-contiguous worktree family, so the folder view's visual order
+    /// (parent, hoisted child, then the loose space) differs from the raw
+    /// workspace order (parent, loose space, child).
+    fn folder_view_family_state() -> AppState {
+        let make_member = |name: &str, key: &str, checkout: &str| {
+            let mut ws = Workspace::test_new(name);
+            ws.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+                key: key.into(),
+                label: "herdr".into(),
+                repo_root: std::path::PathBuf::from("/repo/herdr"),
+                checkout_path: std::path::PathBuf::from(checkout),
+                is_linked_worktree: name != "main",
+            });
+            ws
+        };
+
+        let mut state = AppState::test_new();
+        state.workspaces = vec![
+            make_member("main", "repo-key", "/repo/herdr"),
+            Workspace::test_new("normal"),
+            make_member("issue", "repo-key", "/repo/herdr-issue"),
+        ];
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = Mode::Terminal;
+        state.agent_panel_sort = crate::app::state::AgentPanelSort::Folders;
+        for ws_idx in 0..state.workspaces.len() {
+            let pane_id = state.workspaces[ws_idx].tabs[0].root_pane;
+            mark_agent(&mut state, ws_idx, 0, pane_id);
+        }
+        state
+    }
+
+    #[test]
+    fn next_agent_cycles_folder_view_agent_panel_entries() {
+        let mut state = folder_view_family_state();
+
+        state.next_agent();
+        assert_eq!(
+            state.active,
+            Some(2),
+            "the hoisted family child follows its parent in the folder view"
+        );
+
+        state.next_agent();
+        assert_eq!(state.active, Some(1));
+
+        state.next_agent();
+        assert_eq!(state.active, Some(0), "cycling wraps to the first entry");
+
+        state.previous_agent();
+        assert_eq!(state.active, Some(1));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn focus_agent_entry_follows_folder_view_order() {
+        let mut state = folder_view_family_state();
+
+        assert!(state.focus_agent_entry(1));
+        assert_eq!(
+            state.active,
+            Some(2),
+            "numbered focus lands on the hoisted family child, matching the rendered order"
+        );
+
+        assert!(state.focus_agent_entry(2));
+        assert_eq!(state.active, Some(1));
         state.assert_invariants_for_test();
     }
 
