@@ -518,6 +518,22 @@ impl AppState {
         crate::folder::folder_id_of_workspace(&self.space_order, workspace_id)
     }
 
+    /// Move targets for the given workspace's "Move to folder ▸" menu:
+    /// `(folder_id, name)` in canonical top-level order, excluding the folder
+    /// the workspace is already in.
+    pub fn folder_move_targets(&self, workspace_id: &str) -> Vec<(String, String)> {
+        let current = self.workspace_folder_id(workspace_id);
+        self.space_order
+            .iter()
+            .filter_map(|entry| match entry {
+                SpaceOrderEntry::Folder(folder) if Some(folder.id.as_str()) != current => {
+                    Some((folder.id.clone(), folder.name.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Canonical workspace-id order: the space order flattened, with unlisted
     /// workspaces appended at the end in their current vec order.
     pub fn canonical_workspace_order(&self) -> Vec<String> {

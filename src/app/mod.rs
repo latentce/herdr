@@ -576,6 +576,7 @@ impl App {
             pending_workspace_create_cwd: None,
             rename_pane_target: None,
             rename_folder_target: None,
+            pending_folder_create: None,
             worktree_create: None,
             worktree_open: None,
             worktree_remove: None,
@@ -6171,12 +6172,27 @@ last_pane = "prefix+tab"
         app.state.selected = 0;
         app.state.confirm_close = false;
         app.state.context_menu = Some(state::ContextMenuState {
-            kind: state::ContextMenuKind::Workspace { ws_idx: 1 },
+            kind: state::ContextMenuKind::Workspace {
+                ws_idx: 1,
+                foldered: false,
+            },
             x: 2,
             y: 2,
             list: state::MenuListState::new(1),
         });
         app.state.mode = Mode::ContextMenu;
+        let close_idx = app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("context menu open")
+            .items()
+            .iter()
+            .position(|item| item == "Close")
+            .expect("close item present");
+        if let Some(menu) = &mut app.state.context_menu {
+            menu.list = state::MenuListState::new(close_idx);
+        }
 
         app.route_client_input(b"\r".to_vec());
 

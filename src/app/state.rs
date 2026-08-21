@@ -1204,10 +1204,19 @@ pub(crate) struct TabPressState {
     pub start_row: u16,
 }
 
+/// "Move to folder ▸" opens the folder-target submenu for a space.
+pub const MENU_ITEM_MOVE_TO_FOLDER: &str = "Move to folder \u{25b8}";
+/// "Remove from folder" returns a foldered space to the top level.
+pub const MENU_ITEM_REMOVE_FROM_FOLDER: &str = "Remove from folder";
+/// "New folder..." prompts for a name and creates a folder.
+pub const MENU_ITEM_NEW_FOLDER: &str = "New folder...";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextMenuKind {
     Workspace {
         ws_idx: usize,
+        /// Whether the space is inside a folder, captured at menu-open time.
+        foldered: bool,
     },
     Folder {
         folder_id: String,
@@ -1217,7 +1226,19 @@ pub enum ContextMenuKind {
         is_linked_worktree: bool,
         has_worktree_children: bool,
         collapsed: bool,
+        /// Whether the space is inside a folder, captured at menu-open time.
+        foldered: bool,
     },
+    /// Second-level menu listing folder targets for "Move to folder ▸".
+    MoveToFolder {
+        ws_idx: usize,
+        /// `(folder_id, name)` snapshot in canonical top-level order,
+        /// excluding the folder the space is already in. Items dispatch by
+        /// index because duplicate folder names are allowed.
+        folders: Vec<(String, String)>,
+    },
+    /// Spaces-panel header/background menu.
+    SpacesPanel,
     Tab {
         ws_idx: usize,
         tab_idx: usize,
@@ -1232,6 +1253,14 @@ pub enum ContextMenuKind {
     },
 }
 
+/// Folder creation prompted through the shared rename modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingFolderCreate {
+    /// Space to move into the folder once created (the create-and-move flow
+    /// from "Move to folder ▸ New folder..."). `None` creates an empty folder.
+    pub move_workspace_id: Option<String>,
+}
+
 /// Right-click context menu state.
 pub struct ContextMenuState {
     pub kind: ContextMenuKind,
@@ -1241,32 +1270,63 @@ pub struct ContextMenuState {
 }
 
 impl ContextMenuState {
-    pub fn items(&self) -> Vec<&'static str> {
-        match self.kind {
-            ContextMenuKind::Workspace { .. } => vec!["Rename", "Close"],
-            ContextMenuKind::Folder { .. } => vec!["Rename", "Delete"],
+    pub fn items(&self) -> Vec<std::borrow::Cow<'static, str>> {
+        use std::borrow::Cow;
+
+        /// A space menu: Rename, the folder move items, then the
+        /// variant-specific tail.
+        fn space_items(foldered: bool, tail: &[&'static str]) -> Vec<Cow<'static, str>> {
+            let mut items = vec![
+                Cow::Borrowed("Rename"),
+                Cow::Borrowed(MENU_ITEM_MOVE_TO_FOLDER),
+            ];
+            if foldered {
+                items.push(Cow::Borrowed(MENU_ITEM_REMOVE_FROM_FOLDER));
+            }
+            items.extend(tail.iter().copied().map(Cow::Borrowed));
+            items
+        }
+
+        fn fixed(items: &[&'static str]) -> Vec<Cow<'static, str>> {
+            items.iter().copied().map(Cow::Borrowed).collect()
+        }
+
+        match &self.kind {
+            ContextMenuKind::Workspace { foldered, .. } => space_items(*foldered, &["Close"]),
+            ContextMenuKind::Folder { .. } => fixed(&["Rename", "Delete"]),
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: false,
+                foldered,
                 ..
-            } => vec!["Rename", "Close", "New worktree", "Open worktree..."],
+            } => space_items(*foldered, &["Close", "New worktree", "Open worktree..."]),
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: true,
+                foldered,
                 ..
-            } => vec!["Rename", "Close", "Delete worktree checkout..."],
+            } => space_items(*foldered, &["Close", "Delete worktree checkout..."]),
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: true,
                 collapsed,
+                foldered,
                 ..
-            } => vec![
-                "Rename",
-                "Close group",
-                "New worktree",
-                "Open worktree...",
-                if collapsed { "Expand" } else { "Collapse" },
-            ],
-            ContextMenuKind::Tab { .. } => vec!["New tab", "Rename", "Close"],
+            } => space_items(
+                *foldered,
+                &[
+                    "Close group",
+                    "New worktree",
+                    "Open worktree...",
+                    if *collapsed { "Expand" } else { "Collapse" },
+                ],
+            ),
+            ContextMenuKind::MoveToFolder { folders, .. } => folders
+                .iter()
+                .map(|(_, name)| Cow::Owned(name.clone()))
+                .chain(std::iter::once(Cow::Borrowed(MENU_ITEM_NEW_FOLDER)))
+                .collect(),
+            ContextMenuKind::SpacesPanel => fixed(&[MENU_ITEM_NEW_FOLDER]),
+            ContextMenuKind::Tab { .. } => fixed(&["New tab", "Rename", "Close"]),
             ContextMenuKind::Pane {
                 source_pane_id,
                 has_manual_label,
@@ -1274,20 +1334,20 @@ impl ContextMenuState {
                 ..
             } => {
                 let mut items = vec!["Rename pane"];
-                if has_manual_label {
+                if *has_manual_label {
                     items.push("Clear pane name");
                 }
                 if source_pane_id.is_some() {
                     items.push("Swap with focused pane");
                 }
                 items.extend(["Split right", "Split down", "Zoom"]);
-                items.push(if right_click_passthrough {
+                items.push(if *right_click_passthrough {
                     "Use Herdr right-click menu"
                 } else {
                     "Send right-clicks to pane"
                 });
                 items.push("Close pane");
-                items
+                fixed(&items)
             }
         }
     }
@@ -1432,6 +1492,9 @@ pub struct AppState {
     pub rename_pane_target: Option<PaneId>,
     /// Folder being renamed while `mode == Mode::RenameFolder`.
     pub rename_folder_target: Option<String>,
+    /// Folder creation prompt while `mode == Mode::RenameFolder` and no
+    /// `rename_folder_target` is set.
+    pub pending_folder_create: Option<PendingFolderCreate>,
     pub worktree_create: Option<WorktreeCreateState>,
     pub worktree_open: Option<WorktreeOpenState>,
     pub worktree_remove: Option<WorktreeRemoveState>,
@@ -1818,6 +1881,7 @@ impl AppState {
             pending_workspace_create_cwd: None,
             rename_pane_target: None,
             rename_folder_target: None,
+            pending_folder_create: None,
             worktree_create: None,
             worktree_open: None,
             worktree_remove: None,
@@ -2266,10 +2330,16 @@ impl AppState {
         }
         if let Some(menu) = &self.context_menu {
             match &menu.kind {
-                ContextMenuKind::Workspace { ws_idx }
+                ContextMenuKind::Workspace { ws_idx, .. }
                 | ContextMenuKind::GitWorkspace { ws_idx, .. } => {
                     assert_workspace_index(*ws_idx, "context menu workspace")
                 }
+                ContextMenuKind::MoveToFolder { ws_idx, .. } => {
+                    // The folder list is a deliberate open-time snapshot, so
+                    // only the workspace reference is asserted.
+                    assert_workspace_index(*ws_idx, "context menu move-to-folder")
+                }
+                ContextMenuKind::SpacesPanel => {}
                 ContextMenuKind::Folder { folder_id } => {
                     assert!(
                         self.folder(folder_id).is_some(),
@@ -2599,6 +2669,7 @@ mod tests {
                 is_linked_worktree: true,
                 has_worktree_children: false,
                 collapsed: false,
+                foldered: false,
             },
             x: 0,
             y: 0,
@@ -2607,7 +2678,12 @@ mod tests {
 
         assert_eq!(
             menu.items(),
-            &["Rename", "Close", "Delete worktree checkout..."]
+            &[
+                "Rename",
+                MENU_ITEM_MOVE_TO_FOLDER,
+                "Close",
+                "Delete worktree checkout..."
+            ]
         );
     }
 
@@ -2619,6 +2695,7 @@ mod tests {
                 is_linked_worktree: false,
                 has_worktree_children: false,
                 collapsed: false,
+                foldered: false,
             },
             x: 0,
             y: 0,
@@ -2627,7 +2704,13 @@ mod tests {
 
         assert_eq!(
             menu.items(),
-            &["Rename", "Close", "New worktree", "Open worktree..."]
+            &[
+                "Rename",
+                MENU_ITEM_MOVE_TO_FOLDER,
+                "Close",
+                "New worktree",
+                "Open worktree..."
+            ]
         );
     }
 
@@ -2639,6 +2722,7 @@ mod tests {
                 is_linked_worktree: false,
                 has_worktree_children: true,
                 collapsed: false,
+                foldered: false,
             },
             x: 0,
             y: 0,
@@ -2649,11 +2733,75 @@ mod tests {
             menu.items(),
             &[
                 "Rename",
+                MENU_ITEM_MOVE_TO_FOLDER,
                 "Close group",
                 "New worktree",
                 "Open worktree...",
                 "Collapse"
             ]
         );
+    }
+
+    #[test]
+    fn space_context_menu_shows_remove_from_folder_only_when_foldered() {
+        let loose = ContextMenuState {
+            kind: ContextMenuKind::Workspace {
+                ws_idx: 0,
+                foldered: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        assert_eq!(
+            loose.items(),
+            &["Rename", MENU_ITEM_MOVE_TO_FOLDER, "Close"]
+        );
+
+        let foldered = ContextMenuState {
+            kind: ContextMenuKind::Workspace {
+                ws_idx: 0,
+                foldered: true,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        assert_eq!(
+            foldered.items(),
+            &[
+                "Rename",
+                MENU_ITEM_MOVE_TO_FOLDER,
+                MENU_ITEM_REMOVE_FROM_FOLDER,
+                "Close"
+            ]
+        );
+    }
+
+    #[test]
+    fn move_to_folder_menu_lists_folder_names_then_new_folder() {
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::MoveToFolder {
+                ws_idx: 0,
+                folders: vec![("f_1".into(), "work".into()), ("f_2".into(), "work".into())],
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+
+        assert_eq!(menu.items(), &["work", "work", MENU_ITEM_NEW_FOLDER]);
+    }
+
+    #[test]
+    fn spaces_panel_menu_offers_folder_creation() {
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::SpacesPanel,
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+
+        assert_eq!(menu.items(), &[MENU_ITEM_NEW_FOLDER]);
     }
 }

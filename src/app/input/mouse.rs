@@ -1055,6 +1055,10 @@ impl AppState {
                 }
                 if let Some(idx) = self.workspace_at_row(mouse.row) {
                     self.selected = idx;
+                    let foldered = self
+                        .workspaces
+                        .get(idx)
+                        .is_some_and(|ws| self.workspace_folder_id(&ws.id).is_some());
                     let kind = self
                         .workspaces
                         .get(idx)
@@ -1084,11 +1088,31 @@ impl AppState {
                                 collapsed: group_state
                                     .as_ref()
                                     .is_some_and(|(_, collapsed)| *collapsed),
+                                foldered,
                             })
                         })
-                        .unwrap_or(ContextMenuKind::Workspace { ws_idx: idx });
+                        .unwrap_or(ContextMenuKind::Workspace {
+                            ws_idx: idx,
+                            foldered,
+                        });
                     self.context_menu = Some(ContextMenuState {
                         kind,
+                        x: mouse.column,
+                        y: mouse.row,
+                        list: MenuListState::new(0),
+                    });
+                    self.mode = Mode::ContextMenu;
+                    return None;
+                }
+                // Header/background of the spaces panel: offer folder
+                // creation so an empty folder can be made before any space
+                // moves. The footer row keeps its buttons untouched.
+                let list_area = self.workspace_list_rect();
+                let footer = self.sidebar_footer_rect();
+                let on_footer = footer != Rect::default() && mouse.row == footer.y;
+                if rect_contains(list_area, mouse.column, mouse.row) && !on_footer {
+                    self.context_menu = Some(ContextMenuState {
+                        kind: ContextMenuKind::SpacesPanel,
                         x: mouse.column,
                         y: mouse.row,
                         list: MenuListState::new(0),
@@ -2016,6 +2040,18 @@ mod tests {
         detect::{Agent, AgentState},
         workspace::Workspace,
     };
+
+    /// The index of the "Close" item in the currently open context menu.
+    fn close_item_index(state: &AppState) -> usize {
+        state
+            .context_menu
+            .as_ref()
+            .expect("context menu open")
+            .items()
+            .iter()
+            .position(|item| item == "Close")
+            .expect("close item present")
+    }
 
     #[test]
     fn tab_click_survives_stray_drag_report_off_the_tab_bar() {
@@ -3161,7 +3197,10 @@ mod tests {
                 ..
             } if pane_id == target && source_pane_id == source
         ));
-        assert!(menu.items().contains(&"Swap with focused pane"));
+        assert!(menu
+            .items()
+            .iter()
+            .any(|item| item == "Swap with focused pane"));
     }
 
     #[tokio::test]
@@ -3290,7 +3329,10 @@ mod tests {
     fn hovering_context_menu_updates_highlight() {
         let mut app = app_for_mouse_test();
         app.state.context_menu = Some(ContextMenuState {
-            kind: ContextMenuKind::Workspace { ws_idx: 0 },
+            kind: ContextMenuKind::Workspace {
+                ws_idx: 0,
+                foldered: false,
+            },
             x: 2,
             y: 2,
             list: MenuListState::new(0),
@@ -3584,12 +3626,19 @@ mod tests {
         app.state.mode = Mode::Terminal;
 
         app.state.context_menu = Some(ContextMenuState {
-            kind: ContextMenuKind::Workspace { ws_idx: 1 },
+            kind: ContextMenuKind::Workspace {
+                ws_idx: 1,
+                foldered: false,
+            },
             x: 2,
             y: 2,
             list: MenuListState::new(1),
         });
         app.state.mode = Mode::ContextMenu;
+        let close_idx = close_item_index(&app.state);
+        if let Some(menu) = &mut app.state.context_menu {
+            menu.list = MenuListState::new(close_idx);
+        }
         handle_context_menu_key(
             &mut app.state,
             &mut app.terminal_runtimes,
@@ -3624,18 +3673,22 @@ mod tests {
         app.state.selected = 0;
         app.state.confirm_close = false;
         app.state.context_menu = Some(ContextMenuState {
-            kind: ContextMenuKind::Workspace { ws_idx: 1 },
+            kind: ContextMenuKind::Workspace {
+                ws_idx: 1,
+                foldered: false,
+            },
             x: 2,
             y: 2,
             list: MenuListState::new(1),
         });
         app.state.mode = Mode::ContextMenu;
 
+        let close_idx = close_item_index(&app.state) as u16;
         let menu = app.state.context_menu_rect().unwrap();
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             menu.x + 2,
-            menu.y + 2,
+            menu.y + 1 + close_idx,
         ));
 
         assert_eq!(app.state.workspaces.len(), 1);
@@ -4555,6 +4608,124 @@ mod tests {
             }
         );
         assert_eq!(menu.items(), vec!["Rename", "Delete"]);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn right_click_foldered_space_captures_membership_for_menu_items() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let member = app.state.workspaces[1].id.clone();
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        app.state
+            .assign_workspace_to_folder(&member, Some(&folder_id), None)
+            .expect("assign");
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let member_idx = app
+            .state
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == member)
+            .expect("member present");
+        let card = *app
+            .state
+            .view
+            .workspace_card_areas
+            .iter()
+            .find(|card| card.ws_idx == member_idx)
+            .expect("member card area");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            card.rect.x + 1,
+            card.rect.y,
+        ));
+
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        let menu = app.state.context_menu.as_ref().expect("space menu");
+        // Depending on the test environment's cwd the card resolves as a
+        // plain or a git space; membership capture must hold for both.
+        match &menu.kind {
+            ContextMenuKind::Workspace { ws_idx, foldered }
+            | ContextMenuKind::GitWorkspace {
+                ws_idx, foldered, ..
+            } => {
+                assert_eq!(*ws_idx, member_idx);
+                assert!(*foldered, "membership must be captured at open time");
+            }
+            other => panic!("expected a space context menu, got {other:?}"),
+        }
+        assert!(menu
+            .items()
+            .iter()
+            .any(|item| item == crate::app::state::MENU_ITEM_REMOVE_FROM_FOLDER));
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn right_click_spaces_panel_background_offers_folder_creation() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let list_area = app.state.workspace_list_rect();
+        let last_card_bottom = app
+            .state
+            .view
+            .workspace_card_areas
+            .iter()
+            .map(|card| card.rect.y + card.rect.height)
+            .max()
+            .expect("card areas");
+        let footer = app.state.sidebar_footer_rect();
+        let empty_row = last_card_bottom + 1;
+        assert!(
+            empty_row < footer.y,
+            "test needs an empty background row between cards and footer"
+        );
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            list_area.x + 1,
+            empty_row,
+        ));
+
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        let menu = app.state.context_menu.as_ref().expect("panel menu");
+        assert_eq!(menu.kind, ContextMenuKind::SpacesPanel);
+        assert_eq!(menu.items(), vec![crate::app::state::MENU_ITEM_NEW_FOLDER]);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn right_click_spaces_panel_footer_keeps_buttons_untouched() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let footer = app.state.sidebar_footer_rect();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            footer.x + 1,
+            footer.y,
+        ));
+
+        assert_ne!(app.state.mode, Mode::ContextMenu);
+        assert!(app.state.context_menu.is_none());
         app.state.assert_invariants_for_test();
     }
 
