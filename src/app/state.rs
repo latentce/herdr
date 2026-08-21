@@ -1139,9 +1139,18 @@ pub struct SettingsState {
     pub original_theme: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkspaceDropTarget {
+    /// Top level, before the block anchored at this workspace index.
     Before(usize),
+    /// Top level, before this folder (and its contents).
+    BeforeFolder(String),
+    /// Inside a folder, before the member block anchored at this workspace
+    /// index.
+    InFolderBefore { folder_id: String, ws_idx: usize },
+    /// Append into this folder (dropped onto its header row).
+    IntoFolder(String),
+    /// Top level, after the last entry.
     End,
 }
 
@@ -1149,6 +1158,11 @@ pub(crate) enum DragTarget {
     WorkspaceReorder {
         source_id: crate::app::InputSourceId,
         source_ws_idx: usize,
+        drop_target: Option<WorkspaceDropTarget>,
+    },
+    FolderReorder {
+        source_id: crate::app::InputSourceId,
+        folder_id: String,
         drop_target: Option<WorkspaceDropTarget>,
     },
     TabReorder {
@@ -1193,6 +1207,12 @@ pub(crate) struct DragState {
 
 pub(crate) struct WorkspacePressState {
     pub ws_idx: usize,
+    pub start_col: u16,
+    pub start_row: u16,
+}
+
+pub(crate) struct FolderPressState {
+    pub folder_id: String,
     pub start_col: u16,
     pub start_row: u16,
 }
@@ -1522,6 +1542,8 @@ pub struct AppState {
     pub(crate) drag: Option<DragState>,
     pub(crate) workspace_presses:
         std::collections::HashMap<crate::app::InputSourceId, WorkspacePressState>,
+    pub(crate) folder_presses:
+        std::collections::HashMap<crate::app::InputSourceId, FolderPressState>,
     pub(crate) tab_presses: std::collections::HashMap<crate::app::InputSourceId, TabPressState>,
     pub selection: Option<Selection>,
     pub selection_autoscroll: Option<SelectionAutoscroll>,
@@ -1924,6 +1946,7 @@ impl AppState {
             },
             drag: None,
             workspace_presses: std::collections::HashMap::new(),
+            folder_presses: std::collections::HashMap::new(),
             tab_presses: std::collections::HashMap::new(),
             selection: None,
             selection_autoscroll: None,
@@ -2349,6 +2372,29 @@ impl AppState {
             assert_live_pane(gesture.pane_info.id, "right-click passthrough gesture");
         }
         if let Some(drag) = &self.drag {
+            let assert_drop_target =
+                |drop_target: &Option<WorkspaceDropTarget>, what: &str| match drop_target {
+                    Some(WorkspaceDropTarget::Before(ws_idx)) => {
+                        assert_workspace_index(*ws_idx, what);
+                    }
+                    Some(WorkspaceDropTarget::InFolderBefore { folder_id, ws_idx }) => {
+                        assert_workspace_index(*ws_idx, what);
+                        assert!(
+                            self.folder(folder_id).is_some(),
+                            "{what} references unknown folder {folder_id}"
+                        );
+                    }
+                    Some(
+                        WorkspaceDropTarget::BeforeFolder(folder_id)
+                        | WorkspaceDropTarget::IntoFolder(folder_id),
+                    ) => {
+                        assert!(
+                            self.folder(folder_id).is_some(),
+                            "{what} references unknown folder {folder_id}"
+                        );
+                    }
+                    Some(WorkspaceDropTarget::End) | None => {}
+                };
             match &drag.target {
                 DragTarget::WorkspaceReorder {
                     source_ws_idx,
@@ -2356,9 +2402,28 @@ impl AppState {
                     ..
                 } => {
                     assert_workspace_index(*source_ws_idx, "workspace drag source");
-                    if let Some(WorkspaceDropTarget::Before(ws_idx)) = drop_target {
-                        assert_workspace_index(*ws_idx, "workspace drag target");
-                    }
+                    assert_drop_target(drop_target, "workspace drag target");
+                }
+                DragTarget::FolderReorder {
+                    folder_id,
+                    drop_target,
+                    ..
+                } => {
+                    assert!(
+                        self.folder(folder_id).is_some(),
+                        "folder drag references unknown folder {folder_id}"
+                    );
+                    assert_drop_target(drop_target, "folder drag target");
+                    assert!(
+                        !matches!(
+                            drop_target,
+                            Some(
+                                WorkspaceDropTarget::InFolderBefore { .. }
+                                    | WorkspaceDropTarget::IntoFolder(_)
+                            )
+                        ),
+                        "folder drag target must stay at the top level"
+                    );
                 }
                 DragTarget::TabReorder {
                     ws_idx,
@@ -2385,6 +2450,13 @@ impl AppState {
         }
         for press in self.workspace_presses.values() {
             assert_workspace_index(press.ws_idx, "workspace press");
+        }
+        for press in self.folder_presses.values() {
+            assert!(
+                self.folder(&press.folder_id).is_some(),
+                "folder press references unknown folder {}",
+                press.folder_id
+            );
         }
         for press in self.tab_presses.values() {
             assert_tab_index(press.ws_idx, press.tab_idx, "tab press");

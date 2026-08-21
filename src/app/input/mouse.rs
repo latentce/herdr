@@ -6,8 +6,8 @@ use tracing::warn;
 use crate::{
     app::state::{
         AgentPanelSort, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget,
-        MenuListState, Mode, RightClickPassthroughGesture, TabPressState, ViewLayout,
-        WorkspacePressState,
+        FolderPressState, MenuListState, Mode, RightClickPassthroughGesture, TabPressState,
+        ViewLayout, WorkspacePressState,
     },
     layout::{PaneInfo, SplitBorder},
     selection::Selection,
@@ -39,12 +39,11 @@ pub(super) enum MouseAction {
         pane_id: crate::layout::PaneId,
     },
     FocusToastTarget,
-    MoveWorkspace {
-        source_ws_idx: usize,
-        insert_idx: usize,
+    AssignWorkspaceFolder {
+        params: crate::api::schema::FolderAssignParams,
     },
-    MoveWorkspaceBlock {
-        params: crate::api::schema::WorkspaceMoveBlockParams,
+    MoveFolder {
+        params: crate::api::schema::FolderMoveParams,
     },
     MoveTab {
         ws_idx: usize,
@@ -607,6 +606,20 @@ impl AppState {
                         return None;
                     }
 
+                    if let Some(header) = headers.iter().find(|header| {
+                        mouse.row >= header.rect.y && mouse.row < header.rect.y + header.rect.height
+                    }) {
+                        self.folder_presses.insert(
+                            source_id,
+                            FolderPressState {
+                                folder_id: header.folder_id.clone(),
+                                start_col: mouse.column,
+                                start_row: mouse.row,
+                            },
+                        );
+                        return None;
+                    }
+
                     if let Some(idx) = self.workspace_at_row(mouse.row) {
                         self.workspace_presses.insert(
                             source_id,
@@ -705,25 +718,54 @@ impl AppState {
                     }
                 }
 
-                let workspace_drop_target = self.workspace_drop_target_at_row(mouse.row);
+                // Slot computation walks the entry list, so only resolve the
+                // target matching the gesture actually in flight.
+                let workspace_gesture = self.workspace_presses.contains_key(&source_id)
+                    || matches!(
+                        self.drag.as_ref().map(|drag| &drag.target),
+                        Some(DragTarget::WorkspaceReorder { .. })
+                    );
+                let folder_gesture = self.folder_presses.contains_key(&source_id)
+                    || matches!(
+                        self.drag.as_ref().map(|drag| &drag.target),
+                        Some(DragTarget::FolderReorder { .. })
+                    );
+                let workspace_drop_target = workspace_gesture
+                    .then(|| self.workspace_drop_target_at_row(mouse.row))
+                    .flatten();
+                let folder_drop_target = folder_gesture
+                    .then(|| self.folder_drop_target_at_row(mouse.row))
+                    .flatten();
                 let tab_drop_index = self.tab_drop_index_at(mouse.column, mouse.row);
                 if self.drag.is_none() {
                     if let Some(press) = self.workspace_presses.get(&source_id) {
                         let delta_col = mouse.column.abs_diff(press.start_col);
                         let delta_row = mouse.row.abs_diff(press.start_row);
-                        let can_reorder = self.workspaces.get(press.ws_idx).is_some_and(|ws| {
-                            ws.worktree_space()
-                                .is_none_or(|space| !space.is_linked_worktree)
-                        });
+                        // Any workspace card can start a drag; grabbing a
+                        // worktree family member drags the whole family (the
+                        // drop resolution moves the family as one block).
                         if workspace_drop_target.is_some()
-                            && can_reorder
                             && delta_col.max(delta_row) >= WORKSPACE_DRAG_THRESHOLD
                         {
                             self.drag = Some(DragState {
                                 target: DragTarget::WorkspaceReorder {
                                     source_id,
                                     source_ws_idx: press.ws_idx,
-                                    drop_target: workspace_drop_target,
+                                    drop_target: workspace_drop_target.clone(),
+                                },
+                            });
+                        }
+                    } else if let Some(press) = self.folder_presses.get(&source_id) {
+                        let delta_col = mouse.column.abs_diff(press.start_col);
+                        let delta_row = mouse.row.abs_diff(press.start_row);
+                        if folder_drop_target.is_some()
+                            && delta_col.max(delta_row) >= WORKSPACE_DRAG_THRESHOLD
+                        {
+                            self.drag = Some(DragState {
+                                target: DragTarget::FolderReorder {
+                                    source_id,
+                                    folder_id: press.folder_id.clone(),
+                                    drop_target: folder_drop_target.clone(),
                                 },
                             });
                         }
@@ -762,6 +804,18 @@ impl AppState {
                     }
                 } else if let Some(DragState {
                     target:
+                        DragTarget::FolderReorder {
+                            source_id: drag_source_id,
+                            drop_target,
+                            ..
+                        },
+                }) = &mut self.drag
+                {
+                    if *drag_source_id == source_id {
+                        *drop_target = folder_drop_target;
+                    }
+                } else if let Some(DragState {
+                    target:
                         DragTarget::TabReorder {
                             source_id: drag_source_id,
                             ws_idx,
@@ -775,7 +829,9 @@ impl AppState {
                     }
                 } else if let Some(drag) = &self.drag {
                     match &drag.target {
-                        DragTarget::WorkspaceReorder { .. } | DragTarget::TabReorder { .. } => {}
+                        DragTarget::WorkspaceReorder { .. }
+                        | DragTarget::FolderReorder { .. }
+                        | DragTarget::TabReorder { .. } => {}
                         DragTarget::WorkspaceListScrollbar { grab_row_offset } => {
                             if let Some(offset_from_bottom) =
                                 self.workspace_list_offset_for_drag_row(mouse.row, *grab_row_offset)
@@ -884,6 +940,9 @@ impl AppState {
                 }
 
                 let workspace_press = self.workspace_presses.remove(&source_id);
+                // A folder press that never became a drag is an inert click:
+                // folder headers have no click action outside the chevron.
+                self.folder_presses.remove(&source_id);
                 let tab_press = self.tab_presses.remove(&source_id);
                 if foreign_chrome_drag {
                     return self.chrome_press_action(workspace_press, tab_press);
@@ -899,28 +958,22 @@ impl AppState {
                             },
                     }) => {
                         if let Some(params) =
-                            self.workspace_move_block_params(source_ws_idx, drop_target)
+                            self.workspace_drop_assign_params(source_ws_idx, &drop_target)
                         {
-                            if self
-                                .workspaces
-                                .get(source_ws_idx)
-                                .is_some_and(|workspace| workspace.worktree_space().is_some())
-                            {
-                                return Some(MouseAction::MoveWorkspaceBlock { params });
-                            }
-                            let insert_idx = params
-                                .before_workspace_id
-                                .as_ref()
-                                .and_then(|id| {
-                                    self.workspaces
-                                        .iter()
-                                        .position(|workspace| workspace.id == *id)
-                                })
-                                .unwrap_or(self.workspaces.len());
-                            return Some(MouseAction::MoveWorkspace {
-                                source_ws_idx,
-                                insert_idx,
-                            });
+                            return Some(MouseAction::AssignWorkspaceFolder { params });
+                        }
+                    }
+                    Some(DragState {
+                        target:
+                            DragTarget::FolderReorder {
+                                folder_id,
+                                drop_target: Some(drop_target),
+                                ..
+                            },
+                    }) => {
+                        if let Some(params) = self.folder_drop_move_params(&folder_id, &drop_target)
+                        {
+                            return Some(MouseAction::MoveFolder { params });
                         }
                     }
                     Some(DragState {
@@ -1513,7 +1566,9 @@ impl AppState {
     }
 
     fn chrome_press_pending(&self, source_id: crate::app::InputSourceId) -> bool {
-        self.tab_presses.contains_key(&source_id) || self.workspace_presses.contains_key(&source_id)
+        self.tab_presses.contains_key(&source_id)
+            || self.workspace_presses.contains_key(&source_id)
+            || self.folder_presses.contains_key(&source_id)
     }
 
     fn chrome_drag_owned_by_other(&self, source_id: crate::app::InputSourceId) -> bool {
@@ -1521,6 +1576,9 @@ impl AppState {
             matches!(
                 drag.target,
                 DragTarget::WorkspaceReorder {
+                    source_id: drag_source_id,
+                    ..
+                } | DragTarget::FolderReorder {
                     source_id: drag_source_id,
                     ..
                 } | DragTarget::TabReorder {
@@ -1560,6 +1618,9 @@ impl AppState {
                 DragTarget::WorkspaceReorder {
                     source_id: drag_source_id,
                     ..
+                } | DragTarget::FolderReorder {
+                    source_id: drag_source_id,
+                    ..
                 } | DragTarget::TabReorder {
                     source_id: drag_source_id,
                     ..
@@ -1574,6 +1635,7 @@ impl AppState {
     fn clear_chrome_press(&mut self, source_id: crate::app::InputSourceId) {
         self.tab_presses.remove(&source_id);
         self.workspace_presses.remove(&source_id);
+        self.folder_presses.remove(&source_id);
     }
 
     fn mouse_pane_focus_action(&self, pane_id: crate::layout::PaneId) -> Option<MouseAction> {

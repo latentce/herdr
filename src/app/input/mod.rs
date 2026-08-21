@@ -424,13 +424,10 @@ impl App {
                         self.focus_pane_internal_via_api(ws_idx, pane_id)
                     }
                     MouseAction::FocusToastTarget => self.focus_toast_target_via_api(),
-                    MouseAction::MoveWorkspace {
-                        source_ws_idx,
-                        insert_idx,
-                    } => self.move_workspace_via_api(source_ws_idx, insert_idx),
-                    MouseAction::MoveWorkspaceBlock { params } => {
-                        self.move_workspace_block_via_api(params)
+                    MouseAction::AssignWorkspaceFolder { params } => {
+                        self.assign_workspace_folder_via_api(params)
                     }
+                    MouseAction::MoveFolder { params } => self.move_folder_via_api(params),
                     MouseAction::MoveTab {
                         ws_idx,
                         source_tab_idx,

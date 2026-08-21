@@ -1,10 +1,10 @@
 use crate::api::schema::{
-    EmptyParams, FolderAssignParams, FolderCreateParams, FolderRenameParams, FolderTarget,
-    LayoutSetSplitRatioParams, Method, PaneFocusDirectionParams, PaneInputSetParams,
+    EmptyParams, FolderAssignParams, FolderCreateParams, FolderMoveParams, FolderRenameParams,
+    FolderTarget, LayoutSetSplitRatioParams, Method, PaneFocusDirectionParams, PaneInputSetParams,
     PaneRenameParams, PaneResizeParams, PaneSplitParams, PaneSwapParams, PaneTarget,
     PaneZoomParams, TabCreateParams, TabMoveParams, TabRenameParams, TabTarget,
-    WorkspaceCreateParams, WorkspaceMoveBlockParams, WorkspaceMoveParams, WorkspaceRenameParams,
-    WorkspaceTarget, WorktreeCreateParams, WorktreeOpenParams, WorktreeRemoveParams,
+    WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceTarget, WorktreeCreateParams,
+    WorktreeOpenParams, WorktreeRemoveParams,
 };
 
 use super::App;
@@ -46,22 +46,6 @@ impl App {
         self.dispatch_runtime_mutation(id, Method::WorkspaceRename(params))
     }
 
-    pub(crate) fn runtime_workspace_move(
-        &mut self,
-        id: &'static str,
-        params: WorkspaceMoveParams,
-    ) -> String {
-        self.dispatch_runtime_mutation(id, Method::WorkspaceMove(params))
-    }
-
-    pub(crate) fn runtime_workspace_move_block(
-        &mut self,
-        id: &'static str,
-        params: WorkspaceMoveBlockParams,
-    ) -> String {
-        self.dispatch_runtime_mutation(id, Method::WorkspaceMoveBlock(params))
-    }
-
     pub(crate) fn runtime_workspace_close(
         &mut self,
         id: &'static str,
@@ -96,6 +80,14 @@ impl App {
         params: FolderAssignParams,
     ) -> String {
         self.dispatch_runtime_mutation(id, Method::FolderAssign(params))
+    }
+
+    pub(crate) fn runtime_folder_move(
+        &mut self,
+        id: &'static str,
+        params: FolderMoveParams,
+    ) -> String {
+        self.dispatch_runtime_mutation(id, Method::FolderMove(params))
     }
 
     pub(crate) fn runtime_tab_create(

@@ -461,22 +461,15 @@ impl App {
         self.runtime_workspace_close("tui.workspace.close", workspace_id);
     }
 
-    pub(crate) fn move_workspace_via_api(&mut self, source_ws_idx: usize, insert_idx: usize) {
-        let workspace_id = self.public_workspace_id(source_ws_idx);
-        self.runtime_workspace_move(
-            "tui.workspace.move",
-            crate::api::schema::WorkspaceMoveParams {
-                workspace_id,
-                insert_index: insert_idx,
-            },
-        );
+    pub(crate) fn assign_workspace_folder_via_api(
+        &mut self,
+        params: crate::api::schema::FolderAssignParams,
+    ) {
+        self.runtime_folder_assign("tui.folder.assign", params);
     }
 
-    pub(crate) fn move_workspace_block_via_api(
-        &mut self,
-        params: crate::api::schema::WorkspaceMoveBlockParams,
-    ) {
-        self.runtime_workspace_move_block("tui.workspace.move_block", params);
+    pub(crate) fn move_folder_via_api(&mut self, params: crate::api::schema::FolderMoveParams) {
+        self.runtime_folder_move("tui.folder.move", params);
     }
 
     pub(crate) fn focus_tab_idx_via_api(&mut self, tab_idx: usize) {

@@ -629,6 +629,7 @@ impl App {
             },
             drag: None,
             workspace_presses: HashMap::new(),
+            folder_presses: HashMap::new(),
             tab_presses: HashMap::new(),
             selection: None,
             selection_autoscroll: None,

@@ -1030,107 +1030,171 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
     render_sidebar_toggle(app, frame, area, true, p);
 }
 
+/// Legal insertion points for a spaces-panel drag, in visual order. Each slot
+/// pairs a drop target with its indicator row. Slots exist before every
+/// top-level block (loose space, worktree family, or folder) and before every
+/// member block inside an expanded folder; appending into a folder happens by
+/// dropping onto its header row, which is not a slot.
 pub(crate) fn workspace_drop_slots(
     app: &AppState,
     cards: &[crate::app::state::WorkspaceCardArea],
+    headers: &[crate::app::state::FolderHeaderArea],
     area: Rect,
 ) -> Vec<(crate::app::state::WorkspaceDropTarget, u16)> {
-    if area.height == 0 || cards.is_empty() {
+    use crate::app::state::WorkspaceDropTarget;
+
+    if area.height == 0 || (cards.is_empty() && headers.is_empty()) {
         return Vec::new();
     }
     let list_bottom = area.y + area.height.saturating_sub(1);
     let entries = workspace_list_entries(app);
-    let entry_position = |ws_idx| {
-        entries.iter().position(|entry| {
-            matches!(
-                entry,
-                WorkspaceListEntry::Workspace {
-                    ws_idx: entry_ws_idx,
-                    ..
-                } if *entry_ws_idx == ws_idx
-            )
-        })
+    let folder_id_at = |order_idx: usize| match app.space_order.get(order_idx) {
+        Some(crate::folder::SpaceOrderEntry::Folder(folder)) => Some(folder.id.clone()),
+        _ => None,
     };
-    let block_root_at = |entry_idx: usize| {
-        entries[..=entry_idx]
+    // The folder containing the entry at `idx`: the nearest preceding header,
+    // unless a non-foldered workspace closes the folder run first.
+    let containing_folder = |idx: usize| -> Option<String> {
+        entries[..=idx].iter().rev().find_map(|entry| match entry {
+            WorkspaceListEntry::FolderHeader { order_idx } => Some(folder_id_at(*order_idx)),
+            WorkspaceListEntry::Workspace {
+                foldered: false, ..
+            } => Some(None),
+            WorkspaceListEntry::Workspace { .. } => None,
+        })?
+    };
+    let card_rect = |ws_idx: usize| {
+        cards
             .iter()
-            .rev()
-            .find_map(|entry| match entry {
-                WorkspaceListEntry::Workspace {
-                    ws_idx,
-                    indented: false,
-                    ..
-                } => Some(*ws_idx),
-                WorkspaceListEntry::Workspace { .. } | WorkspaceListEntry::FolderHeader { .. } => {
-                    None
-                }
-            })
+            .find(|card| card.ws_idx == ws_idx)
+            .map(|card| card.rect)
+    };
+    let header_rect = |folder_id: &str| {
+        headers
+            .iter()
+            .find(|header| header.folder_id == folder_id)
+            .map(|header| header.rect)
     };
 
-    let mut slots = Vec::new();
-    let mut previous_root = None;
-    for card in cards {
-        let Some(entry_idx) = entry_position(card.ws_idx) else {
-            continue;
-        };
-        let Some(root_idx) = block_root_at(entry_idx) else {
-            continue;
-        };
-        if previous_root == Some(root_idx) {
-            continue;
-        }
-        previous_root = Some(root_idx);
-        if let Some(row) = card.rect.y.checked_sub(1).filter(|row| *row < list_bottom) {
-            slots.push((
-                crate::app::state::WorkspaceDropTarget::Before(root_idx),
-                row,
-            ));
+    let mut slots: Vec<(WorkspaceDropTarget, u16)> = Vec::new();
+    // Entry index and bottom row of the lowest visible element, for the
+    // trailing slot after the last card or header.
+    let mut last_visible: Option<(usize, u16)> = None;
+    let mut previous_was_header = false;
+    for (entry_idx, entry) in entries.iter().enumerate() {
+        let was_header = std::mem::replace(&mut previous_was_header, false);
+        match entry {
+            WorkspaceListEntry::FolderHeader { order_idx } => {
+                previous_was_header = true;
+                let Some(folder_id) = folder_id_at(*order_idx) else {
+                    continue;
+                };
+                let Some(rect) = header_rect(&folder_id) else {
+                    continue;
+                };
+                last_visible = Some((entry_idx, rect.y.saturating_add(rect.height)));
+                if let Some(row) = rect.y.checked_sub(1).filter(|row| *row < list_bottom) {
+                    slots.push((WorkspaceDropTarget::BeforeFolder(folder_id), row));
+                }
+            }
+            WorkspaceListEntry::Workspace {
+                ws_idx,
+                indented,
+                foldered,
+            } => {
+                let Some(rect) = card_rect(*ws_idx) else {
+                    continue;
+                };
+                last_visible = Some((entry_idx, rect.y.saturating_add(rect.height)));
+                if *indented {
+                    // Never split a worktree family: no slots inside a block.
+                    continue;
+                }
+                if *foldered {
+                    let Some(folder_id) = containing_folder(entry_idx) else {
+                        continue;
+                    };
+                    // A folder header hugs its first member, so the slot for
+                    // position 0 sits on the member's own top row; later
+                    // member slots use the gap row above, like top level.
+                    let row = if was_header {
+                        Some(rect.y)
+                    } else {
+                        rect.y.checked_sub(1)
+                    };
+                    if let Some(row) = row.filter(|row| *row < list_bottom) {
+                        slots.push((
+                            WorkspaceDropTarget::InFolderBefore {
+                                folder_id,
+                                ws_idx: *ws_idx,
+                            },
+                            row,
+                        ));
+                    }
+                } else if let Some(row) = rect.y.checked_sub(1).filter(|row| *row < list_bottom) {
+                    slots.push((WorkspaceDropTarget::Before(*ws_idx), row));
+                }
+            }
         }
     }
 
-    let Some(last) = cards.last() else {
-        return slots;
-    };
-    let Some(last_entry_idx) = entry_position(last.ws_idx) else {
+    let Some((last_entry_idx, last_bottom)) = last_visible else {
         return slots;
     };
     let next_entry = entries.get(last_entry_idx.saturating_add(1));
-    if matches!(
-        next_entry,
-        Some(WorkspaceListEntry::Workspace { indented: true, .. })
-    ) {
-        return slots;
-    }
     let target = match next_entry {
-        Some(WorkspaceListEntry::Workspace { ws_idx, .. }) => {
-            crate::app::state::WorkspaceDropTarget::Before(*ws_idx)
-        }
-        // Drop-before-folder placement is handled by the drag-and-drop work;
-        // for now dropping past the last card of the list appends.
-        Some(WorkspaceListEntry::FolderHeader { .. }) | None => {
-            crate::app::state::WorkspaceDropTarget::End
-        }
+        // Mid-family clip: never split a worktree family.
+        Some(WorkspaceListEntry::Workspace { indented: true, .. }) => return slots,
+        Some(WorkspaceListEntry::FolderHeader { order_idx }) => match folder_id_at(*order_idx) {
+            Some(folder_id) => WorkspaceDropTarget::BeforeFolder(folder_id),
+            None => return slots,
+        },
+        Some(WorkspaceListEntry::Workspace {
+            ws_idx,
+            foldered: true,
+            ..
+        }) => match containing_folder(last_entry_idx.saturating_add(1)) {
+            Some(folder_id) => WorkspaceDropTarget::InFolderBefore {
+                folder_id,
+                ws_idx: *ws_idx,
+            },
+            None => return slots,
+        },
+        Some(WorkspaceListEntry::Workspace { ws_idx, .. }) => WorkspaceDropTarget::Before(*ws_idx),
+        None => WorkspaceDropTarget::End,
     };
-    let row = last.rect.y.saturating_add(last.rect.height);
-    if row < list_bottom
+    if last_bottom < list_bottom
         && slots
             .last()
             .is_none_or(|(last_target, _)| *last_target != target)
     {
-        slots.push((target, row));
+        slots.push((target, last_bottom));
     }
     slots
+}
+
+/// Whether a drop target lands at the top level of the space order — the
+/// only legal placements for a folder drag (a folder can never be dropped
+/// into another folder).
+pub(crate) fn is_top_level_drop_target(target: &crate::app::state::WorkspaceDropTarget) -> bool {
+    matches!(
+        target,
+        crate::app::state::WorkspaceDropTarget::Before(_)
+            | crate::app::state::WorkspaceDropTarget::BeforeFolder(_)
+            | crate::app::state::WorkspaceDropTarget::End
+    )
 }
 
 pub(crate) fn workspace_drop_indicator_row(
     app: &AppState,
     cards: &[crate::app::state::WorkspaceCardArea],
+    headers: &[crate::app::state::FolderHeaderArea],
     area: Rect,
-    target: crate::app::state::WorkspaceDropTarget,
+    target: &crate::app::state::WorkspaceDropTarget,
 ) -> Option<u16> {
-    workspace_drop_slots(app, cards, area)
+    workspace_drop_slots(app, cards, headers, area)
         .into_iter()
-        .find_map(|(candidate, row)| (candidate == target).then_some(row))
+        .find_map(|(candidate, row)| (candidate == *target).then_some(row))
 }
 
 pub(super) fn render_sidebar(
@@ -1375,12 +1439,42 @@ fn render_workspace_list(
         }
         _ => None,
     };
-    let insertion_row = match app.drag.as_ref().map(|drag| &drag.target) {
-        Some(crate::app::state::DragTarget::WorkspaceReorder {
-            drop_target: Some(drop_target),
-            ..
-        }) => workspace_drop_indicator_row(app, &app.view.workspace_card_areas, area, *drop_target),
+    let dragged_folder_id = match app.drag.as_ref().map(|drag| &drag.target) {
+        Some(crate::app::state::DragTarget::FolderReorder { folder_id, .. }) => {
+            Some(folder_id.as_str())
+        }
         _ => None,
+    };
+    let drag_drop_target = match app.drag.as_ref().map(|drag| &drag.target) {
+        Some(
+            crate::app::state::DragTarget::WorkspaceReorder {
+                drop_target: Some(drop_target),
+                ..
+            }
+            | crate::app::state::DragTarget::FolderReorder {
+                drop_target: Some(drop_target),
+                ..
+            },
+        ) => Some(drop_target),
+        _ => None,
+    };
+    // Dropping onto a folder header highlights the header instead of drawing
+    // an insertion line.
+    let drop_into_folder_id = match drag_drop_target {
+        Some(crate::app::state::WorkspaceDropTarget::IntoFolder(folder_id)) => {
+            Some(folder_id.as_str())
+        }
+        _ => None,
+    };
+    let insertion_row = match drag_drop_target {
+        Some(crate::app::state::WorkspaceDropTarget::IntoFolder(_)) | None => None,
+        Some(drop_target) => workspace_drop_indicator_row(
+            app,
+            &app.view.workspace_card_areas,
+            &app.view.folder_header_areas,
+            area,
+            drop_target,
+        ),
     };
 
     let list_bottom = area.y + area.height.saturating_sub(1);
@@ -1406,16 +1500,26 @@ fn render_workspace_list(
         let Some(folder) = app.folder(&header.folder_id) else {
             continue;
         };
+        let is_dragged = dragged_folder_id == Some(header.folder_id.as_str());
+        let is_drop_target = drop_into_folder_id == Some(header.folder_id.as_str());
+        if is_dragged {
+            let buf = frame.buffer_mut();
+            for x in header.rect.x..header.rect.x + header.rect.width {
+                buf[(x, header.rect.y)].set_style(Style::default().bg(p.surface1));
+            }
+        }
+        let name_style = if is_drop_target {
+            Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD)
+        };
         // Reserve the trailing chevron cell plus one gap cell so the name
         // never runs into the collapse affordance.
         let name = truncate_end(&folder.name, header.rect.width.saturating_sub(3) as usize);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::raw(" "),
-                Span::styled(
-                    name,
-                    Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(name, name_style),
             ])),
             header.rect,
         );
@@ -3064,8 +3168,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let indicator_row = workspace_drop_indicator_row(
             &app,
             &app.view.workspace_card_areas,
+            &app.view.folder_header_areas,
             list_area,
-            crate::app::state::WorkspaceDropTarget::Before(2),
+            &crate::app::state::WorkspaceDropTarget::Before(2),
         )
         .unwrap();
         assert_eq!(indicator_row, app.view.workspace_card_areas[1].rect.y);
