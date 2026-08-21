@@ -99,6 +99,10 @@ impl AppState {
         );
 
         self.sync_workspaces_to_space_order();
+        // Collapse is client presentation state, but drop the deleted id here:
+        // the id counter re-seeds from the snapshot on restart, so a stale
+        // entry could make an unrelated future folder start out collapsed.
+        self.collapsed_folder_ids.remove(folder_id);
         self.mark_session_dirty();
         Ok(released)
     }
@@ -731,6 +735,25 @@ mod tests {
             ]
         );
         assert_eq!(workspace_id_order(&state), vec![w1, w2, w3, w4]);
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn delete_folder_drops_its_collapse_entry() {
+        let mut state = app_with_workspaces(&["one", "two"]);
+        let w2 = workspace_id(&state, 1);
+        let folder_id = state.create_folder("work").expect("create folder");
+        state
+            .assign_workspace_to_folder(&w2, Some(&folder_id), None)
+            .expect("assign");
+        state.collapsed_folder_ids.insert(folder_id.clone());
+
+        state.delete_folder(&folder_id).expect("delete folder");
+
+        // Folder ids can be reused after a restart re-seeds the counter; a
+        // stale collapse entry would make an unrelated future folder start
+        // out collapsed.
+        assert!(!state.collapsed_folder_ids.contains(&folder_id));
         state.assert_invariants_for_test();
     }
 

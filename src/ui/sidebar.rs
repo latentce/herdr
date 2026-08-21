@@ -494,11 +494,25 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
             }
             crate::folder::SpaceOrderEntry::Folder(folder) => {
                 entries.push(WorkspaceListEntry::FolderHeader { order_idx });
+                let folder_collapsed =
+                    !force_expanded && app.collapsed_folder_ids.contains(&folder.id);
                 for member in &folder.members {
                     let Some(&ws_idx) = idx_by_id.get(member.as_str()) else {
                         continue;
                     };
                     if std::mem::replace(&mut listed[ws_idx], true) {
+                        continue;
+                    }
+                    if folder_collapsed {
+                        // Mirror worktree-group collapse: hidden members stay
+                        // hidden except the active (or selected) one.
+                        if visible_group_idx == Some(ws_idx) {
+                            entries.push(WorkspaceListEntry::Workspace {
+                                ws_idx,
+                                indented: false,
+                                foldered: true,
+                            });
+                        }
                         continue;
                     }
                     emit_workspace(ws_idx, true, &mut emitted_groups, &mut entries);
@@ -838,6 +852,21 @@ pub(crate) fn workspace_group_chevron_rect(card: &crate::app::state::WorkspaceCa
     Rect::new(
         card.rect.x + card.rect.width.saturating_sub(1),
         card.rect.y,
+        1,
+        1,
+    )
+}
+
+/// Collapse/expand chevron cell on a folder header, mirroring the worktree
+/// group chevron placement at the row's right edge.
+pub(crate) fn folder_header_chevron_rect(header: &crate::app::state::FolderHeaderArea) -> Rect {
+    if header.rect.width == 0 || header.rect.height == 0 {
+        return Rect::default();
+    }
+
+    Rect::new(
+        header.rect.x + header.rect.width.saturating_sub(1),
+        header.rect.y,
         1,
         1,
     )
@@ -1377,7 +1406,9 @@ fn render_workspace_list(
         let Some(folder) = app.folder(&header.folder_id) else {
             continue;
         };
-        let name = truncate_end(&folder.name, header.rect.width.saturating_sub(1) as usize);
+        // Reserve the trailing chevron cell plus one gap cell so the name
+        // never runs into the collapse affordance.
+        let name = truncate_end(&folder.name, header.rect.width.saturating_sub(3) as usize);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::raw(" "),
@@ -1387,6 +1418,14 @@ fn render_workspace_list(
                 ),
             ])),
             header.rect,
+        );
+        let collapsed = app.collapsed_folder_ids.contains(&header.folder_id);
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                if collapsed { "▸" } else { "▾" },
+                Style::default().fg(p.accent),
+            )),
+            folder_header_chevron_rect(header),
         );
     }
 
@@ -3522,6 +3561,250 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     ws_idx: 1,
                     indented: true,
                     foldered: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn collapsed_folder_hides_members_and_expanding_restores_them() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        let member = app.workspaces[1].id.clone();
+        let folder_id = app.create_folder("work").expect("create folder");
+        app.assign_workspace_to_folder(&member, Some(&folder_id), None)
+            .expect("assign");
+        // Canonical order: one, [work: two]
+        app.active = None;
+        app.mode = Mode::Terminal;
+
+        app.collapsed_folder_ids.insert(folder_id.clone());
+        assert_eq!(
+            workspace_list_entries(&app),
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false,
+                    foldered: false,
+                },
+                WorkspaceListEntry::FolderHeader { order_idx: 1 },
+            ]
+        );
+
+        app.collapsed_folder_ids.remove(&folder_id);
+        assert_eq!(
+            workspace_list_entries(&app),
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false,
+                    foldered: false,
+                },
+                WorkspaceListEntry::FolderHeader { order_idx: 1 },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 1,
+                    indented: false,
+                    foldered: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn collapsed_folder_keeps_active_member_visible() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        let member = app.workspaces[1].id.clone();
+        let folder_id = app.create_folder("work").expect("create folder");
+        app.assign_workspace_to_folder(&member, Some(&folder_id), None)
+            .expect("assign");
+        // Canonical order: one, [work: two]
+        app.active = Some(1);
+        app.mode = Mode::Terminal;
+        app.collapsed_folder_ids.insert(folder_id);
+
+        assert_eq!(
+            workspace_list_entries(&app),
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false,
+                    foldered: false,
+                },
+                WorkspaceListEntry::FolderHeader { order_idx: 1 },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 1,
+                    indented: false,
+                    foldered: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn collapsed_folder_keeps_selected_member_visible_in_navigate_mode() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        let member = app.workspaces[1].id.clone();
+        let folder_id = app.create_folder("work").expect("create folder");
+        app.assign_workspace_to_folder(&member, Some(&folder_id), None)
+            .expect("assign");
+        app.mode = Mode::Navigate;
+        app.selected = 1;
+        app.active = None;
+        app.collapsed_folder_ids.insert(folder_id);
+
+        assert_eq!(
+            workspace_list_entries(&app),
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false,
+                    foldered: false,
+                },
+                WorkspaceListEntry::FolderHeader { order_idx: 1 },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 1,
+                    indented: false,
+                    foldered: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn folder_collapse_is_independent_from_worktree_group_collapse() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
+            workspace_with_worktree_space("issue", Some("repo-key"), "/repo/herdr-issue"),
+            Workspace::test_new("notes"),
+        ];
+        let parent = app.workspaces[0].id.clone();
+        let folder_id = app.create_folder("work").expect("create folder");
+        app.assign_workspace_to_folder(&parent, Some(&folder_id), None)
+            .expect("assign family");
+        // Canonical order: notes, [work: main, issue]
+        app.active = None;
+        app.mode = Mode::Terminal;
+        app.collapsed_space_keys.insert("repo-key".into());
+
+        // Collapsing the folder hides the whole family; the worktree-group
+        // collapse entry stays untouched.
+        app.collapsed_folder_ids.insert(folder_id.clone());
+        assert_eq!(
+            workspace_list_entries(&app),
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false,
+                    foldered: false,
+                },
+                WorkspaceListEntry::FolderHeader { order_idx: 1 },
+            ]
+        );
+        assert!(app.collapsed_space_keys.contains("repo-key"));
+
+        // Expanding the folder restores the family with its own collapse
+        // state still applied: parent visible, child hidden.
+        app.collapsed_folder_ids.remove(&folder_id);
+        assert_eq!(
+            workspace_list_entries(&app),
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false,
+                    foldered: false,
+                },
+                WorkspaceListEntry::FolderHeader { order_idx: 1 },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 1,
+                    indented: false,
+                    foldered: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn folder_header_renders_collapse_chevron_matching_state() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        let member = app.workspaces[0].id.clone();
+        let folder_id = app.create_folder("work").expect("create folder");
+        app.assign_workspace_to_folder(&member, Some(&folder_id), None)
+            .expect("assign");
+        app.active = None;
+        app.mode = Mode::Terminal;
+        let area = Rect::new(0, 0, 30, 20);
+
+        let render = |app: &mut AppState| -> String {
+            let (cards, headers) = compute_workspace_list_areas(app, area);
+            app.view.workspace_card_areas = cards;
+            app.view.folder_header_areas = headers;
+            let list_area = workspace_list_rect(area, app.sidebar_section_split);
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_workspace_list(
+                        app,
+                        &TerminalRuntimeRegistry::new(),
+                        frame,
+                        list_area,
+                        false,
+                    )
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let header = &app.view.folder_header_areas[0];
+            (0..area.width)
+                .map(|x| buffer[(x, header.rect.y)].symbol().to_string())
+                .collect::<String>()
+        };
+
+        let expanded_row = render(&mut app);
+        assert!(
+            expanded_row.contains('▾'),
+            "expanded folder header must show an expanded chevron: {expanded_row:?}"
+        );
+
+        app.collapsed_folder_ids.insert(folder_id);
+        let collapsed_row = render(&mut app);
+        assert!(
+            collapsed_row.contains('▸'),
+            "collapsed folder header must show a collapsed chevron: {collapsed_row:?}"
+        );
+        assert!(
+            collapsed_row.contains("work"),
+            "collapsed folder header must keep the folder name: {collapsed_row:?}"
+        );
+    }
+
+    #[test]
+    fn expanded_entries_ignore_folder_collapse() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        let member = app.workspaces[1].id.clone();
+        let folder_id = app.create_folder("work").expect("create folder");
+        app.assign_workspace_to_folder(&member, Some(&folder_id), None)
+            .expect("assign");
+        app.active = None;
+        app.mode = Mode::Terminal;
+        app.collapsed_folder_ids.insert(folder_id);
+
+        assert_eq!(
+            workspace_list_entries_expanded(&app),
+            vec![
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 0,
+                    indented: false,
+                    foldered: false,
+                },
+                WorkspaceListEntry::FolderHeader { order_idx: 1 },
+                WorkspaceListEntry::Workspace {
+                    ws_idx: 1,
+                    indented: false,
+                    foldered: true,
                 },
             ]
         );

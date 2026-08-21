@@ -588,6 +588,25 @@ impl AppState {
                         }
                     }
 
+                    // Card emptiness is the cold-view-cache signal here (as in
+                    // `folder_header_at`): empty headers can also mean the
+                    // session simply has no folders.
+                    let headers = if self.view.workspace_card_areas.is_empty() {
+                        crate::ui::compute_workspace_list_areas(self, self.view.sidebar_rect).1
+                    } else {
+                        self.view.folder_header_areas.clone()
+                    };
+                    if let Some(header) = headers.iter().find(|header| {
+                        let chevron = crate::ui::folder_header_chevron_rect(header);
+                        mouse.row == chevron.y && mouse.column == chevron.x && chevron.width > 0
+                    }) {
+                        if !self.collapsed_folder_ids.remove(&header.folder_id) {
+                            self.collapsed_folder_ids.insert(header.folder_id.clone());
+                        }
+                        self.mark_session_dirty();
+                        return None;
+                    }
+
                     if let Some(idx) = self.workspace_at_row(mouse.row) {
                         self.workspace_presses.insert(
                             source_id,

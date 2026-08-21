@@ -277,6 +277,46 @@ mod tests {
     }
 
     #[test]
+    fn collapse_state_is_absent_from_api_payloads() {
+        // Per the folder-organization ADR, collapse is per-client visual
+        // state: persisted in the session snapshot, but never API-exposed.
+        // Do not "fix" this asymmetry.
+        let mut app = test_app(&["one", "two"]);
+        let member = app.state.workspaces[1].id.clone();
+        let response = app.handle_folder_create(
+            "create".into(),
+            FolderCreateParams {
+                name: "work".into(),
+            },
+        );
+        let folder_id = created_folder_id(&response);
+        app.handle_folder_assign(
+            "assign".into(),
+            FolderAssignParams {
+                workspace_id: member,
+                folder_id: Some(folder_id.clone()),
+                position: None,
+            },
+        );
+        app.state.collapsed_folder_ids.insert(folder_id);
+        app.state.collapsed_space_keys.insert("repo-key".into());
+
+        let folder_list = app.handle_folder_list("list".into());
+        let session_snapshot = app.handle_session_snapshot("snapshot".into());
+
+        for (payload, name) in [
+            (&folder_list, "folder.list"),
+            (&session_snapshot, "session.snapshot"),
+        ] {
+            serde_json::from_str::<SuccessResponse>(payload).expect("success response");
+            assert!(
+                !payload.contains("collaps"),
+                "{name} response must not expose collapse state: {payload}"
+            );
+        }
+    }
+
+    #[test]
     fn folder_assign_moves_family_and_reports_all_affected_spaces() {
         let mut app = test_app(&["parent", "child", "other"]);
         for (ws_idx, is_linked) in [(0usize, false), (1usize, true)] {

@@ -1308,6 +1308,72 @@ mod tests {
     }
 
     #[test]
+    fn clicking_folder_header_chevron_toggles_folder_collapse() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        let member = app.state.workspaces[1].id.clone();
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        app.state
+            .assign_workspace_to_folder(&member, Some(&folder_id), None)
+            .expect("assign");
+        app.state.active = None;
+        app.state.mode = Mode::Terminal;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let header = app.state.view.folder_header_areas[0].clone();
+        let chevron = crate::ui::folder_header_chevron_rect(&header);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            chevron.x,
+            chevron.y,
+        ));
+
+        assert_eq!(app.state.active, None);
+        assert!(app.state.workspace_presses.is_empty());
+        assert!(app.state.collapsed_folder_ids.contains(&folder_id));
+        // Collapse is purely visual: nothing closed, moved, or reordered.
+        assert_eq!(app.state.workspaces.len(), 2);
+        assert_eq!(
+            app.state.workspace_folder_id(&member),
+            Some(folder_id.as_str())
+        );
+        let snapshot = capture_snapshot(&app.state);
+        assert!(snapshot.collapsed_folder_ids.contains(&folder_id));
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            chevron.x,
+            chevron.y,
+        ));
+
+        assert!(!app.state.collapsed_folder_ids.contains(&folder_id));
+    }
+
+    #[test]
+    fn clicking_folder_header_row_does_not_toggle_collapse() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        let member = app.state.workspaces[1].id.clone();
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        app.state
+            .assign_workspace_to_folder(&member, Some(&folder_id), None)
+            .expect("assign");
+        app.state.active = None;
+        app.state.mode = Mode::Terminal;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let header = app.state.view.folder_header_areas[0].clone();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            header.rect.x + 2,
+            header.rect.y,
+        ));
+
+        assert!(!app.state.collapsed_folder_ids.contains(&folder_id));
+        assert!(app.state.workspace_presses.is_empty());
+    }
+
+    #[test]
     fn wheel_workspace_selection_follows_grouped_visual_order_without_scrollbar() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![

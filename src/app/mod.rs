@@ -403,6 +403,7 @@ impl App {
             sidebar_width_source,
             sidebar_section_split,
             collapsed_space_keys,
+            collapsed_folder_ids,
             restored_space_order,
         ) = if no_session {
             (
@@ -412,6 +413,7 @@ impl App {
                 config.ui.sidebar_width,
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
+                std::collections::HashSet::new(),
                 std::collections::HashSet::new(),
                 Vec::new(),
             )
@@ -450,6 +452,7 @@ impl App {
                     },
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
+                    snap.collapsed_folder_ids,
                     snap.space_order
                         .into_iter()
                         .map(crate::folder::SpaceOrderEntry::from)
@@ -471,6 +474,7 @@ impl App {
                     },
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
+                    snap.collapsed_folder_ids,
                     snap.space_order
                         .into_iter()
                         .map(crate::folder::SpaceOrderEntry::from)
@@ -485,6 +489,7 @@ impl App {
                 config.ui.sidebar_width,
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
+                std::collections::HashSet::new(),
                 std::collections::HashSet::new(),
                 Vec::new(),
             )
@@ -582,6 +587,7 @@ impl App {
             worktree_remove: None,
             worktree_directory,
             collapsed_space_keys,
+            collapsed_folder_ids,
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -882,6 +888,7 @@ impl App {
             app.state.sidebar_section_split = split;
         }
         app.state.collapsed_space_keys = snapshot.collapsed_space_keys.clone();
+        app.state.collapsed_folder_ids = snapshot.collapsed_folder_ids.clone();
         app.state.install_space_order(
             snapshot
                 .space_order
