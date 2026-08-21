@@ -865,6 +865,218 @@ mod tests {
         );
     }
 
+    /// Table-driven corruption-to-healed-state suite: each corrupt persisted
+    /// space order round-trips through serialization and `parse_snapshot`,
+    /// installs into a session with known workspaces, and heals to the
+    /// expected organization — deterministically, with invariants intact.
+    ///
+    /// The session holds four workspaces with fixed ids: `w1` (worktree
+    /// family parent, key `repo`), `w2` (linked family child, key `repo`),
+    /// and plain `w3`, `w4`.
+    #[test]
+    fn corrupt_space_orders_heal_deterministically_on_restore() {
+        use crate::folder::{Folder, SpaceOrderEntry};
+
+        fn snap_loose(id: &str) -> SpaceOrderEntrySnapshot {
+            SpaceOrderEntrySnapshot::Workspace(id.to_string())
+        }
+        fn snap_folder(id: &str, name: &str, members: &[&str]) -> SpaceOrderEntrySnapshot {
+            SpaceOrderEntrySnapshot::Folder(FolderSnapshot {
+                id: id.to_string(),
+                name: name.to_string(),
+                members: members.iter().map(|id| id.to_string()).collect(),
+            })
+        }
+        fn loose(id: &str) -> SpaceOrderEntry {
+            SpaceOrderEntry::Workspace(id.to_string())
+        }
+        fn folder(id: &str, name: &str, members: &[&str]) -> SpaceOrderEntry {
+            SpaceOrderEntry::Folder(Folder {
+                id: id.to_string(),
+                name: name.to_string(),
+                members: members.iter().map(|id| id.to_string()).collect(),
+            })
+        }
+
+        struct CorruptionCase {
+            name: &'static str,
+            corrupt: Vec<SpaceOrderEntrySnapshot>,
+            healed: Vec<SpaceOrderEntry>,
+        }
+
+        let cases = vec![
+            CorruptionCase {
+                name: "dangling loose reference dropped",
+                corrupt: vec![
+                    snap_loose("w1"),
+                    snap_loose("w-gone"),
+                    snap_loose("w2"),
+                    snap_loose("w3"),
+                    snap_loose("w4"),
+                ],
+                healed: vec![loose("w1"), loose("w2"), loose("w3"), loose("w4")],
+            },
+            CorruptionCase {
+                name: "dangling folder member dropped, empty folder kept",
+                corrupt: vec![
+                    snap_folder("f1", "work", &["w3", "w-gone"]),
+                    snap_folder("f2", "empty", &["w-gone"]),
+                    snap_loose("w1"),
+                    snap_loose("w2"),
+                    snap_loose("w4"),
+                ],
+                healed: vec![
+                    folder("f1", "work", &["w3"]),
+                    folder("f2", "empty", &[]),
+                    loose("w1"),
+                    loose("w2"),
+                    loose("w4"),
+                ],
+            },
+            CorruptionCase {
+                name: "duplicate membership deduped, first appearance wins",
+                corrupt: vec![
+                    snap_loose("w3"),
+                    snap_folder("f1", "work", &["w3", "w4", "w4"]),
+                    snap_loose("w1"),
+                    snap_loose("w2"),
+                    snap_loose("w4"),
+                ],
+                healed: vec![
+                    loose("w3"),
+                    folder("f1", "work", &["w4"]),
+                    loose("w1"),
+                    loose("w2"),
+                ],
+            },
+            CorruptionCase {
+                name: "duplicate folder ids merge into the first occurrence",
+                corrupt: vec![
+                    snap_folder("f1", "work", &["w3"]),
+                    snap_folder("f1", "work-dup", &["w4"]),
+                    snap_loose("w1"),
+                    snap_loose("w2"),
+                ],
+                healed: vec![
+                    folder("f1", "work", &["w3", "w4"]),
+                    loose("w1"),
+                    loose("w2"),
+                ],
+            },
+            CorruptionCase {
+                name: "workspaces missing from the order append loose at the end",
+                corrupt: vec![snap_loose("w3")],
+                healed: vec![loose("w3"), loose("w1"), loose("w2"), loose("w4")],
+            },
+            CorruptionCase {
+                name: "split worktree family heals into the parent's folder",
+                corrupt: vec![
+                    snap_folder("f1", "work", &["w1"]),
+                    snap_loose("w2"),
+                    snap_loose("w3"),
+                    snap_loose("w4"),
+                ],
+                healed: vec![
+                    folder("f1", "work", &["w1", "w2"]),
+                    loose("w3"),
+                    loose("w4"),
+                ],
+            },
+            CorruptionCase {
+                name: "split family in another folder follows the parent",
+                corrupt: vec![
+                    snap_folder("f1", "work", &["w1", "w3"]),
+                    snap_folder("f2", "play", &["w2"]),
+                    snap_loose("w4"),
+                ],
+                healed: vec![
+                    // Healing reassigns the family as a block, which appends
+                    // it at the end of the parent's folder.
+                    folder("f1", "work", &["w3", "w1", "w2"]),
+                    folder("f2", "play", &[]),
+                    loose("w4"),
+                ],
+            },
+            CorruptionCase {
+                name: "combined corruption heals in one pass",
+                corrupt: vec![
+                    snap_loose("w-gone"),
+                    snap_folder("f1", "work", &["w1", "w-gone", "w1"]),
+                    snap_loose("w2"),
+                    snap_folder("f1", "work-dup", &["w3"]),
+                    snap_loose("w3"),
+                ],
+                healed: vec![folder("f1", "work", &["w3", "w1", "w2"]), loose("w4")],
+            },
+        ];
+
+        fn build_state() -> AppState {
+            let mut state = state_with_workspaces(&["one", "two", "three", "four"]);
+            for (idx, ws) in state.workspaces.iter_mut().enumerate() {
+                ws.id = format!("w{}", idx + 1);
+            }
+            for (idx, is_linked) in [(0usize, false), (1usize, true)] {
+                state.workspaces[idx].worktree_space =
+                    Some(crate::workspace::WorktreeSpaceMembership {
+                        key: "repo".into(),
+                        label: "repo".into(),
+                        repo_root: "/repo".into(),
+                        checkout_path: if is_linked {
+                            format!("/repo/worktree-{idx}").into()
+                        } else {
+                            "/repo".into()
+                        },
+                        is_linked_worktree: is_linked,
+                    });
+            }
+            state
+        }
+
+        fn heal(corrupt: &[SpaceOrderEntrySnapshot]) -> AppState {
+            let mut state = build_state();
+            // Simulate a stale or hand-edited session file: the persisted
+            // space order is corrupt and the collapse state names a folder
+            // that does not exist.
+            let mut snap = capture_from_state(&state);
+            snap.space_order = corrupt.to_vec();
+            snap.collapsed_folder_ids.insert("f-gone".into());
+            let json = serde_json::to_string(&snap).expect("serialize snapshot");
+            let restored = parse_snapshot(&json).expect("parse corrupt snapshot");
+
+            state.collapsed_folder_ids = restored.collapsed_folder_ids;
+            state.install_space_order(
+                restored
+                    .space_order
+                    .into_iter()
+                    .map(crate::folder::SpaceOrderEntry::from)
+                    .collect(),
+            );
+            state
+        }
+
+        for case in &cases {
+            let state = heal(&case.corrupt);
+            assert_eq!(
+                state.space_order, case.healed,
+                "case `{}` must heal to the expected organization",
+                case.name
+            );
+            assert!(
+                !state.collapsed_folder_ids.contains("f-gone"),
+                "case `{}` must prune dangling collapsed folder ids",
+                case.name
+            );
+            state.assert_invariants_for_test();
+
+            let again = heal(&case.corrupt);
+            assert_eq!(
+                state.space_order, again.space_order,
+                "case `{}` must heal deterministically",
+                case.name
+            );
+        }
+    }
+
     #[test]
     fn round_trip_layout_snapshot() {
         let layout = LayoutSnapshot::Split {

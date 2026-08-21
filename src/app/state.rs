@@ -2053,12 +2053,68 @@ impl AppState {
         }
     }
 
+    /// An app state born from adversarial identity and organization data:
+    /// workspace 0 carries adversarial pane/tab identity, and the space order
+    /// was restored from corrupt input — a split worktree family, dangling
+    /// folder refs, duplicate memberships, a missing order entry, and
+    /// dangling collapse state — healed through the restore repair path.
     pub fn test_with_adversarial_identity_state() -> Self {
         let mut state = Self::test_new();
         state.workspaces = vec![crate::workspace::Workspace::test_adversarial_identity_state()];
+
+        let family_member = |name: &str, is_linked: bool| {
+            let mut ws = crate::workspace::Workspace::test_new(name);
+            ws.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+                key: "adversarial-repo".into(),
+                label: "repo".into(),
+                repo_root: "/repo".into(),
+                checkout_path: if is_linked {
+                    format!("/repo/worktree-{name}").into()
+                } else {
+                    "/repo".into()
+                },
+                is_linked_worktree: is_linked,
+            });
+            ws
+        };
+        state
+            .workspaces
+            .push(family_member("adversarial-parent", false));
+        state
+            .workspaces
+            .push(family_member("adversarial-child", true));
+        state
+            .workspaces
+            .push(crate::workspace::Workspace::test_new("adversarial-loose"));
+        let identity = state.workspaces[0].id.clone();
+        let parent = state.workspaces[1].id.clone();
+        let child = state.workspaces[2].id.clone();
+
         state.active = Some(0);
         state.selected = 0;
         state.ensure_test_terminals();
+
+        // Corrupt restored organization, healed by `install_space_order`:
+        // the family is split across folders, a folder id repeats, spaces
+        // appear more than once, refs dangle, "adversarial-loose" is missing
+        // from the order, and collapse state names a missing folder.
+        state.collapsed_folder_ids.insert("f1".into());
+        state.collapsed_folder_ids.insert("f-gone".into());
+        state.install_space_order(vec![
+            crate::folder::SpaceOrderEntry::Workspace(identity),
+            crate::folder::SpaceOrderEntry::Folder(crate::folder::Folder {
+                id: "f1".into(),
+                name: "adversarial".into(),
+                members: vec![parent.clone(), "w-gone".into(), parent],
+            }),
+            crate::folder::SpaceOrderEntry::Workspace(child.clone()),
+            crate::folder::SpaceOrderEntry::Folder(crate::folder::Folder {
+                id: "f1".into(),
+                name: "adversarial-dup".into(),
+                members: vec![child],
+            }),
+            crate::folder::SpaceOrderEntry::Workspace("w-gone".into()),
+        ]);
         state
     }
 
@@ -2443,6 +2499,63 @@ mod tests {
         state.ensure_test_terminals();
 
         state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn adversarial_organization_state_heals_deterministically_on_restore() {
+        let find = |state: &AppState, name: &str| -> String {
+            state
+                .workspaces
+                .iter()
+                .find(|ws| ws.custom_name.as_deref() == Some(name))
+                .unwrap_or_else(|| panic!("workspace {name} present"))
+                .id
+                .clone()
+        };
+
+        let state = AppState::test_with_adversarial_identity_state();
+        state.assert_invariants_for_test();
+
+        // The split worktree family healed into the parent's folder.
+        let parent = find(&state, "adversarial-parent");
+        let child = find(&state, "adversarial-child");
+        assert_eq!(state.workspace_folder_id(&parent), Some("f1"));
+        assert_eq!(state.workspace_folder_id(&child), Some("f1"));
+        // The duplicate folder id merged; the missing order entry was
+        // appended loose at the end.
+        let loose = find(&state, "adversarial-loose");
+        assert_eq!(state.workspace_folder_id(&loose), None);
+        assert!(matches!(
+            state.space_order.last(),
+            Some(crate::folder::SpaceOrderEntry::Workspace(id)) if *id == loose
+        ));
+        // Collapse state survives for live folders and drops dangling ids.
+        assert!(state.collapsed_folder_ids.contains("f1"));
+        assert!(!state.collapsed_folder_ids.contains("f-gone"));
+
+        // The same corrupt input heals to the same organization every time.
+        let again = AppState::test_with_adversarial_identity_state();
+        let shape = |state: &AppState| -> Vec<String> {
+            state
+                .space_order
+                .iter()
+                .map(|entry| match entry {
+                    crate::folder::SpaceOrderEntry::Workspace(id) => {
+                        let name = state
+                            .workspaces
+                            .iter()
+                            .find(|ws| &ws.id == id)
+                            .and_then(|ws| ws.custom_name.clone())
+                            .unwrap_or_default();
+                        format!("loose:{name}")
+                    }
+                    crate::folder::SpaceOrderEntry::Folder(folder) => {
+                        format!("{}:{}[{}]", folder.id, folder.name, folder.members.len())
+                    }
+                })
+                .collect()
+        };
+        assert_eq!(shape(&state), shape(&again));
     }
 
     fn navigator_row_for_display(is_workspace: bool) -> NavigatorRow {

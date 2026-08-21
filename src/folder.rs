@@ -73,6 +73,62 @@ pub(crate) fn reserve_folder_ids(entries: &[SpaceOrderEntry]) {
     }
 }
 
+/// Repairs applied while normalizing a space order against the live
+/// workspaces. The restore path logs each non-empty category so hand-edited
+/// or stale snapshots heal silently but observably.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct SpaceOrderRepairs {
+    /// References to workspaces that no longer exist, dropped from the order.
+    pub dangling_workspace_refs: Vec<String>,
+    /// Duplicate appearances of a workspace, dropped (first occurrence wins).
+    pub duplicate_workspace_refs: Vec<String>,
+    /// Duplicate folder ids whose members merged into the first occurrence.
+    pub merged_duplicate_folder_ids: Vec<String>,
+    /// Workspaces missing from the order, appended loose at the end.
+    pub appended_missing_workspaces: Vec<String>,
+}
+
+impl SpaceOrderRepairs {
+    /// Whether normalization changed nothing. Test-only: the restore path
+    /// logs each category individually via [`Self::log_restore_warnings`].
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.dangling_workspace_refs.is_empty()
+            && self.duplicate_workspace_refs.is_empty()
+            && self.merged_duplicate_folder_ids.is_empty()
+            && self.appended_missing_workspaces.is_empty()
+    }
+
+    /// Log every repair applied while restoring a space order. Repairs are
+    /// silent to the user; tracing warnings are their only surface.
+    pub fn log_restore_warnings(&self) {
+        if !self.dangling_workspace_refs.is_empty() {
+            tracing::warn!(
+                refs = ?self.dangling_workspace_refs,
+                "restored space order referenced missing spaces; dropped the dangling references"
+            );
+        }
+        if !self.duplicate_workspace_refs.is_empty() {
+            tracing::warn!(
+                refs = ?self.duplicate_workspace_refs,
+                "restored space order listed spaces more than once; kept the first appearance"
+            );
+        }
+        if !self.merged_duplicate_folder_ids.is_empty() {
+            tracing::warn!(
+                folders = ?self.merged_duplicate_folder_ids,
+                "restored space order repeated folder ids; merged members into the first occurrence"
+            );
+        }
+        if !self.appended_missing_workspaces.is_empty() {
+            tracing::warn!(
+                refs = ?self.appended_missing_workspaces,
+                "restored space order was missing spaces; appended them loose at the end"
+            );
+        }
+    }
+}
+
 /// Normalize a space order against the live workspace ids:
 /// - folders are kept (even when empty); duplicate folder ids merge into the
 ///   first occurrence,
@@ -86,15 +142,42 @@ pub(crate) fn normalized_space_order(
     entries: &[SpaceOrderEntry],
     workspace_ids: &[&str],
 ) -> Vec<SpaceOrderEntry> {
+    normalized_space_order_with_repairs(entries, workspace_ids).0
+}
+
+/// [`normalized_space_order`] plus a deterministic report of every repair
+/// applied, in input order.
+pub(crate) fn normalized_space_order_with_repairs(
+    entries: &[SpaceOrderEntry],
+    workspace_ids: &[&str],
+) -> (Vec<SpaceOrderEntry>, SpaceOrderRepairs) {
     let known: std::collections::HashSet<&str> = workspace_ids.iter().copied().collect();
-    let mut seen = std::collections::HashSet::<&str>::new();
+    let mut seen = std::collections::HashSet::<String>::new();
     let mut folder_positions = std::collections::HashMap::<&str, usize>::new();
     let mut normalized: Vec<SpaceOrderEntry> = Vec::with_capacity(entries.len());
+    let mut repairs = SpaceOrderRepairs::default();
+
+    fn keep(
+        id: &str,
+        known: &std::collections::HashSet<&str>,
+        seen: &mut std::collections::HashSet<String>,
+        repairs: &mut SpaceOrderRepairs,
+    ) -> bool {
+        if !known.contains(id) {
+            repairs.dangling_workspace_refs.push(id.to_string());
+            return false;
+        }
+        if !seen.insert(id.to_string()) {
+            repairs.duplicate_workspace_refs.push(id.to_string());
+            return false;
+        }
+        true
+    }
 
     for entry in entries {
         match entry {
             SpaceOrderEntry::Workspace(id) => {
-                if known.contains(id.as_str()) && seen.insert(id.as_str()) {
+                if keep(id, &known, &mut seen, &mut repairs) {
                     normalized.push(SpaceOrderEntry::Workspace(id.clone()));
                 }
             }
@@ -102,10 +185,13 @@ pub(crate) fn normalized_space_order(
                 let members: Vec<String> = folder
                     .members
                     .iter()
-                    .filter(|id| known.contains(id.as_str()) && seen.insert(id.as_str()))
+                    .filter(|id| keep(id, &known, &mut seen, &mut repairs))
                     .cloned()
                     .collect();
                 if let Some(&position) = folder_positions.get(folder.id.as_str()) {
+                    if !repairs.merged_duplicate_folder_ids.contains(&folder.id) {
+                        repairs.merged_duplicate_folder_ids.push(folder.id.clone());
+                    }
                     if let SpaceOrderEntry::Folder(existing) = &mut normalized[position] {
                         existing.members.extend(members);
                     }
@@ -122,12 +208,13 @@ pub(crate) fn normalized_space_order(
     }
 
     for id in workspace_ids {
-        if !seen.contains(id) {
+        if !seen.contains(*id) {
+            repairs.appended_missing_workspaces.push((*id).to_string());
             normalized.push(SpaceOrderEntry::Workspace((*id).to_string()));
         }
     }
 
-    normalized
+    (normalized, repairs)
 }
 
 /// Canonical workspace-id order: the space order flattened (folder members in
@@ -207,6 +294,62 @@ mod tests {
             next_number > restored_number,
             "next folder id {next} must not collide with restored {restored}"
         );
+    }
+
+    #[test]
+    fn normalize_reports_every_repair_it_applies() {
+        let entries = vec![
+            loose("w1"),
+            folder("f1", "work", &["w2", "w-gone", "w2"]),
+            folder("f1", "work-dup", &["w4"]),
+            loose("w1"),
+        ];
+
+        let (normalized, repairs) =
+            normalized_space_order_with_repairs(&entries, &["w1", "w2", "w3", "w4"]);
+
+        assert_eq!(
+            normalized,
+            vec![
+                loose("w1"),
+                folder("f1", "work", &["w2", "w4"]),
+                loose("w3")
+            ]
+        );
+        assert_eq!(repairs.dangling_workspace_refs, vec!["w-gone"]);
+        assert_eq!(repairs.duplicate_workspace_refs, vec!["w2", "w1"]);
+        assert_eq!(repairs.merged_duplicate_folder_ids, vec!["f1"]);
+        assert_eq!(repairs.appended_missing_workspaces, vec!["w3"]);
+        assert!(!repairs.is_empty());
+    }
+
+    #[test]
+    fn normalize_reports_no_repairs_for_a_clean_order() {
+        let entries = vec![loose("w1"), folder("f1", "work", &["w2"])];
+
+        let (normalized, repairs) = normalized_space_order_with_repairs(&entries, &["w1", "w2"]);
+
+        assert_eq!(normalized, entries);
+        assert!(
+            repairs.is_empty(),
+            "clean input must report no repairs: {repairs:?}"
+        );
+    }
+
+    #[test]
+    fn normalize_repairs_are_deterministic_for_the_same_corrupt_input() {
+        let entries = vec![
+            folder("f2", "beta", &["w2", "w-gone", "w1"]),
+            loose("w1"),
+            folder("f2", "beta-dup", &["w3"]),
+            loose("w-other-gone"),
+        ];
+        let ids = ["w1", "w2", "w3", "w4", "w5"];
+
+        let first = normalized_space_order_with_repairs(&entries, &ids);
+        let second = normalized_space_order_with_repairs(&entries, &ids);
+
+        assert_eq!(first, second, "same corrupt input must heal identically");
     }
 
     #[test]

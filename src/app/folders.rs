@@ -352,18 +352,57 @@ impl AppState {
 
     /// Install a restored space order: reserve its folder ids against reuse,
     /// then silently repair stale data — dangling references and duplicates
-    /// are dropped, unlisted workspaces appended loose, and split worktree
-    /// families moved to the parent's folder — before re-sorting the
-    /// workspaces vec to the canonical order.
+    /// are dropped, unlisted workspaces appended loose, dangling collapsed
+    /// folder ids pruned, and split worktree families moved to the parent's
+    /// folder — before re-sorting the workspaces vec to the canonical order.
+    /// Every repair is deterministic and logged as a tracing warning.
     pub(crate) fn install_space_order(&mut self, entries: Vec<SpaceOrderEntry>) {
         crate::folder::reserve_folder_ids(&entries);
         self.space_order = entries;
         if self.space_order.is_empty() {
             return;
         }
-        self.normalize_space_order();
+        let ids: Vec<&str> = self.workspaces.iter().map(|ws| ws.id.as_str()).collect();
+        let (normalized, repairs) =
+            crate::folder::normalized_space_order_with_repairs(&self.space_order, &ids);
+        self.space_order = normalized;
+        repairs.log_restore_warnings();
+        self.prune_dangling_collapsed_folder_ids();
         self.heal_split_worktree_families();
         self.sync_workspaces_to_space_order();
+    }
+
+    /// Drop collapse state for folders that no longer exist in the space
+    /// order. Called on restore so stale snapshot data cannot linger.
+    fn prune_dangling_collapsed_folder_ids(&mut self) {
+        if self.collapsed_folder_ids.is_empty() {
+            return;
+        }
+        let known: std::collections::HashSet<&str> = self
+            .space_order
+            .iter()
+            .filter_map(|entry| match entry {
+                SpaceOrderEntry::Folder(folder) => Some(folder.id.as_str()),
+                SpaceOrderEntry::Workspace(_) => None,
+            })
+            .collect();
+        let mut dangling: Vec<String> = self
+            .collapsed_folder_ids
+            .iter()
+            .filter(|id| !known.contains(id.as_str()))
+            .cloned()
+            .collect();
+        if dangling.is_empty() {
+            return;
+        }
+        dangling.sort_unstable();
+        tracing::warn!(
+            folders = ?dangling,
+            "restored collapse state referenced missing folders; dropped the dangling entries"
+        );
+        for id in &dangling {
+            self.collapsed_folder_ids.remove(id);
+        }
     }
 
     /// Keep a worktree family in one folder: when members disagree, the whole
@@ -402,6 +441,7 @@ impl AppState {
 
         tracing::warn!(
             key,
+            members = ?members.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
             target_folder = target.as_deref().unwrap_or("top level"),
             "worktree family split across folders; moving family to the parent's folder"
         );
@@ -414,18 +454,21 @@ impl AppState {
     }
 
     /// Repair every worktree family that is split across folders. Used after
-    /// restoring a session snapshot.
+    /// restoring a session snapshot. Families heal in workspace-vec order so
+    /// the same corrupt input always heals to the same output.
     pub(crate) fn heal_split_worktree_families(&mut self) {
         if self.space_order.is_empty() {
             return;
         }
-        let keys: Vec<String> = self
-            .workspaces
-            .iter()
-            .filter_map(|ws| ws.worktree_space().map(|space| space.key.clone()))
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
+        let mut seen = std::collections::HashSet::<String>::new();
+        let mut keys: Vec<String> = Vec::new();
+        for ws in &self.workspaces {
+            if let Some(space) = ws.worktree_space() {
+                if seen.insert(space.key.clone()) {
+                    keys.push(space.key.clone());
+                }
+            }
+        }
         for key in keys {
             self.ensure_worktree_family_colocated(&key);
         }
@@ -486,6 +529,13 @@ impl AppState {
                 .eq(vec_order.iter().copied()),
             "workspaces vec order {vec_order:?} diverged from canonical space order {canonical:?}"
         );
+
+        for id in &self.collapsed_folder_ids {
+            assert!(
+                folder_ids.contains(id.as_str()),
+                "collapsed folder id {id} references a missing folder"
+            );
+        }
 
         let mut family_folders = std::collections::HashMap::<&str, Option<&str>>::new();
         for ws in &self.workspaces {
@@ -1289,6 +1339,15 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "missing folder")]
+    fn invariants_catch_dangling_collapsed_folder_id() {
+        let mut state = app_with_workspaces(&["one"]);
+        state.collapsed_folder_ids.insert("f-missing".into());
+
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
     fn closing_selected_workspace_prunes_it_from_space_order() {
         let mut state = app_with_workspaces(&["one", "two"]);
         let w1 = workspace_id(&state, 0);
@@ -1450,6 +1509,96 @@ mod tests {
 
         assert_eq!(state.folder("f1").expect("folder").members, vec![w1]);
         state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn installing_space_order_prunes_dangling_collapsed_folder_ids() {
+        let mut state = app_with_workspaces(&["one"]);
+        let w1 = workspace_id(&state, 0);
+        state.collapsed_folder_ids.insert("f1".into());
+        state.collapsed_folder_ids.insert("f-gone".into());
+
+        state.install_space_order(vec![SpaceOrderEntry::Folder(Folder {
+            id: "f1".into(),
+            name: "work".into(),
+            members: vec![w1],
+        })]);
+
+        assert!(
+            state.collapsed_folder_ids.contains("f1"),
+            "collapse state for a restored folder must survive"
+        );
+        assert!(
+            !state.collapsed_folder_ids.contains("f-gone"),
+            "collapse state for a missing folder must be dropped"
+        );
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn healing_multiple_split_families_is_deterministic() {
+        let build = || {
+            let mut state = app_with_workspaces(&["pa", "ca", "pb", "cb"]);
+            mark_family_member(&mut state, 0, "repo-a", false);
+            mark_family_member(&mut state, 1, "repo-a", true);
+            mark_family_member(&mut state, 2, "repo-b", false);
+            mark_family_member(&mut state, 3, "repo-b", true);
+            let ids: Vec<String> = state.workspaces.iter().map(|ws| ws.id.clone()).collect();
+            // Both families split: each parent foldered, each child loose.
+            let entries = vec![
+                SpaceOrderEntry::Folder(Folder {
+                    id: "f1".into(),
+                    name: "alpha".into(),
+                    members: vec![ids[0].clone()],
+                }),
+                SpaceOrderEntry::Workspace(ids[1].clone()),
+                SpaceOrderEntry::Folder(Folder {
+                    id: "f2".into(),
+                    name: "beta".into(),
+                    members: vec![ids[2].clone()],
+                }),
+                SpaceOrderEntry::Workspace(ids[3].clone()),
+            ];
+            state.install_space_order(entries);
+            state.assert_invariants_for_test();
+            // Project onto stable labels so runs with different generated ids
+            // can be compared.
+            let label_of = |id: &String| {
+                state
+                    .workspaces
+                    .iter()
+                    .find(|ws| &ws.id == id)
+                    .map(|ws| ws.custom_name.clone().unwrap_or_default())
+                    .unwrap_or_default()
+            };
+            state
+                .space_order
+                .iter()
+                .map(|entry| match entry {
+                    SpaceOrderEntry::Workspace(id) => format!("loose:{}", label_of(id)),
+                    SpaceOrderEntry::Folder(folder) => format!(
+                        "{}[{}]",
+                        folder.id,
+                        folder
+                            .members
+                            .iter()
+                            .map(label_of)
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let first = build();
+        let second = build();
+
+        assert_eq!(
+            first,
+            vec!["f1[pa,ca]".to_string(), "f2[pb,cb]".to_string()],
+            "both families heal into their parent's folder"
+        );
+        assert_eq!(first, second, "healing must be deterministic across runs");
     }
 
     #[test]
