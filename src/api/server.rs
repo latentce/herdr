@@ -405,6 +405,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::FolderRename(_) => "folder.rename",
         Method::FolderDelete(_) => "folder.delete",
         Method::FolderAssign(_) => "folder.assign",
+        Method::FolderMove(_) => "folder.move",
         Method::WorktreeList(_) => "worktree.list",
         Method::WorktreeCreate(_) => "worktree.create",
         Method::WorktreeOpen(_) => "worktree.open",

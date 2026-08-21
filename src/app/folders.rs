@@ -104,13 +104,19 @@ impl AppState {
     }
 
     /// Assign a workspace to a folder, or back to the top level when
-    /// `folder_id` is `None`, with append semantics. Assigning any worktree
-    /// family member moves the whole family. Returns the affected workspace
-    /// ids in canonical order.
+    /// `folder_id` is `None`. Assigning any worktree family member moves the
+    /// whole family. Returns the affected workspace ids in canonical order.
+    ///
+    /// `position` is the final index of the affected block inside the target
+    /// container — the folder's member list, or the top-level order (where a
+    /// folder counts as one entry) when `folder_id` is `None`. `None`
+    /// appends; out-of-range positions clamp to the end. Assigning to the
+    /// current container with a position is a plain reorder inside it.
     pub fn assign_workspace_to_folder(
         &mut self,
         workspace_id: &str,
         folder_id: Option<&str>,
+        position: Option<usize>,
     ) -> Result<Vec<String>, FolderMutationError> {
         let Some(workspace) = self.workspaces.iter().find(|ws| ws.id == workspace_id) else {
             return Err(FolderMutationError::WorkspaceNotFound);
@@ -160,10 +166,19 @@ impl AppState {
                     self.sync_workspaces_to_space_order();
                     return Err(FolderMutationError::FolderNotFound);
                 };
-                folder.members.extend(affected.iter().cloned());
+                let index = position
+                    .unwrap_or(folder.members.len())
+                    .min(folder.members.len());
+                folder
+                    .members
+                    .splice(index..index, affected.iter().cloned());
             }
             None => {
-                self.space_order.extend(
+                let index = position
+                    .unwrap_or(self.space_order.len())
+                    .min(self.space_order.len());
+                self.space_order.splice(
+                    index..index,
                     affected
                         .iter()
                         .map(|id| SpaceOrderEntry::Workspace(id.clone())),
@@ -174,6 +189,41 @@ impl AppState {
         self.sync_workspaces_to_space_order();
         self.mark_session_dirty();
         Ok(affected)
+    }
+
+    /// Reposition a folder within the top-level order. `position` is the
+    /// folder's final index among top-level entries (folders and loose
+    /// spaces); out-of-range positions clamp to the end. Returns the
+    /// effective position and whether the order changed.
+    pub fn move_folder(
+        &mut self,
+        folder_id: &str,
+        position: usize,
+    ) -> Result<(usize, bool), FolderMutationError> {
+        if self.folder(folder_id).is_none() {
+            return Err(FolderMutationError::FolderNotFound);
+        }
+
+        // Make implicitly loose workspaces explicit first so `position`
+        // addresses the same top-level entry list clients observe through
+        // `folder.list`.
+        self.normalize_space_order();
+        let Some(index) = self.space_order.iter().position(
+            |entry| matches!(entry, SpaceOrderEntry::Folder(folder) if folder.id == folder_id),
+        ) else {
+            // Unreachable in practice (normalization keeps folders), but
+            // degrade gracefully.
+            return Err(FolderMutationError::FolderNotFound);
+        };
+        let entry = self.space_order.remove(index);
+        let target = position.min(self.space_order.len());
+        self.space_order.insert(target, entry);
+        let moved = target != index;
+        if moved {
+            self.sync_workspaces_to_space_order();
+            self.mark_session_dirty();
+        }
+        Ok((target, moved))
     }
 
     /// Normalize the space order against the live workspaces: prune stale and
@@ -352,7 +402,7 @@ impl AppState {
             "worktree family split across folders; moving family to the parent's folder"
         );
         if self
-            .assign_workspace_to_folder(&anchor, target.as_deref())
+            .assign_workspace_to_folder(&anchor, target.as_deref(), None)
             .is_err()
         {
             tracing::warn!(key, "failed to colocate worktree family");
@@ -674,7 +724,7 @@ mod tests {
         let w2 = workspace_id(&state, 1);
         let folder_id = state.create_folder("work").expect("create folder");
         state
-            .assign_workspace_to_folder(&w2, Some(&folder_id))
+            .assign_workspace_to_folder(&w2, Some(&folder_id), None)
             .expect("assign");
         let w2_idx = state
             .workspaces
@@ -729,7 +779,7 @@ mod tests {
         let folder_id = state.create_folder("work").expect("create folder");
 
         let affected = state
-            .assign_workspace_to_folder(&w1, Some(&folder_id))
+            .assign_workspace_to_folder(&w1, Some(&folder_id), None)
             .expect("assign");
 
         assert_eq!(affected, vec![w1.clone()]);
@@ -757,7 +807,7 @@ mod tests {
         let folder_id = state.create_folder("work").expect("create folder");
 
         state
-            .assign_workspace_to_folder(&w1, Some(&folder_id))
+            .assign_workspace_to_folder(&w1, Some(&folder_id), None)
             .expect("assign");
 
         let new_idx = state
@@ -777,11 +827,11 @@ mod tests {
         let w2 = workspace_id(&state, 1);
         let folder_id = state.create_folder("work").expect("create folder");
         state
-            .assign_workspace_to_folder(&w1, Some(&folder_id))
+            .assign_workspace_to_folder(&w1, Some(&folder_id), None)
             .expect("assign in");
 
         let affected = state
-            .assign_workspace_to_folder(&w1, None)
+            .assign_workspace_to_folder(&w1, None, None)
             .expect("assign out");
 
         assert_eq!(affected, vec![w1.clone()]);
@@ -801,11 +851,11 @@ mod tests {
         let w1 = workspace_id(&state, 0);
 
         assert_eq!(
-            state.assign_workspace_to_folder("w-missing", None),
+            state.assign_workspace_to_folder("w-missing", None, None),
             Err(FolderMutationError::WorkspaceNotFound)
         );
         assert_eq!(
-            state.assign_workspace_to_folder(&w1, Some("f-missing")),
+            state.assign_workspace_to_folder(&w1, Some("f-missing"), None),
             Err(FolderMutationError::FolderNotFound)
         );
     }
@@ -821,7 +871,7 @@ mod tests {
         let folder_id = state.create_folder("work").expect("create folder");
 
         let affected = state
-            .assign_workspace_to_folder(&child, Some(&folder_id))
+            .assign_workspace_to_folder(&child, Some(&folder_id), None)
             .expect("assign family member");
 
         assert_eq!(affected, vec![parent.clone(), child.clone()]);
@@ -845,17 +895,295 @@ mod tests {
         let other = workspace_id(&state, 2);
         let folder_id = state.create_folder("work").expect("create folder");
         state
-            .assign_workspace_to_folder(&parent, Some(&folder_id))
+            .assign_workspace_to_folder(&parent, Some(&folder_id), None)
             .expect("assign in");
 
         let affected = state
-            .assign_workspace_to_folder(&parent, None)
+            .assign_workspace_to_folder(&parent, None, None)
             .expect("assign out");
 
         assert_eq!(affected, vec![parent.clone(), child.clone()]);
         assert_eq!(state.workspace_folder_id(&parent), None);
         assert_eq!(state.workspace_folder_id(&child), None);
         assert_eq!(workspace_id_order(&state), vec![other, parent, child]);
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn positional_assign_inserts_at_position_inside_folder() {
+        let mut state = app_with_workspaces(&["one", "two", "three"]);
+        let w1 = workspace_id(&state, 0);
+        let w2 = workspace_id(&state, 1);
+        let w3 = workspace_id(&state, 2);
+        let folder_id = state.create_folder("work").expect("create folder");
+        state
+            .assign_workspace_to_folder(&w1, Some(&folder_id), None)
+            .expect("assign first");
+        state
+            .assign_workspace_to_folder(&w2, Some(&folder_id), None)
+            .expect("assign second");
+
+        let affected = state
+            .assign_workspace_to_folder(&w3, Some(&folder_id), Some(1))
+            .expect("positional assign");
+
+        assert_eq!(affected, vec![w3.clone()]);
+        assert_eq!(
+            state.folder(&folder_id).expect("folder").members,
+            vec![w1, w3, w2]
+        );
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn positional_assign_within_same_folder_reorders_members() {
+        let mut state = app_with_workspaces(&["one", "two", "three"]);
+        let w1 = workspace_id(&state, 0);
+        let w2 = workspace_id(&state, 1);
+        let w3 = workspace_id(&state, 2);
+        let folder_id = state.create_folder("work").expect("create folder");
+        for id in [&w1, &w2, &w3] {
+            state
+                .assign_workspace_to_folder(id, Some(&folder_id), None)
+                .expect("assign");
+        }
+
+        let affected = state
+            .assign_workspace_to_folder(&w3, Some(&folder_id), Some(0))
+            .expect("reorder within folder");
+
+        assert_eq!(affected, vec![w3.clone()]);
+        assert_eq!(
+            state.folder(&folder_id).expect("folder").members,
+            vec![w3.clone(), w1, w2]
+        );
+        assert_eq!(state.workspace_folder_id(&w3), Some(folder_id.as_str()));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn positional_assign_to_top_level_inserts_at_entry_position() {
+        let mut state = app_with_workspaces(&["one", "two", "three"]);
+        let w1 = workspace_id(&state, 0);
+        let w2 = workspace_id(&state, 1);
+        let w3 = workspace_id(&state, 2);
+        let folder_id = state.create_folder("work").expect("create folder");
+        state
+            .assign_workspace_to_folder(&w2, Some(&folder_id), None)
+            .expect("assign into folder");
+
+        // Top level is now [w1, w3, folder]; pull w2 out to position 1.
+        let affected = state
+            .assign_workspace_to_folder(&w2, None, Some(1))
+            .expect("positional assign out");
+
+        assert_eq!(affected, vec![w2.clone()]);
+        assert_eq!(state.workspace_folder_id(&w2), None);
+        assert_eq!(
+            state.space_order,
+            vec![
+                SpaceOrderEntry::Workspace(w1.clone()),
+                SpaceOrderEntry::Workspace(w2.clone()),
+                SpaceOrderEntry::Workspace(w3.clone()),
+                SpaceOrderEntry::Folder(Folder {
+                    id: folder_id,
+                    name: "work".into(),
+                    members: Vec::new(),
+                }),
+            ]
+        );
+        assert_eq!(workspace_id_order(&state), vec![w1, w2, w3]);
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn positional_assign_with_null_folder_reorders_loose_space() {
+        let mut state = app_with_workspaces(&["one", "two", "three"]);
+        let w1 = workspace_id(&state, 0);
+        let w2 = workspace_id(&state, 1);
+        let w3 = workspace_id(&state, 2);
+
+        // A loose space with a position is a pure top-level reorder.
+        let affected = state
+            .assign_workspace_to_folder(&w3, None, Some(0))
+            .expect("top-level reorder");
+
+        assert_eq!(affected, vec![w3.clone()]);
+        assert_eq!(workspace_id_order(&state), vec![w3, w1, w2]);
+        assert_eq!(
+            state.canonical_workspace_order(),
+            workspace_id_order(&state)
+        );
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn positional_assign_clamps_out_of_range_positions() {
+        let mut state = app_with_workspaces(&["one", "two", "three"]);
+        let w1 = workspace_id(&state, 0);
+        let w2 = workspace_id(&state, 1);
+        let w3 = workspace_id(&state, 2);
+        let folder_id = state.create_folder("work").expect("create folder");
+
+        state
+            .assign_workspace_to_folder(&w1, Some(&folder_id), Some(99))
+            .expect("clamped folder assign");
+        assert_eq!(
+            state.folder(&folder_id).expect("folder").members,
+            vec![w1.clone()]
+        );
+
+        state
+            .assign_workspace_to_folder(&w2, None, Some(99))
+            .expect("clamped top-level assign");
+        assert_eq!(workspace_id_order(&state), vec![w3, w1, w2.clone()]);
+        assert!(
+            matches!(
+                state.space_order.last(),
+                Some(SpaceOrderEntry::Workspace(id)) if *id == w2
+            ),
+            "clamped position must land at the end: {:?}",
+            state.space_order
+        );
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn positional_assign_moves_family_as_contiguous_block() {
+        let mut state = app_with_workspaces(&["parent", "child", "one", "two"]);
+        mark_family_member(&mut state, 0, "repo-key", false);
+        mark_family_member(&mut state, 1, "repo-key", true);
+        let parent = workspace_id(&state, 0);
+        let child = workspace_id(&state, 1);
+        let w1 = workspace_id(&state, 2);
+        let w2 = workspace_id(&state, 3);
+        let folder_id = state.create_folder("work").expect("create folder");
+        for id in [&w1, &w2] {
+            state
+                .assign_workspace_to_folder(id, Some(&folder_id), None)
+                .expect("assign filler");
+        }
+
+        let affected = state
+            .assign_workspace_to_folder(&child, Some(&folder_id), Some(1))
+            .expect("positional family assign");
+
+        assert_eq!(affected, vec![parent.clone(), child.clone()]);
+        assert_eq!(
+            state.folder(&folder_id).expect("folder").members,
+            vec![w1.clone(), parent.clone(), child.clone(), w2.clone()]
+        );
+
+        // Family positional moves to the top level keep the block contiguous.
+        let affected = state
+            .assign_workspace_to_folder(&parent, None, Some(0))
+            .expect("positional family move out");
+        assert_eq!(affected, vec![parent.clone(), child.clone()]);
+        assert_eq!(workspace_id_order(&state), vec![parent, child, w1, w2]);
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn move_folder_repositions_folder_in_top_level_order() {
+        let mut state = app_with_workspaces(&["one", "two"]);
+        let w1 = workspace_id(&state, 0);
+        let w2 = workspace_id(&state, 1);
+        let folder_id = state.create_folder("work").expect("create folder");
+        state
+            .assign_workspace_to_folder(&w2, Some(&folder_id), None)
+            .expect("assign");
+
+        // Top level is [w1, folder]; move the folder to the front.
+        let (position, moved) = state.move_folder(&folder_id, 0).expect("move folder");
+
+        assert_eq!(position, 0);
+        assert!(moved);
+        assert!(
+            matches!(
+                state.space_order.first(),
+                Some(SpaceOrderEntry::Folder(folder)) if folder.id == folder_id
+            ),
+            "folder must lead the top level: {:?}",
+            state.space_order
+        );
+        // Membership is untouched and the workspaces vec follows the new
+        // canonical order.
+        assert_eq!(state.workspace_folder_id(&w2), Some(folder_id.as_str()));
+        assert_eq!(workspace_id_order(&state), vec![w2, w1]);
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn move_folder_clamps_out_of_range_position() {
+        let mut state = app_with_workspaces(&["one", "two"]);
+        let folder_id = state.create_folder("work").expect("create folder");
+        let (_, _) = state.move_folder(&folder_id, 0).expect("move to front");
+
+        let (position, moved) = state.move_folder(&folder_id, 99).expect("clamped move");
+
+        assert_eq!(position, 2, "clamps to the last top-level index");
+        assert!(moved);
+        assert!(matches!(
+            state.space_order.last(),
+            Some(SpaceOrderEntry::Folder(folder)) if folder.id == folder_id
+        ));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn move_folder_to_current_position_reports_no_move() {
+        let mut state = app_with_workspaces(&["one", "two"]);
+        let folder_id = state.create_folder("work").expect("create folder");
+        let before = state.space_order.clone();
+
+        let (position, moved) = state.move_folder(&folder_id, 2).expect("noop move");
+
+        assert_eq!(position, 2);
+        assert!(!moved);
+        assert_eq!(state.space_order, before);
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn move_folder_rejects_unknown_folder() {
+        let mut state = app_with_workspaces(&["one"]);
+
+        assert_eq!(
+            state.move_folder("f-missing", 0),
+            Err(FolderMutationError::FolderNotFound)
+        );
+    }
+
+    #[test]
+    fn new_workspace_appears_loose_at_end_of_canonical_order() {
+        let mut state = app_with_workspaces(&["one", "two"]);
+        let w1 = workspace_id(&state, 0);
+        let w2 = workspace_id(&state, 1);
+        let folder_id = state.create_folder("work").expect("create folder");
+        state
+            .assign_workspace_to_folder(&w1, Some(&folder_id), None)
+            .expect("assign");
+
+        // A newly created space is implicitly loose at the end of the top
+        // level until the next normalization makes that explicit.
+        state.workspaces.push(Workspace::test_new("new"));
+        state.ensure_test_terminals();
+        let new_id = state.workspaces.last().expect("new workspace").id.clone();
+
+        assert_eq!(
+            state.canonical_workspace_order(),
+            vec![w2.clone(), w1.clone(), new_id.clone()]
+        );
+        state.normalize_space_order();
+        assert!(
+            matches!(
+                state.space_order.last(),
+                Some(SpaceOrderEntry::Workspace(id)) if *id == new_id
+            ),
+            "new space must be loose at the end: {:?}",
+            state.space_order
+        );
+        assert_eq!(state.workspace_folder_id(&new_id), None);
         state.assert_invariants_for_test();
     }
 
@@ -927,7 +1255,7 @@ mod tests {
         let w1 = workspace_id(&state, 0);
         let folder_id = state.create_folder("work").expect("create folder");
         state
-            .assign_workspace_to_folder(&w1, Some(&folder_id))
+            .assign_workspace_to_folder(&w1, Some(&folder_id), None)
             .expect("assign");
         state.selected = state
             .workspaces
@@ -955,7 +1283,7 @@ mod tests {
         let w2 = workspace_id(&state, 1);
         let folder_id = state.create_folder("work").expect("create folder");
         state
-            .assign_workspace_to_folder(&w2, Some(&folder_id))
+            .assign_workspace_to_folder(&w2, Some(&folder_id), None)
             .expect("assign");
         // Order is now: one, three, [work: two]
         let from = state
@@ -978,7 +1306,7 @@ mod tests {
         let w3 = workspace_id(&state, 2);
         let folder_id = state.create_folder("work").expect("create folder");
         state
-            .assign_workspace_to_folder(&w2, Some(&folder_id))
+            .assign_workspace_to_folder(&w2, Some(&folder_id), None)
             .expect("assign");
         // Order is now: one, three, [work: two]
 
@@ -996,7 +1324,7 @@ mod tests {
         let parent = workspace_id(&state, 0);
         let folder_id = state.create_folder("work").expect("create folder");
         state
-            .assign_workspace_to_folder(&parent, Some(&folder_id))
+            .assign_workspace_to_folder(&parent, Some(&folder_id), None)
             .expect("assign parent");
 
         // A new worktree child appears loose, then joins the family.

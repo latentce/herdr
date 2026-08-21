@@ -1047,6 +1047,9 @@ impl App {
             Method::FolderAssign(params) => {
                 return self.handle_folder_assign(request.id, params);
             }
+            Method::FolderMove(params) => {
+                return self.handle_folder_move(request.id, params);
+            }
             Method::WorktreeList(params) => return self.handle_worktree_list(request.id, params),
             Method::WorktreeCreate(params) => {
                 let _ = params;

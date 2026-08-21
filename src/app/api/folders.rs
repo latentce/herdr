@@ -1,6 +1,7 @@
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, FolderAssignParams, FolderCreateParams, FolderInfo,
-    FolderRenameParams, FolderTarget, ResponseResult, SpaceOrderEntryInfo, SpaceOrderEntryKind,
+    FolderMoveParams, FolderRenameParams, FolderTarget, ResponseResult, SpaceOrderEntryInfo,
+    SpaceOrderEntryKind,
 };
 use crate::app::folders::FolderMutationError;
 use crate::app::App;
@@ -130,25 +131,75 @@ impl App {
         let Some(workspace_id) = self.state.workspaces.get(index).map(|ws| ws.id.clone()) else {
             return folder_mutation_error(id, &FolderMutationError::WorkspaceNotFound);
         };
-
-        match self
+        let previous_folder_id = self
             .state
-            .assign_workspace_to_folder(&workspace_id, params.folder_id.as_deref())
-        {
+            .workspace_folder_id(&workspace_id)
+            .map(str::to_string);
+
+        match self.state.assign_workspace_to_folder(
+            &workspace_id,
+            params.folder_id.as_deref(),
+            params.position,
+        ) {
             Ok(workspace_ids) => {
                 self.schedule_session_save();
-                self.emit_event(EventEnvelope {
-                    event: EventKind::FolderAssigned,
-                    data: EventData::FolderAssigned {
-                        folder_id: params.folder_id.clone(),
-                        workspace_ids: workspace_ids.clone(),
-                    },
-                });
+                // Assigning a space to the folder it is already in reorders
+                // the folder's members rather than changing membership, so
+                // it is a member-order change: `folder.updated`, not
+                // `folder.assigned`.
+                let same_folder =
+                    params.folder_id.is_some() && params.folder_id == previous_folder_id;
+                if same_folder {
+                    if let Some(folder) = params
+                        .folder_id
+                        .as_deref()
+                        .and_then(|folder_id| self.state.folder(folder_id))
+                    {
+                        let folder = folder_info(folder);
+                        self.emit_event(EventEnvelope {
+                            event: EventKind::FolderUpdated,
+                            data: EventData::FolderUpdated { folder },
+                        });
+                    }
+                } else {
+                    self.emit_event(EventEnvelope {
+                        event: EventKind::FolderAssigned,
+                        data: EventData::FolderAssigned {
+                            folder_id: params.folder_id.clone(),
+                            workspace_ids: workspace_ids.clone(),
+                        },
+                    });
+                }
                 encode_success(
                     id,
                     ResponseResult::FolderAssigned {
                         folder_id: params.folder_id,
                         workspace_ids,
+                    },
+                )
+            }
+            Err(err) => folder_mutation_error(id, &err),
+        }
+    }
+
+    pub(super) fn handle_folder_move(&mut self, id: String, params: FolderMoveParams) -> String {
+        match self.state.move_folder(&params.folder_id, params.position) {
+            Ok((position, moved)) => {
+                if moved {
+                    self.schedule_session_save();
+                    self.emit_event(EventEnvelope {
+                        event: EventKind::FolderMoved,
+                        data: EventData::FolderMoved {
+                            folder_id: params.folder_id.clone(),
+                            position,
+                        },
+                    });
+                }
+                encode_success(
+                    id,
+                    ResponseResult::FolderMoved {
+                        folder_id: params.folder_id,
+                        position,
                     },
                 )
             }
@@ -258,6 +309,7 @@ mod tests {
             FolderAssignParams {
                 workspace_id: child.clone(),
                 folder_id: Some(folder_id.clone()),
+                position: None,
             },
         );
 
@@ -440,6 +492,7 @@ mod tests {
             FolderAssignParams {
                 workspace_id: w2.clone(),
                 folder_id: Some(folder_id.clone()),
+                position: None,
             },
         );
 
@@ -511,6 +564,7 @@ mod tests {
             FolderAssignParams {
                 workspace_id: "w-missing".into(),
                 folder_id: None,
+                position: None,
             },
         );
         let error: ErrorResponse = serde_json::from_str(&response).expect("error response");
@@ -521,8 +575,346 @@ mod tests {
             FolderAssignParams {
                 workspace_id,
                 folder_id: Some("f-missing".into()),
+                position: None,
             },
         );
+        let error: ErrorResponse = serde_json::from_str(&response).expect("error response");
+        assert_eq!(error.error.code, "folder_not_found");
+    }
+
+    fn listed_order(app: &mut App) -> (Vec<FolderInfo>, Vec<SpaceOrderEntryInfo>) {
+        let response = app.handle_folder_list("list".into());
+        let success: SuccessResponse = serde_json::from_str(&response).expect("success response");
+        match success.result {
+            ResponseResult::FolderList { folders, order } => (folders, order),
+            other => panic!("expected folder_list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn folder_assign_with_position_inserts_member_at_position() {
+        let mut app = test_app(&["one", "two", "three"]);
+        let w1 = app.state.workspaces[0].id.clone();
+        let w2 = app.state.workspaces[1].id.clone();
+        let w3 = app.state.workspaces[2].id.clone();
+        let folder_id = created_folder_id(&app.handle_folder_create(
+            "create".into(),
+            FolderCreateParams {
+                name: "work".into(),
+            },
+        ));
+        for (req, ws) in [("assign-1", &w1), ("assign-2", &w2)] {
+            app.handle_folder_assign(
+                req.into(),
+                FolderAssignParams {
+                    workspace_id: ws.clone(),
+                    folder_id: Some(folder_id.clone()),
+                    position: None,
+                },
+            );
+        }
+
+        let response = app.handle_folder_assign(
+            "assign-positional".into(),
+            FolderAssignParams {
+                workspace_id: w3.clone(),
+                folder_id: Some(folder_id.clone()),
+                position: Some(1),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).expect("success response");
+        assert_eq!(
+            success.result,
+            ResponseResult::FolderAssigned {
+                folder_id: Some(folder_id.clone()),
+                workspace_ids: vec![w3.clone()],
+            }
+        );
+        // folder.list reflects the canonical order after the mutation.
+        let (folders, _) = listed_order(&mut app);
+        assert_eq!(folders[0].members, vec![w1, w3, w2]);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn folder_assign_null_with_position_reorders_top_level() {
+        let mut app = test_app(&["one", "two", "three"]);
+        let w1 = app.state.workspaces[0].id.clone();
+        let w2 = app.state.workspaces[1].id.clone();
+        let w3 = app.state.workspaces[2].id.clone();
+
+        let response = app.handle_folder_assign(
+            "reorder".into(),
+            FolderAssignParams {
+                workspace_id: w3.clone(),
+                folder_id: None,
+                position: Some(0),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).expect("success response");
+        assert_eq!(
+            success.result,
+            ResponseResult::FolderAssigned {
+                folder_id: None,
+                workspace_ids: vec![w3.clone()],
+            }
+        );
+        let (_, order) = listed_order(&mut app);
+        let ids: Vec<&str> = order.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(ids, vec![w3.as_str(), w1.as_str(), w2.as_str()]);
+        // A top-level reorder is still an assignment to the top level.
+        let events: Vec<EventKind> = app
+            .event_hub
+            .events_after(0)
+            .into_iter()
+            .map(|(_, envelope)| envelope.event)
+            .collect();
+        assert!(events.contains(&EventKind::FolderAssigned));
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn folder_assign_within_folder_reorder_emits_folder_updated() {
+        let mut app = test_app(&["one", "two"]);
+        let w1 = app.state.workspaces[0].id.clone();
+        let w2 = app.state.workspaces[1].id.clone();
+        let folder_id = created_folder_id(&app.handle_folder_create(
+            "create".into(),
+            FolderCreateParams {
+                name: "work".into(),
+            },
+        ));
+        for (req, ws) in [("assign-1", &w1), ("assign-2", &w2)] {
+            app.handle_folder_assign(
+                req.into(),
+                FolderAssignParams {
+                    workspace_id: ws.clone(),
+                    folder_id: Some(folder_id.clone()),
+                    position: None,
+                },
+            );
+        }
+        let sequence_before = app
+            .event_hub
+            .events_after(0)
+            .last()
+            .map(|(sequence, _)| *sequence)
+            .unwrap_or(0);
+
+        let response = app.handle_folder_assign(
+            "reorder".into(),
+            FolderAssignParams {
+                workspace_id: w2.clone(),
+                folder_id: Some(folder_id.clone()),
+                position: Some(0),
+            },
+        );
+
+        // The method contract stays folder_assigned; the event reports a
+        // member-order change.
+        let success: SuccessResponse = serde_json::from_str(&response).expect("success response");
+        assert_eq!(
+            success.result,
+            ResponseResult::FolderAssigned {
+                folder_id: Some(folder_id.clone()),
+                workspace_ids: vec![w2.clone()],
+            }
+        );
+        let events: Vec<(EventKind, EventData)> = app
+            .event_hub
+            .events_after(sequence_before)
+            .into_iter()
+            .map(|(_, envelope)| (envelope.event, envelope.data))
+            .collect();
+        assert!(
+            events.iter().any(|(kind, data)| {
+                *kind == EventKind::FolderUpdated
+                    && matches!(
+                        data,
+                        EventData::FolderUpdated { folder }
+                            if folder.folder_id == folder_id
+                                && folder.members == vec![w2.clone(), w1.clone()]
+                    )
+            }),
+            "within-folder reorder must emit folder.updated: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|(kind, _)| *kind == EventKind::FolderAssigned),
+            "within-folder reorder must not emit folder.assigned: {events:?}"
+        );
+        assert_eq!(
+            app.state.folder(&folder_id).expect("folder").members,
+            vec![w2, w1]
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn folder_move_repositions_folder_and_emits_folder_moved() {
+        let mut app = test_app(&["one", "two"]);
+        let w1 = app.state.workspaces[0].id.clone();
+        let w2 = app.state.workspaces[1].id.clone();
+        let folder_id = created_folder_id(&app.handle_folder_create(
+            "create".into(),
+            FolderCreateParams {
+                name: "work".into(),
+            },
+        ));
+        app.handle_folder_assign(
+            "assign".into(),
+            FolderAssignParams {
+                workspace_id: w2.clone(),
+                folder_id: Some(folder_id.clone()),
+                position: None,
+            },
+        );
+
+        let response = app.handle_folder_move(
+            "move".into(),
+            FolderMoveParams {
+                folder_id: folder_id.clone(),
+                position: 0,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).expect("success response");
+        assert_eq!(
+            success.result,
+            ResponseResult::FolderMoved {
+                folder_id: folder_id.clone(),
+                position: 0,
+            }
+        );
+        let (_, order) = listed_order(&mut app);
+        assert_eq!(order[0].kind, SpaceOrderEntryKind::Folder);
+        assert_eq!(order[0].id, folder_id);
+        assert_eq!(order[1].id, w1);
+        // Membership is untouched by the reposition.
+        assert_eq!(app.state.workspace_folder_id(&w2), Some(folder_id.as_str()));
+        // The session snapshot lists workspaces in the new canonical order,
+        // each carrying its folder id.
+        let response = app.handle_session_snapshot("snapshot".into());
+        let success: SuccessResponse = serde_json::from_str(&response).expect("success response");
+        let ResponseResult::SessionSnapshot { snapshot } = success.result else {
+            panic!("expected session_snapshot");
+        };
+        let listed: Vec<(String, Option<String>)> = snapshot
+            .workspaces
+            .iter()
+            .map(|ws| (ws.workspace_id.clone(), ws.folder_id.clone()))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![(w2.clone(), Some(folder_id.clone())), (w1.clone(), None)]
+        );
+        let events: Vec<(EventKind, EventData)> = app
+            .event_hub
+            .events_after(0)
+            .into_iter()
+            .map(|(_, envelope)| (envelope.event, envelope.data))
+            .collect();
+        assert!(events.iter().any(|(kind, data)| {
+            *kind == EventKind::FolderMoved
+                && matches!(
+                    data,
+                    EventData::FolderMoved { folder_id: moved, position }
+                        if *moved == folder_id && *position == 0
+                )
+        }));
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn folder_move_clamps_position_and_reports_effective_index() {
+        let mut app = test_app(&["one", "two"]);
+        let folder_id = created_folder_id(&app.handle_folder_create(
+            "create".into(),
+            FolderCreateParams {
+                name: "work".into(),
+            },
+        ));
+        app.handle_folder_move(
+            "move-front".into(),
+            FolderMoveParams {
+                folder_id: folder_id.clone(),
+                position: 0,
+            },
+        );
+
+        let response = app.handle_folder_move(
+            "move-clamped".into(),
+            FolderMoveParams {
+                folder_id: folder_id.clone(),
+                position: 99,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).expect("success response");
+        assert_eq!(
+            success.result,
+            ResponseResult::FolderMoved {
+                folder_id,
+                position: 2,
+            }
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn folder_move_noop_does_not_emit_event() {
+        let mut app = test_app(&["one"]);
+        let folder_id = created_folder_id(&app.handle_folder_create(
+            "create".into(),
+            FolderCreateParams {
+                name: "work".into(),
+            },
+        ));
+        let sequence_before = app
+            .event_hub
+            .events_after(0)
+            .last()
+            .map(|(sequence, _)| *sequence)
+            .unwrap_or(0);
+
+        let response = app.handle_folder_move(
+            "move-noop".into(),
+            FolderMoveParams {
+                folder_id: folder_id.clone(),
+                position: 1,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).expect("success response");
+        assert_eq!(
+            success.result,
+            ResponseResult::FolderMoved {
+                folder_id,
+                position: 1,
+            }
+        );
+        assert!(
+            app.event_hub.events_after(sequence_before).is_empty(),
+            "a no-op move must not emit events"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn folder_move_rejects_unknown_folder() {
+        let mut app = test_app(&["one"]);
+
+        let response = app.handle_folder_move(
+            "move".into(),
+            FolderMoveParams {
+                folder_id: "f-missing".into(),
+                position: 0,
+            },
+        );
+
         let error: ErrorResponse = serde_json::from_str(&response).expect("error response");
         assert_eq!(error.error.code, "folder_not_found");
     }

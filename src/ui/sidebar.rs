@@ -3293,7 +3293,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         ];
         let target = app.workspaces[0].id.clone();
         let folder_id = app.create_folder("work").expect("create folder");
-        app.assign_workspace_to_folder(&target, Some(&folder_id))
+        app.assign_workspace_to_folder(&target, Some(&folder_id), None)
             .expect("assign");
         // Canonical order after assign: two, three, [work: one]
 
@@ -3357,7 +3357,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         ];
         let parent = app.workspaces[0].id.clone();
         let folder_id = app.create_folder("work").expect("create folder");
-        app.assign_workspace_to_folder(&parent, Some(&folder_id))
+        app.assign_workspace_to_folder(&parent, Some(&folder_id), None)
             .expect("assign family");
         // Canonical order after assign: notes, [work: main, issue]
 
@@ -3395,7 +3395,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         }
         let foldered = app.workspaces[1].id.clone();
         let folder_id = app.create_folder("work").expect("create folder");
-        app.assign_workspace_to_folder(&foldered, Some(&folder_id))
+        app.assign_workspace_to_folder(&foldered, Some(&folder_id), None)
             .expect("assign");
         app.sidebar_spaces.rows = vec![
             vec![

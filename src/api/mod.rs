@@ -36,6 +36,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::FolderRename(_)
             | Method::FolderDelete(_)
             | Method::FolderAssign(_)
+            | Method::FolderMove(_)
             | Method::WorktreeCreate(_)
             | Method::WorktreeOpen(_)
             | Method::WorktreeRemove(_)

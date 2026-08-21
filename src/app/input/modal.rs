@@ -2327,7 +2327,7 @@ mod tests {
         let w2 = app.state.workspaces[1].id.clone();
         let folder_id = app.state.create_folder("work").expect("create folder");
         app.state
-            .assign_workspace_to_folder(&w2, Some(&folder_id))
+            .assign_workspace_to_folder(&w2, Some(&folder_id), None)
             .expect("assign");
         app.state.mode = Mode::ContextMenu;
 
@@ -2357,7 +2357,7 @@ mod tests {
         let w2 = state.workspaces[1].id.clone();
         let folder_id = state.create_folder("work").expect("create folder");
         state
-            .assign_workspace_to_folder(&w2, Some(&folder_id))
+            .assign_workspace_to_folder(&w2, Some(&folder_id), None)
             .expect("assign");
         state.mode = Mode::ContextMenu;
         let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();

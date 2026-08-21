@@ -86,6 +86,12 @@ pub enum ResponseResult {
         /// move together), in canonical order.
         workspace_ids: Vec<String>,
     },
+    FolderMoved {
+        folder_id: String,
+        /// The folder's effective index among top-level entries after
+        /// clamping.
+        position: usize,
+    },
     WorktreeList {
         source: WorktreeSourceInfo,
         worktrees: Vec<WorktreeInfo>,

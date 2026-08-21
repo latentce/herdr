@@ -336,6 +336,29 @@
             },
             {
               "properties": {
+                "folder_id": {
+                  "type": "string"
+                },
+                "position": {
+                  "description": "The folder's effective index among top-level entries after\nclamping.",
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "folder_moved",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "folder_id",
+                "position"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "type": {
                   "const": "worktree_created",
                   "type": "string"
@@ -822,6 +845,7 @@
             "folder_updated",
             "folder_deleted",
             "folder_assigned",
+            "folder_moved",
             "worktree_created",
             "worktree_opened",
             "worktree_removed",
@@ -2211,9 +2235,18 @@
         "FolderAssignParams": {
           "properties": {
             "folder_id": {
-              "description": "Target folder, or `null` to return the workspace to the top level.\nAppend semantics; assigning any worktree family member moves the\nwhole family.",
+              "description": "Target folder, or `null` to return the workspace to the top level.\nAssigning any worktree family member moves the whole family.",
               "type": [
                 "string",
+                "null"
+              ]
+            },
+            "position": {
+              "description": "Final index of the assigned block inside the target container — the\nfolder's member list, or the top-level order (where a folder counts\nas one entry) when `folder_id` is `null`. Omitted appends;\nout-of-range positions clamp to the end. Assigning to the current\ncontainer with a position performs a plain reorder inside it.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
                 "null"
               ]
             },
@@ -2235,6 +2268,24 @@
           },
           "required": [
             "name"
+          ],
+          "type": "object"
+        },
+        "FolderMoveParams": {
+          "properties": {
+            "folder_id": {
+              "type": "string"
+            },
+            "position": {
+              "description": "The folder's final index among top-level entries (folders and loose\nspaces); out-of-range positions clamp to the end.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "folder_id",
+            "position"
           ],
           "type": "object"
         },
@@ -4002,6 +4053,18 @@
             {
               "properties": {
                 "type": {
+                  "const": "folder.moved",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
                   "const": "worktree.created",
                   "type": "string"
                 }
@@ -5025,6 +5088,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/FolderAssignParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "folder.move",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/FolderMoveParams"
             }
           },
           "required": [
@@ -6912,6 +6991,29 @@
             },
             {
               "properties": {
+                "folder_id": {
+                  "type": "string"
+                },
+                "position": {
+                  "description": "The folder's effective index among top-level entries after\nclamping.",
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "folder_moved",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "folder_id",
+                "position"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "type": {
                   "const": "worktree_created",
                   "type": "string"
@@ -7413,6 +7515,7 @@
             "folder_updated",
             "folder_deleted",
             "folder_assigned",
+            "folder_moved",
             "worktree_created",
             "worktree_opened",
             "worktree_removed",
@@ -9248,6 +9351,29 @@
               "required": [
                 "type",
                 "workspace_ids"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "folder_id": {
+                  "type": "string"
+                },
+                "position": {
+                  "description": "The folder's effective index among top-level entries after\nclamping.",
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "folder_moved",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "folder_id",
+                "position"
               ],
               "type": "object"
             },

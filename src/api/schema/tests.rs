@@ -1347,13 +1347,32 @@ fn folder_requests_round_trip() {
         method: Method::FolderAssign(FolderAssignParams {
             workspace_id: "w1".into(),
             folder_id: Some("f1".into()),
+            position: None,
         }),
     };
     let json = serde_json::to_value(&assign).unwrap();
     assert_eq!(json["method"], "folder.assign");
     assert_eq!(json["params"]["workspace_id"], "w1");
     assert_eq!(json["params"]["folder_id"], "f1");
+    assert!(
+        json["params"].get("position").is_none(),
+        "omitted position stays absent: {json}"
+    );
     assert_eq!(serde_json::from_value::<Request>(json).unwrap(), assign);
+
+    // A position addresses the target container; folder_id null plus a
+    // position performs a top-level reorder.
+    let positional = Request {
+        id: "folder-assign-positional".into(),
+        method: Method::FolderAssign(FolderAssignParams {
+            workspace_id: "w1".into(),
+            folder_id: None,
+            position: Some(2),
+        }),
+    };
+    let json = serde_json::to_value(&positional).unwrap();
+    assert_eq!(json["params"]["position"], 2);
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), positional);
 
     // Omitting folder_id assigns back to the top level.
     let unassign: Request = serde_json::from_value(serde_json::json!({
@@ -1367,7 +1386,24 @@ fn folder_requests_round_trip() {
         Method::FolderAssign(FolderAssignParams {
             workspace_id: "w1".into(),
             folder_id: None,
+            position: None,
         })
+    );
+
+    let move_folder = Request {
+        id: "folder-move".into(),
+        method: Method::FolderMove(FolderMoveParams {
+            folder_id: "f1".into(),
+            position: 3,
+        }),
+    };
+    let json = serde_json::to_value(&move_folder).unwrap();
+    assert_eq!(json["method"], "folder.move");
+    assert_eq!(json["params"]["folder_id"], "f1");
+    assert_eq!(json["params"]["position"], 3);
+    assert_eq!(
+        serde_json::from_value::<Request>(json).unwrap(),
+        move_folder
     );
 
     let rename = Request {
@@ -1473,6 +1509,18 @@ fn folder_responses_round_trip() {
     assert!(json.contains("\"type\":\"folder_deleted\""));
     let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
     assert_eq!(restored, deleted);
+
+    let moved = SuccessResponse {
+        id: "folder-move".into(),
+        result: ResponseResult::FolderMoved {
+            folder_id: "f1".into(),
+            position: 2,
+        },
+    };
+    let json = serde_json::to_string(&moved).unwrap();
+    assert!(json.contains("\"type\":\"folder_moved\""));
+    let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, moved);
 }
 
 #[test]
@@ -1531,6 +1579,18 @@ fn folder_events_round_trip() {
     let restored: EventEnvelope = serde_json::from_str(&json).unwrap();
     assert_eq!(restored, deleted);
 
+    let moved = EventEnvelope {
+        event: EventKind::FolderMoved,
+        data: EventData::FolderMoved {
+            folder_id: "f1".into(),
+            position: 2,
+        },
+    };
+    let json = serde_json::to_string(&moved).unwrap();
+    assert!(json.contains("\"event\":\"folder_moved\""));
+    let restored: EventEnvelope = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, moved);
+
     let subscription = Request {
         id: "sub-folders".into(),
         method: Method::EventsSubscribe(EventsSubscribeParams {
@@ -1539,6 +1599,7 @@ fn folder_events_round_trip() {
                 Subscription::FolderUpdated {},
                 Subscription::FolderDeleted {},
                 Subscription::FolderAssigned {},
+                Subscription::FolderMoved {},
             ],
         }),
     };
@@ -1547,6 +1608,7 @@ fn folder_events_round_trip() {
     assert!(json.contains("\"type\":\"folder.updated\""));
     assert!(json.contains("\"type\":\"folder.deleted\""));
     assert!(json.contains("\"type\":\"folder.assigned\""));
+    assert!(json.contains("\"type\":\"folder.moved\""));
     let restored: Request = serde_json::from_str(&json).unwrap();
     assert_eq!(restored, subscription);
 }

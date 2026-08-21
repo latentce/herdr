@@ -23,10 +23,24 @@ pub struct FolderTarget {
 pub struct FolderAssignParams {
     pub workspace_id: String,
     /// Target folder, or `null` to return the workspace to the top level.
-    /// Append semantics; assigning any worktree family member moves the
-    /// whole family.
+    /// Assigning any worktree family member moves the whole family.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder_id: Option<String>,
+    /// Final index of the assigned block inside the target container — the
+    /// folder's member list, or the top-level order (where a folder counts
+    /// as one entry) when `folder_id` is `null`. Omitted appends;
+    /// out-of-range positions clamp to the end. Assigning to the current
+    /// container with a position performs a plain reorder inside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FolderMoveParams {
+    pub folder_id: String,
+    /// The folder's final index among top-level entries (folders and loose
+    /// spaces); out-of-range positions clamp to the end.
+    pub position: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

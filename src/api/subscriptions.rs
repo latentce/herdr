@@ -160,6 +160,10 @@ impl ActiveSubscription {
                 event_kind: crate::api::schema::EventKind::FolderAssigned,
                 last_sequence: 0,
             })),
+            Subscription::FolderMoved {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::FolderMoved,
+                last_sequence: 0,
+            })),
             Subscription::WorktreeCreated {} => Ok(Self::Event(ActiveEventSubscription {
                 event_kind: crate::api::schema::EventKind::WorktreeCreated,
                 last_sequence: 0,

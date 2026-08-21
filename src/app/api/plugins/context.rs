@@ -72,7 +72,8 @@ impl App {
                 .unwrap_or_else(|| empty_plugin_context(correlation_id)),
             EventData::FolderCreated { .. }
             | EventData::FolderUpdated { .. }
-            | EventData::FolderDeleted { .. } => empty_plugin_context(correlation_id),
+            | EventData::FolderDeleted { .. }
+            | EventData::FolderMoved { .. } => empty_plugin_context(correlation_id),
             EventData::WorkspaceRenamed { workspace_id, .. }
             | EventData::WorkspaceMoved { workspace_id, .. }
             | EventData::WorkspaceFocused { workspace_id } => self

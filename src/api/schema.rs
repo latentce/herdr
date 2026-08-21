@@ -93,6 +93,8 @@ pub enum Method {
     FolderDelete(FolderTarget),
     #[serde(rename = "folder.assign")]
     FolderAssign(FolderAssignParams),
+    #[serde(rename = "folder.move")]
+    FolderMove(FolderMoveParams),
     #[serde(rename = "worktree.list")]
     WorktreeList(WorktreeListParams),
     #[serde(rename = "worktree.create")]

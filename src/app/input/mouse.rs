@@ -4528,7 +4528,7 @@ mod tests {
         let member = app.state.workspaces[1].id.clone();
         let folder_id = app.state.create_folder("work").expect("create folder");
         app.state
-            .assign_workspace_to_folder(&member, Some(&folder_id))
+            .assign_workspace_to_folder(&member, Some(&folder_id), None)
             .expect("assign");
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));

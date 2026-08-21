@@ -684,7 +684,7 @@ mod tests {
         let target = state.workspaces[0].id.clone();
         let folder_id = state.create_folder("work").expect("create folder");
         state
-            .assign_workspace_to_folder(&target, Some(&folder_id))
+            .assign_workspace_to_folder(&target, Some(&folder_id), None)
             .expect("assign");
         // Canonical order after assign: two, three, [work: one]
         let canonical: Vec<Option<String>> = state
@@ -727,7 +727,7 @@ mod tests {
             .create_folder("scratch")
             .expect("create dropped folder");
         state
-            .assign_workspace_to_folder(&member, Some(&dropped))
+            .assign_workspace_to_folder(&member, Some(&dropped), None)
             .expect("assign");
         state.rename_folder(&kept, "personal").expect("rename");
         state.delete_folder(&dropped).expect("delete");
@@ -752,6 +752,66 @@ mod tests {
                 SpaceOrderEntrySnapshot::Workspace(member),
             ],
             "renames persist, deleted folders stay gone, and empty folders survive"
+        );
+    }
+
+    #[test]
+    fn positional_ordering_round_trips_through_capture_and_parse() {
+        let mut state = state_with_workspaces(&["one", "two", "three"]);
+        let w1 = state.workspaces[0].id.clone();
+        let w2 = state.workspaces[1].id.clone();
+        let w3 = state.workspaces[2].id.clone();
+        let folder_id = state.create_folder("work").expect("create folder");
+        state
+            .assign_workspace_to_folder(&w1, Some(&folder_id), None)
+            .expect("assign first");
+        // Positional assign inside the folder and a folder reposition are
+        // both explicit ordering facts that must survive restart.
+        state
+            .assign_workspace_to_folder(&w2, Some(&folder_id), Some(0))
+            .expect("positional assign");
+        state.move_folder(&folder_id, 0).expect("move folder");
+
+        let snap = capture_from_state(&state);
+        let json = serde_json::to_string(&snap).unwrap();
+        let restored = parse_snapshot(&json).unwrap();
+
+        assert_eq!(
+            restored.space_order,
+            vec![
+                SpaceOrderEntrySnapshot::Folder(FolderSnapshot {
+                    id: folder_id.clone(),
+                    name: "work".into(),
+                    members: vec![w2.clone(), w1.clone()],
+                }),
+                SpaceOrderEntrySnapshot::Workspace(w3.clone()),
+            ],
+            "positional member order and folder position must survive restart"
+        );
+
+        // Installing the restored order into a session with the same
+        // workspaces reproduces the arrangement exactly.
+        let mut reopened = state;
+        reopened.space_order = Vec::new();
+        reopened.install_space_order(
+            restored
+                .space_order
+                .into_iter()
+                .map(crate::folder::SpaceOrderEntry::from)
+                .collect(),
+        );
+        assert_eq!(reopened.workspace_folder_id(&w1), Some(folder_id.as_str()));
+        assert_eq!(
+            reopened.folder(&folder_id).expect("folder").members,
+            vec![w2.clone(), w1.clone()]
+        );
+        assert_eq!(
+            reopened
+                .workspaces
+                .iter()
+                .map(|ws| ws.id.clone())
+                .collect::<Vec<_>>(),
+            vec![w2, w1, w3],
         );
     }
 

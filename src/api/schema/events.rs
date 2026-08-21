@@ -40,6 +40,8 @@ pub enum Subscription {
     FolderDeleted {},
     #[serde(rename = "folder.assigned")]
     FolderAssigned {},
+    #[serde(rename = "folder.moved")]
+    FolderMoved {},
     #[serde(rename = "worktree.created")]
     WorktreeCreated {},
     #[serde(rename = "worktree.opened")]
@@ -212,6 +214,7 @@ pub enum EventKind {
     FolderUpdated,
     FolderDeleted,
     FolderAssigned,
+    FolderMoved,
     WorktreeCreated,
     WorktreeOpened,
     WorktreeRemoved,
@@ -247,6 +250,7 @@ impl EventKind {
             EventKind::FolderUpdated => "folder.updated",
             EventKind::FolderDeleted => "folder.deleted",
             EventKind::FolderAssigned => "folder.assigned",
+            EventKind::FolderMoved => "folder.moved",
             EventKind::WorktreeCreated => "worktree.created",
             EventKind::WorktreeOpened => "worktree.opened",
             EventKind::WorktreeRemoved => "worktree.removed",
@@ -283,6 +287,7 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::FolderUpdated,
     EventKind::FolderDeleted,
     EventKind::FolderAssigned,
+    EventKind::FolderMoved,
     EventKind::WorktreeCreated,
     EventKind::WorktreeOpened,
     EventKind::WorktreeRemoved,
@@ -490,6 +495,12 @@ pub enum EventData {
         /// All workspaces moved by this assignment (whole worktree families
         /// move together), in canonical order.
         workspace_ids: Vec<String>,
+    },
+    FolderMoved {
+        folder_id: String,
+        /// The folder's effective index among top-level entries after
+        /// clamping.
+        position: usize,
     },
     WorktreeCreated {
         workspace: WorkspaceInfo,
