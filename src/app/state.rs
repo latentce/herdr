@@ -1523,10 +1523,16 @@ pub struct AppState {
     pub worktree_remove: Option<WorktreeRemoveState>,
     pub worktree_directory: std::path::PathBuf,
     pub collapsed_space_keys: std::collections::HashSet<String>,
-    /// Folder ids collapsed in the spaces panel. Per-client presentation
+    /// Folder ids collapsed in the sidebar. One shared state across the
+    /// spaces panel and the agents panel folder view. Per-client presentation
     /// state: persisted in the session snapshot (like `collapsed_space_keys`)
     /// but never exposed through the API.
     pub collapsed_folder_ids: std::collections::HashSet<String>,
+    /// Workspace ids whose agent list is collapsed in the agents panel folder
+    /// view. Independent of folder collapse and of other spaces. Per-client
+    /// presentation state: persisted in the session snapshot but never
+    /// exposed through the API.
+    pub collapsed_agent_space_ids: std::collections::HashSet<String>,
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
@@ -1917,6 +1923,7 @@ impl AppState {
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
             collapsed_folder_ids: std::collections::HashSet::new(),
+            collapsed_agent_space_ids: std::collections::HashSet::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -2123,9 +2130,15 @@ impl AppState {
         // Corrupt restored organization, healed by `install_space_order`:
         // the family is split across folders, a folder id repeats, spaces
         // appear more than once, refs dangle, "adversarial-loose" is missing
-        // from the order, and collapse state names a missing folder.
+        // from the order, and collapse state names a missing folder and a
+        // missing workspace.
         state.collapsed_folder_ids.insert("f1".into());
         state.collapsed_folder_ids.insert("f-gone".into());
+        state
+            .collapsed_agent_space_ids
+            .insert(state.workspaces[0].id.clone());
+        state.collapsed_agent_space_ids.insert("w-gone".into());
+        state.prune_dangling_collapsed_agent_space_ids();
         state.install_space_order(vec![
             crate::folder::SpaceOrderEntry::Workspace(identity),
             crate::folder::SpaceOrderEntry::Folder(crate::folder::Folder {
@@ -2607,6 +2620,11 @@ mod tests {
         // Collapse state survives for live folders and drops dangling ids.
         assert!(state.collapsed_folder_ids.contains("f1"));
         assert!(!state.collapsed_folder_ids.contains("f-gone"));
+        // Agent-list collapse survives for live workspaces and drops
+        // dangling ids.
+        let identity = find(&state, "adversarial-identity");
+        assert!(state.collapsed_agent_space_ids.contains(&identity));
+        assert!(!state.collapsed_agent_space_ids.contains("w-gone"));
 
         // The same corrupt input heals to the same organization every time.
         let again = AppState::test_with_adversarial_identity_state();

@@ -50,6 +50,7 @@ impl App {
                 self.state.sidebar_section_split,
                 self.state.collapsed_space_keys.clone(),
                 self.state.collapsed_folder_ids.clone(),
+                self.state.collapsed_agent_space_ids.clone(),
                 &self.state.space_order,
             );
             let history = self.persist_pane_history.then(|| {

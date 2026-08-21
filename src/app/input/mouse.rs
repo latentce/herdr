@@ -25,6 +25,13 @@ use super::{
     ScrollbarClickTarget, TAB_DRAG_THRESHOLD, WORKSPACE_DRAG_THRESHOLD,
 };
 
+/// Toggle an id's membership in a collapse set.
+fn toggle_collapse(set: &mut std::collections::HashSet<String>, id: String) {
+    if !set.remove(&id) {
+        set.insert(id);
+    }
+}
+
 pub(super) enum MouseAction {
     NewWorkspace,
     Settings(SettingsAction),
@@ -599,9 +606,7 @@ impl AppState {
                         let chevron = crate::ui::folder_header_chevron_rect(header);
                         mouse.row == chevron.y && mouse.column == chevron.x && chevron.width > 0
                     }) {
-                        if !self.collapsed_folder_ids.remove(&header.folder_id) {
-                            self.collapsed_folder_ids.insert(header.folder_id.clone());
-                        }
+                        toggle_collapse(&mut self.collapsed_folder_ids, header.folder_id.clone());
                         self.mark_session_dirty();
                         return None;
                     }
@@ -656,6 +661,23 @@ impl AppState {
                                 self.set_agent_panel_offset_from_bottom(offset_from_bottom);
                             }
                         }
+                        return None;
+                    }
+
+                    if let Some(target) =
+                        self.agent_panel_collapse_target_at(mouse.column, mouse.row)
+                    {
+                        match target {
+                            super::sidebar::AgentPanelCollapseTarget::Folder(folder_id) => {
+                                // Folder collapse is one shared state across
+                                // the spaces panel and the folder view.
+                                toggle_collapse(&mut self.collapsed_folder_ids, folder_id);
+                            }
+                            super::sidebar::AgentPanelCollapseTarget::Space(ws_id) => {
+                                toggle_collapse(&mut self.collapsed_agent_space_ids, ws_id);
+                            }
+                        }
+                        self.mark_session_dirty();
                         return None;
                     }
 

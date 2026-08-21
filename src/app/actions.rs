@@ -4400,6 +4400,53 @@ mod tests {
     }
 
     #[test]
+    fn cycling_reaches_agents_hidden_by_collapse_and_numbering_is_stable() {
+        let mut state = folder_view_family_state();
+        let member = state.workspaces[1].id.clone();
+        let folder_id = state.create_folder("work").expect("create folder");
+        state
+            .assign_workspace_to_folder(&member, Some(&folder_id), None)
+            .expect("assign");
+
+        let baseline: Vec<_> = crate::ui::agent_panel_entries(&state)
+            .iter()
+            .map(|entry| (entry.ws_idx, entry.pane_id))
+            .collect();
+
+        // Collapse everything collapsible: the folder, the worktree group,
+        // and every space's agent list.
+        state.collapsed_folder_ids.insert(folder_id);
+        state.collapsed_space_keys.insert("repo-key".into());
+        let ids: Vec<String> = state.workspaces.iter().map(|ws| ws.id.clone()).collect();
+        state.collapsed_agent_space_ids.extend(ids);
+
+        let collapsed_entries: Vec<_> = crate::ui::agent_panel_entries(&state)
+            .iter()
+            .map(|entry| (entry.ws_idx, entry.pane_id))
+            .collect();
+        assert_eq!(
+            collapsed_entries, baseline,
+            "numbering does not shift when collapse changes"
+        );
+
+        let mut visited = std::collections::HashSet::new();
+        for _ in 0..baseline.len() {
+            state.next_agent();
+            let ws_idx = state.active.expect("an agent is focused");
+            let pane_id = state.workspaces[ws_idx]
+                .focused_pane_id()
+                .expect("focused pane");
+            visited.insert((ws_idx, pane_id));
+        }
+        assert_eq!(
+            visited.len(),
+            baseline.len(),
+            "cycling reaches agents hidden by collapse"
+        );
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
     fn next_agent_cycles_priority_sorted_agent_panel_entries() {
         let mut first = Workspace::test_new("one");
         let first_root = first.tabs[0].root_pane;

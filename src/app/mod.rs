@@ -405,6 +405,7 @@ impl App {
             sidebar_section_split,
             collapsed_space_keys,
             collapsed_folder_ids,
+            collapsed_agent_space_ids,
             restored_space_order,
         ) = if no_session {
             (
@@ -414,6 +415,7 @@ impl App {
                 config.ui.sidebar_width,
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
+                std::collections::HashSet::new(),
                 std::collections::HashSet::new(),
                 std::collections::HashSet::new(),
                 Vec::new(),
@@ -454,6 +456,7 @@ impl App {
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
                     snap.collapsed_folder_ids,
+                    snap.collapsed_agent_space_ids,
                     snap.space_order
                         .into_iter()
                         .map(crate::folder::SpaceOrderEntry::from)
@@ -476,6 +479,7 @@ impl App {
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
                     snap.collapsed_folder_ids,
+                    snap.collapsed_agent_space_ids,
                     snap.space_order
                         .into_iter()
                         .map(crate::folder::SpaceOrderEntry::from)
@@ -490,6 +494,7 @@ impl App {
                 config.ui.sidebar_width,
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
+                std::collections::HashSet::new(),
                 std::collections::HashSet::new(),
                 std::collections::HashSet::new(),
                 Vec::new(),
@@ -589,6 +594,7 @@ impl App {
             worktree_directory,
             collapsed_space_keys,
             collapsed_folder_ids,
+            collapsed_agent_space_ids,
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -730,6 +736,7 @@ impl App {
 
         state.terminals = restored_terminals;
         state.install_space_order(restored_space_order);
+        state.prune_dangling_collapsed_agent_space_ids();
 
         for ws_idx in 0..state.workspaces.len() {
             let cwd = state.workspaces[ws_idx]
@@ -891,6 +898,8 @@ impl App {
         }
         app.state.collapsed_space_keys = snapshot.collapsed_space_keys.clone();
         app.state.collapsed_folder_ids = snapshot.collapsed_folder_ids.clone();
+        app.state.collapsed_agent_space_ids = snapshot.collapsed_agent_space_ids.clone();
+        app.state.prune_dangling_collapsed_agent_space_ids();
         app.state.install_space_order(
             snapshot
                 .space_order

@@ -243,6 +243,13 @@ pub(crate) fn folder_view_workspace_ranks(app: &AppState) -> Vec<usize> {
 /// the spaces panel. Folders and spaces without agents are hidden, except
 /// that an agent-less family parent appears as a thin ancestor header when
 /// one of its children has agents.
+///
+/// Collapse only filters display rows, never the flat sequence. Folder
+/// collapse is the same state as the spaces panel (`collapsed_folder_ids`):
+/// a collapsed folder keeps its header and hides its members, except the
+/// active (or selected) one — the spaces panel's rule. A space in
+/// `collapsed_agent_space_ids` keeps its header and hides its agent list,
+/// except the active pane's row.
 pub(crate) fn agent_panel_list_entries(
     app: &AppState,
     entries: &[AgentPanelEntry],
@@ -263,22 +270,103 @@ pub(crate) fn agent_panel_list_entries(
         }
     }
     let ws_has_agents = |ws_idx: usize| agents_by_ws.get(ws_idx).is_some_and(|a| !a.is_empty());
+    // Append a space's agent rows, filtered by its agent-list collapse: a
+    // collapsed space shows only the active pane's row, mirroring how the
+    // spaces panel's collapsed containers keep the active child visible.
+    let extend_agent_rows = |rows: &mut Vec<AgentPanelListEntry>, ws_idx: usize| {
+        let Some(agent_entries) = agents_by_ws.get(ws_idx) else {
+            return;
+        };
+        let collapsed = app
+            .workspaces
+            .get(ws_idx)
+            .is_some_and(|ws| app.collapsed_agent_space_ids.contains(&ws.id));
+        rows.extend(
+            agent_entries
+                .iter()
+                .copied()
+                .filter(|entry_idx| {
+                    !collapsed
+                        || entries.get(*entry_idx).is_some_and(|entry| {
+                            app.is_active_pane(entry.ws_idx, entry.tab_idx, entry.pane_id)
+                        })
+                })
+                .map(|entry_idx| AgentPanelListEntry::Agent { entry_idx }),
+        );
+    };
+
+    // The member kept visible inside a collapsed folder: the selected space
+    // in Navigate mode, the active one otherwise — the spaces panel's rule.
+    let visible_ws_idx = if matches!(app.mode, Mode::Navigate) {
+        Some(app.selected)
+    } else {
+        app.active
+    };
 
     let workspace_entries = workspace_list_entries_expanded(app);
     let mut rows = Vec::new();
     // Folder headers are emitted lazily before the folder's first visible
     // member so agent-less folders stay hidden.
     let mut pending_folder: Option<usize> = None;
+    // Whether subsequent foldered entries sit inside a collapsed folder.
+    let mut in_collapsed_folder = false;
     for (idx, entry) in workspace_entries.iter().enumerate() {
         match entry {
             WorkspaceListEntry::FolderHeader { order_idx } => {
-                pending_folder = Some(*order_idx);
+                in_collapsed_folder = matches!(
+                    app.space_order.get(*order_idx),
+                    Some(crate::folder::SpaceOrderEntry::Folder(folder))
+                        if app.collapsed_folder_ids.contains(&folder.id)
+                );
+                if in_collapsed_folder {
+                    pending_folder = None;
+                    // A collapsed folder hides its members, so the lazy
+                    // emission can never fire; keep the header whenever any
+                    // member has agents so the folder stays expandable here.
+                    let members_have_agents = workspace_entries[idx + 1..]
+                        .iter()
+                        .take_while(|next| {
+                            matches!(next, WorkspaceListEntry::Workspace { foldered: true, .. })
+                        })
+                        .any(|next| {
+                            matches!(
+                                next,
+                                WorkspaceListEntry::Workspace { ws_idx, .. }
+                                    if ws_has_agents(*ws_idx)
+                            )
+                        });
+                    if members_have_agents {
+                        rows.push(AgentPanelListEntry::FolderHeader {
+                            order_idx: *order_idx,
+                        });
+                    }
+                } else {
+                    pending_folder = Some(*order_idx);
+                }
             }
             WorkspaceListEntry::Workspace {
                 ws_idx,
                 indented,
                 foldered,
             } => {
+                if !*foldered {
+                    in_collapsed_folder = false;
+                }
+                if *foldered && in_collapsed_folder {
+                    // Mirror the spaces panel: hidden members stay hidden
+                    // except the active (or selected) one, shown un-indented.
+                    if visible_ws_idx != Some(*ws_idx) || !ws_has_agents(*ws_idx) {
+                        continue;
+                    }
+                    rows.push(AgentPanelListEntry::SpaceHeader {
+                        ws_idx: *ws_idx,
+                        indented: false,
+                        foldered: true,
+                        thin: false,
+                    });
+                    extend_agent_rows(&mut rows, *ws_idx);
+                    continue;
+                }
                 let thin = !ws_has_agents(*ws_idx);
                 if thin {
                     // An agent-less family parent appears as a thin ancestor
@@ -311,15 +399,7 @@ pub(crate) fn agent_panel_list_entries(
                     foldered: *foldered,
                     thin,
                 });
-                if let Some(agent_entries) = agents_by_ws.get(*ws_idx) {
-                    rows.extend(
-                        agent_entries
-                            .iter()
-                            .map(|entry_idx| AgentPanelListEntry::Agent {
-                                entry_idx: *entry_idx,
-                            }),
-                    );
-                }
+                extend_agent_rows(&mut rows, *ws_idx);
             }
         }
     }
@@ -327,18 +407,45 @@ pub(crate) fn agent_panel_list_entries(
 }
 
 /// Display row index of a flat agent entry, for scroll targeting. Outside the
-/// folder view rows and entries coincide.
+/// folder view rows and entries coincide. An entry hidden by collapse maps to
+/// its nearest visible ancestor header: its space header, then its folder
+/// header.
 pub(crate) fn agent_panel_row_for_entry(app: &AppState, entry_idx: usize) -> usize {
     if !agent_folder_view_active(app) {
         return entry_idx;
     }
     let entries = agent_panel_entries(app);
-    agent_panel_list_entries(app, &entries)
-        .iter()
-        .position(
-            |row| matches!(row, AgentPanelListEntry::Agent { entry_idx: e } if *e == entry_idx),
-        )
-        .unwrap_or(entry_idx)
+    let rows = agent_panel_list_entries(app, &entries);
+    if let Some(pos) = rows.iter().position(
+        |row| matches!(row, AgentPanelListEntry::Agent { entry_idx: e } if *e == entry_idx),
+    ) {
+        return pos;
+    }
+    let Some(ws_idx) = entries.get(entry_idx).map(|entry| entry.ws_idx) else {
+        return 0;
+    };
+    if let Some(pos) = rows.iter().position(
+        |row| matches!(row, AgentPanelListEntry::SpaceHeader { ws_idx: w, .. } if *w == ws_idx),
+    ) {
+        return pos;
+    }
+    let ws_id = app.workspaces.get(ws_idx).map(|ws| ws.id.as_str());
+    if let Some(order_idx) = ws_id.and_then(|ws_id| {
+        app.space_order.iter().position(|entry| {
+            matches!(
+                entry,
+                crate::folder::SpaceOrderEntry::Folder(folder)
+                    if folder.members.iter().any(|member| member == ws_id)
+            )
+        })
+    }) {
+        if let Some(pos) = rows.iter().position(
+            |row| matches!(row, AgentPanelListEntry::FolderHeader { order_idx: o } if *o == order_idx),
+        ) {
+            return pos;
+        }
+    }
+    0
 }
 
 pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static str {
@@ -1058,6 +1165,27 @@ pub(crate) fn folder_header_chevron_rect(header: &crate::app::state::FolderHeade
     )
 }
 
+/// Collapse/expand chevron cell of an agents-panel folder or space header row
+/// at `row_y`: the row's right edge, mirroring `folder_header_chevron_rect`.
+pub(crate) fn agent_panel_header_chevron_rect(body: Rect, row_y: u16) -> Rect {
+    if body.width == 0 || body.height == 0 {
+        return Rect::default();
+    }
+
+    Rect::new(body.x + body.width.saturating_sub(1), row_y, 1, 1)
+}
+
+/// Draw a collapse/expand chevron into its 1x1 cell.
+fn render_collapse_chevron(frame: &mut Frame, collapsed: bool, rect: Rect, accent: Color) {
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            if collapsed { "▸" } else { "▾" },
+            Style::default().fg(accent),
+        )),
+        rect,
+    );
+}
+
 /// Auto-scale sidebar width based on workspace identity + agent summary.
 pub(crate) fn collapsed_sidebar_sections(area: Rect) -> (Rect, Option<u16>, Rect) {
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
@@ -1710,12 +1838,11 @@ fn render_workspace_list(
             header.rect,
         );
         let collapsed = app.collapsed_folder_ids.contains(&header.folder_id);
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                if collapsed { "▸" } else { "▾" },
-                Style::default().fg(p.accent),
-            )),
+        render_collapse_chevron(
+            frame,
+            collapsed,
             folder_header_chevron_rect(header),
+            p.accent,
         );
     }
 
@@ -2001,7 +2128,9 @@ fn render_agent_detail(
                 if let Some(crate::folder::SpaceOrderEntry::Folder(folder)) =
                     app.space_order.get(*order_idx)
                 {
-                    let name = truncate_end(&folder.name, body.width.saturating_sub(1) as usize);
+                    // Reserve the trailing chevron cell plus one gap cell so
+                    // the name never runs into the collapse affordance.
+                    let name = truncate_end(&folder.name, body.width.saturating_sub(3) as usize);
                     frame.render_widget(
                         Paragraph::new(Line::from(vec![
                             Span::raw(" "),
@@ -2011,6 +2140,13 @@ fn render_agent_detail(
                             ),
                         ])),
                         Rect::new(body.x, row_y, body.width, 1),
+                    );
+                    let collapsed = app.collapsed_folder_ids.contains(&folder.id);
+                    render_collapse_chevron(
+                        frame,
+                        collapsed,
+                        agent_panel_header_chevron_rect(body, row_y),
+                        p.accent,
                     );
                 }
             }
@@ -2052,14 +2188,26 @@ fn render_agent_detail(
                     } else {
                         Style::default().fg(p.subtext0)
                     };
+                    // Reserve the trailing chevron cell plus one gap cell so
+                    // the name never runs into the collapse affordance.
                     spans.push(Span::styled(
-                        truncate_end(&label, body.width.saturating_sub(prefix_width) as usize),
+                        truncate_end(&label, body.width.saturating_sub(prefix_width + 2) as usize),
                         name_style,
                     ));
                     frame.render_widget(
                         Paragraph::new(Line::from(spans)),
                         Rect::new(body.x, row_y, body.width, 1),
                     );
+                    // Thin ancestor headers have no agent list to collapse.
+                    if !*thin {
+                        let collapsed = app.collapsed_agent_space_ids.contains(&ws.id);
+                        render_collapse_chevron(
+                            frame,
+                            collapsed,
+                            agent_panel_header_chevron_rect(body, row_y),
+                            p.accent,
+                        );
+                    }
                 }
             }
             AgentPanelListEntry::Agent { entry_idx } => {
@@ -2278,11 +2426,124 @@ mod tests {
             row_text(buffer, agent_area.y + 1, 25).ends_with("folders"),
             "the header label names the active ordering"
         );
-        assert_eq!(row_text(buffer, body.y, 25), " one");
+        let one_row = row_text(buffer, body.y, 25);
+        assert!(
+            one_row.starts_with(" one") && one_row.ends_with('▾'),
+            "space headers carry a trailing collapse chevron: {one_row:?}"
+        );
         assert_eq!(row_text(buffer, body.y + 1, 25), "   pi");
-        assert_eq!(row_text(buffer, body.y + 2, 25), " work");
-        assert_eq!(row_text(buffer, body.y + 3, 25), "   two");
+        let folder_row = row_text(buffer, body.y + 2, 25);
+        assert!(
+            folder_row.starts_with(" work") && folder_row.ends_with('▾'),
+            "folder headers carry a trailing collapse chevron: {folder_row:?}"
+        );
+        let two_row = row_text(buffer, body.y + 3, 25);
+        assert!(
+            two_row.starts_with("   two") && two_row.ends_with('▾'),
+            "foldered space headers carry a trailing collapse chevron: {two_row:?}"
+        );
         assert_eq!(row_text(buffer, body.y + 4, 25), "     pi");
+    }
+
+    #[test]
+    fn agents_panel_headers_render_collapse_chevrons_matching_state() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        let member = app.workspaces[1].id.clone();
+        let folder_id = app.create_folder("work").expect("create folder");
+        app.assign_workspace_to_folder(&member, Some(&folder_id), None)
+            .expect("assign");
+        // Canonical order: one, [work: two]
+        app.ensure_test_terminals();
+        app.mode = Mode::Terminal;
+        app.active = Some(0);
+        for ws_idx in 0..app.workspaces.len() {
+            set_root_agent(&mut app, ws_idx, Agent::Pi);
+        }
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Folders;
+        app.sidebar_agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
+        app.sidebar_agents.row_gap = 0;
+
+        let area = Rect::new(0, 0, 26, 20);
+        let render = |app: &crate::app::state::AppState| {
+            let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
+            terminal
+                .draw(|frame| render_sidebar(app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+        let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+        let body = agent_panel_body_rect(agent_area, false);
+        let chevron_x = body.x + body.width - 1;
+
+        // Rows: header(one), pi, folder(work), header(two), pi.
+        let buffer = render(&app);
+        assert_eq!(buffer[(chevron_x, body.y)].symbol(), "▾");
+        assert_eq!(buffer[(chevron_x, body.y + 2)].symbol(), "▾");
+        assert_eq!(buffer[(chevron_x, body.y + 3)].symbol(), "▾");
+
+        app.collapsed_folder_ids.insert(folder_id);
+        let one_id = app.workspaces[0].id.clone();
+        app.collapsed_agent_space_ids.insert(one_id);
+        let buffer = render(&app);
+        // Rows: header(one) with hidden active-pane exception... the active
+        // pane's row stays visible, so "one" keeps an expanded list; use the
+        // collapsed folder chevron and the collapsed space of a non-active
+        // workspace below.
+        assert_eq!(
+            buffer[(chevron_x, body.y + 2)].symbol(),
+            "▸",
+            "the collapsed folder header shows a collapsed chevron"
+        );
+
+        app.collapsed_folder_ids.clear();
+        app.collapsed_agent_space_ids.clear();
+        let two_id = app.workspaces[1].id.clone();
+        app.collapsed_agent_space_ids.insert(two_id);
+        let buffer = render(&app);
+        assert_eq!(
+            buffer[(chevron_x, body.y + 3)].symbol(),
+            "▸",
+            "the collapsed space header shows a collapsed chevron"
+        );
+        assert_eq!(
+            row_text(&buffer, body.y + 4, 25),
+            "",
+            "the collapsed space hides its agent rows"
+        );
+    }
+
+    #[test]
+    fn thin_ancestor_header_renders_without_chevron() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![
+            workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
+            workspace_with_worktree_space("issue", Some("repo-key"), "/repo/herdr-issue"),
+        ];
+        app.ensure_test_terminals();
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Folders;
+        app.sidebar_agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
+        app.sidebar_agents.row_gap = 0;
+        // Only the child has an agent: the parent renders as a thin header.
+        set_root_agent(&mut app, 1, Agent::Pi);
+
+        let area = Rect::new(0, 0, 26, 20);
+        let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+        let body = agent_panel_body_rect(agent_area, false);
+        let chevron_x = body.x + body.width - 1;
+
+        // Rows: thin header(main), header(issue), pi.
+        assert_eq!(
+            buffer[(chevron_x, body.y)].symbol(),
+            " ",
+            "a thin ancestor header has no agent list to collapse"
+        );
+        assert_eq!(buffer[(chevron_x, body.y + 1)].symbol(), "▾");
     }
 
     #[test]
@@ -3110,6 +3371,273 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             ],
             "an agent-less child never earns a header"
         );
+    }
+
+    /// Shared setup for the collapse projection tests: loose "notes" followed
+    /// by folder "work" containing "main", one agent per space. Canonical
+    /// order after assign: notes, [work: main] — ws_idx 0 = notes, 1 = main.
+    fn collapse_projection_state() -> (crate::app::state::AppState, String) {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("main"), Workspace::test_new("notes")];
+        let member = app.workspaces[0].id.clone();
+        let folder_id = app.create_folder("work").expect("create folder");
+        app.assign_workspace_to_folder(&member, Some(&folder_id), None)
+            .expect("assign");
+        app.ensure_test_terminals();
+        for ws_idx in 0..app.workspaces.len() {
+            set_root_agent(&mut app, ws_idx, Agent::Claude);
+        }
+        app.mode = Mode::Terminal;
+        app.active = Some(0);
+        app.selected = 0;
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Folders;
+        (app, folder_id)
+    }
+
+    #[test]
+    fn folder_view_collapsed_folder_hides_members_but_keeps_header() {
+        let (mut app, folder_id) = collapse_projection_state();
+        app.collapsed_folder_ids.insert(folder_id);
+
+        let entries = agent_panel_entries(&app);
+        let rows = agent_panel_list_entries(&app, &entries);
+
+        assert_eq!(
+            rows,
+            vec![
+                AgentPanelListEntry::SpaceHeader {
+                    ws_idx: 0,
+                    indented: false,
+                    foldered: false,
+                    thin: false,
+                },
+                AgentPanelListEntry::Agent { entry_idx: 0 },
+                AgentPanelListEntry::FolderHeader { order_idx: 1 },
+            ],
+            "a collapsed folder keeps its header and hides its members"
+        );
+        assert_eq!(
+            entries.len(),
+            2,
+            "hidden agents stay in the flat agent sequence"
+        );
+    }
+
+    #[test]
+    fn folder_view_collapsed_folder_keeps_active_space_visible() {
+        let (mut app, folder_id) = collapse_projection_state();
+        app.active = Some(1);
+        app.collapsed_folder_ids.insert(folder_id);
+
+        let entries = agent_panel_entries(&app);
+        let rows = agent_panel_list_entries(&app, &entries);
+
+        assert_eq!(
+            rows,
+            vec![
+                AgentPanelListEntry::SpaceHeader {
+                    ws_idx: 0,
+                    indented: false,
+                    foldered: false,
+                    thin: false,
+                },
+                AgentPanelListEntry::Agent { entry_idx: 0 },
+                AgentPanelListEntry::FolderHeader { order_idx: 1 },
+                AgentPanelListEntry::SpaceHeader {
+                    ws_idx: 1,
+                    indented: false,
+                    foldered: true,
+                    thin: false,
+                },
+                AgentPanelListEntry::Agent { entry_idx: 1 },
+            ],
+            "the active member stays visible inside a collapsed folder, like the spaces panel"
+        );
+    }
+
+    #[test]
+    fn folder_view_hides_agentless_collapsed_folder() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("main"), Workspace::test_new("notes")];
+        let member = app.workspaces[0].id.clone();
+        let folder_id = app.create_folder("work").expect("create folder");
+        app.assign_workspace_to_folder(&member, Some(&folder_id), None)
+            .expect("assign");
+        // Canonical order: notes, [work: main]
+        app.ensure_test_terminals();
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Folders;
+        // Only the loose space has an agent.
+        set_root_agent(&mut app, 0, Agent::Claude);
+        app.collapsed_folder_ids.insert(folder_id);
+
+        let entries = agent_panel_entries(&app);
+        let rows = agent_panel_list_entries(&app, &entries);
+
+        assert_eq!(
+            rows,
+            vec![
+                AgentPanelListEntry::SpaceHeader {
+                    ws_idx: 0,
+                    indented: false,
+                    foldered: false,
+                    thin: false,
+                },
+                AgentPanelListEntry::Agent { entry_idx: 0 },
+            ],
+            "an agent-less folder stays hidden even while collapsed"
+        );
+    }
+
+    #[test]
+    fn folder_view_collapsed_space_hides_agents_but_keeps_header() {
+        let (mut app, _folder_id) = collapse_projection_state();
+        let main_id = app.workspaces[1].id.clone();
+        app.collapsed_agent_space_ids.insert(main_id);
+
+        let entries = agent_panel_entries(&app);
+        let rows = agent_panel_list_entries(&app, &entries);
+
+        assert_eq!(
+            rows,
+            vec![
+                AgentPanelListEntry::SpaceHeader {
+                    ws_idx: 0,
+                    indented: false,
+                    foldered: false,
+                    thin: false,
+                },
+                AgentPanelListEntry::Agent { entry_idx: 0 },
+                AgentPanelListEntry::FolderHeader { order_idx: 1 },
+                AgentPanelListEntry::SpaceHeader {
+                    ws_idx: 1,
+                    indented: false,
+                    foldered: true,
+                    thin: false,
+                },
+            ],
+            "a collapsed space keeps its header and hides its agent list"
+        );
+        assert_eq!(
+            entries.len(),
+            2,
+            "hidden agents stay in the flat agent sequence"
+        );
+    }
+
+    #[test]
+    fn folder_view_collapsed_space_keeps_active_pane_row_visible() {
+        let mut ws = Workspace::test_new("one");
+        let root = ws.tabs[0].root_pane;
+        let second = ws.test_split(ratatui::layout::Direction::Horizontal);
+        ws.tabs[0].layout.focus_pane(root);
+
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        app.mode = Mode::Terminal;
+        app.active = Some(0);
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Folders;
+        for pane in [root, second] {
+            let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Claude);
+        }
+        let ws_id = app.workspaces[0].id.clone();
+        app.collapsed_agent_space_ids.insert(ws_id);
+
+        let entries = agent_panel_entries(&app);
+        let rows = agent_panel_list_entries(&app, &entries);
+
+        let focused_entry = entries
+            .iter()
+            .position(|entry| entry.pane_id == root)
+            .expect("focused pane entry");
+        assert_eq!(
+            rows,
+            vec![
+                AgentPanelListEntry::SpaceHeader {
+                    ws_idx: 0,
+                    indented: false,
+                    foldered: false,
+                    thin: false,
+                },
+                AgentPanelListEntry::Agent {
+                    entry_idx: focused_entry,
+                },
+            ],
+            "the active pane's row stays visible inside a collapsed space"
+        );
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn flat_agent_sequence_is_identical_under_every_collapse_combination() {
+        // A worktree family (main + issue) inside folder "work", plus loose
+        // "notes": every collapse dimension has something real to hide.
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![
+            workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
+            workspace_with_worktree_space("issue", Some("repo-key"), "/repo/herdr-issue"),
+            Workspace::test_new("notes"),
+        ];
+        let parent = app.workspaces[0].id.clone();
+        let folder_id = app.create_folder("work").expect("create folder");
+        app.assign_workspace_to_folder(&parent, Some(&folder_id), None)
+            .expect("assign family");
+        // Canonical order after assign: notes, [work: main, issue]
+        app.ensure_test_terminals();
+        for ws_idx in 0..app.workspaces.len() {
+            set_root_agent(&mut app, ws_idx, Agent::Claude);
+        }
+        app.mode = Mode::Terminal;
+        app.active = Some(0);
+        app.selected = 0;
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Folders;
+        let main_id = app.workspaces[1].id.clone();
+
+        let baseline: Vec<_> = agent_panel_entries(&app)
+            .iter()
+            .map(|entry| (entry.ws_idx, entry.pane_id))
+            .collect();
+
+        for combo in 0u8..8 {
+            app.collapsed_folder_ids.clear();
+            app.collapsed_agent_space_ids.clear();
+            app.collapsed_space_keys.clear();
+            if combo & 1 != 0 {
+                app.collapsed_folder_ids.insert(folder_id.clone());
+            }
+            if combo & 2 != 0 {
+                app.collapsed_agent_space_ids.insert(main_id.clone());
+            }
+            if combo & 4 != 0 {
+                app.collapsed_space_keys.insert("repo-key".into());
+            }
+            let sequence: Vec<_> = agent_panel_entries(&app)
+                .iter()
+                .map(|entry| (entry.ws_idx, entry.pane_id))
+                .collect();
+            assert_eq!(
+                sequence, baseline,
+                "collapse must never filter the flat agent sequence (combo {combo:#05b})"
+            );
+        }
+    }
+
+    #[test]
+    fn hidden_agent_entry_scrolls_to_its_nearest_visible_header() {
+        let (mut app, folder_id) = collapse_projection_state();
+        let main_id = app.workspaces[1].id.clone();
+
+        // Collapsed space: the hidden agent maps to its space header row.
+        app.collapsed_agent_space_ids.insert(main_id);
+        assert_eq!(agent_panel_row_for_entry(&app, 1), 3);
+
+        // Collapsed folder: the hidden agent maps to the folder header row.
+        app.collapsed_agent_space_ids.clear();
+        app.collapsed_folder_ids.insert(folder_id);
+        assert_eq!(agent_panel_row_for_entry(&app, 1), 2);
     }
 
     #[test]

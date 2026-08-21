@@ -486,6 +486,7 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
             collapsed_folder_ids: Default::default(),
+            collapsed_agent_space_ids: Default::default(),
             space_order: Vec::new(),
         }
     }

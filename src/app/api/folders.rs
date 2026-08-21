@@ -300,6 +300,8 @@ mod tests {
         );
         app.state.collapsed_folder_ids.insert(folder_id);
         app.state.collapsed_space_keys.insert("repo-key".into());
+        let ws_id = app.state.workspaces[0].id.clone();
+        app.state.collapsed_agent_space_ids.insert(ws_id);
 
         let folder_list = app.handle_folder_list("list".into());
         let session_snapshot = app.handle_session_snapshot("snapshot".into());

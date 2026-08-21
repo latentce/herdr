@@ -680,6 +680,54 @@ impl AppState {
         &self,
         row: u16,
     ) -> Option<(usize, usize, crate::layout::PaneId)> {
+        match self.agent_panel_row_hit(row)?.0 {
+            crate::ui::AgentPanelListEntry::Agent { entry_idx } => {
+                crate::ui::agent_panel_entries(self)
+                    .get(entry_idx)
+                    .map(|detail| (detail.ws_idx, detail.tab_idx, detail.pane_id))
+            }
+            _ => None,
+        }
+    }
+
+    /// The collapse chevron hit (if any) at this cell of the agents panel:
+    /// a folder header's chevron toggles the shared folder collapse, a space
+    /// header's chevron toggles that space's agent-list collapse. Thin
+    /// ancestor headers have no agents of their own and expose no chevron.
+    pub(super) fn agent_panel_collapse_target_at(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<AgentPanelCollapseTarget> {
+        let (list_row, row_y, body) = self.agent_panel_row_hit(row)?;
+        let chevron = crate::ui::agent_panel_header_chevron_rect(body, row_y);
+        if chevron.width == 0 || row != chevron.y || col != chevron.x {
+            return None;
+        }
+        match list_row {
+            crate::ui::AgentPanelListEntry::FolderHeader { order_idx } => {
+                match self.space_order.get(order_idx) {
+                    Some(crate::folder::SpaceOrderEntry::Folder(folder)) => {
+                        Some(AgentPanelCollapseTarget::Folder(folder.id.clone()))
+                    }
+                    _ => None,
+                }
+            }
+            crate::ui::AgentPanelListEntry::SpaceHeader {
+                ws_idx,
+                thin: false,
+                ..
+            } => self
+                .workspaces
+                .get(ws_idx)
+                .map(|ws| AgentPanelCollapseTarget::Space(ws.id.clone())),
+            _ => None,
+        }
+    }
+
+    /// The agents-panel display row under `row`, with the row's top y and the
+    /// panel body rect. Shared row-walk for agent and chevron hit-testing.
+    fn agent_panel_row_hit(&self, row: u16) -> Option<(crate::ui::AgentPanelListEntry, u16, Rect)> {
         if self.sidebar_collapsed {
             return None;
         }
@@ -705,12 +753,7 @@ impl AppState {
                 break;
             }
             if row >= row_y && row < row_y.saturating_add(height) {
-                return match list_row {
-                    crate::ui::AgentPanelListEntry::Agent { entry_idx } => entries
-                        .get(*entry_idx)
-                        .map(|detail| (detail.ws_idx, detail.tab_idx, detail.pane_id)),
-                    _ => None,
-                };
+                return Some((list_row.clone(), row_y, body));
             }
             row_y = row_y
                 .saturating_add(height)
@@ -719,6 +762,14 @@ impl AppState {
         }
         None
     }
+}
+
+/// A collapse chevron hit in the agents panel folder view.
+pub(super) enum AgentPanelCollapseTarget {
+    /// A folder header's chevron: toggles the shared folder collapse.
+    Folder(String),
+    /// A space header's chevron: toggles that space's agent-list collapse.
+    Space(String),
 }
 
 #[cfg(test)]
@@ -1604,6 +1655,213 @@ mod tests {
 
         assert!(!app.state.collapsed_folder_ids.contains(&folder_id));
         assert!(app.state.workspace_presses.is_empty());
+    }
+
+    /// Folder-view agents panel: loose "one" then folder "work" containing
+    /// "two", one agent per space, single-row agent entries with no gap.
+    /// Rows: header(one), agent, folder(work), header(two), agent.
+    fn folder_view_collapse_mouse_app() -> (crate::app::App, String) {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        let member = app.state.workspaces[1].id.clone();
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        app.state
+            .assign_workspace_to_folder(&member, Some(&folder_id), None)
+            .expect("assign");
+        app.state.ensure_test_terminals();
+        for ws_idx in 0..app.state.workspaces.len() {
+            let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .detected_agent = Some(Agent::Claude);
+        }
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.sidebar_agents.rows = vec![vec![crate::config::AgentSidebarToken::StateIcon]];
+        app.state.sidebar_agents.row_gap = 0;
+        app.state.agent_panel_sort = AgentPanelSort::Folders;
+        (app, folder_id)
+    }
+
+    fn agent_panel_body(app: &crate::app::App) -> Rect {
+        let detail_area = app.state.agent_panel_rect();
+        let metrics = crate::ui::agent_panel_scroll_metrics(&app.state, detail_area);
+        crate::ui::agent_panel_body_rect(detail_area, crate::ui::should_show_scrollbar(metrics))
+    }
+
+    #[test]
+    fn clicking_agents_panel_folder_chevron_toggles_shared_folder_collapse() {
+        let (mut app, folder_id) = folder_view_collapse_mouse_app();
+        let body = agent_panel_body(&app);
+        let chevron_col = body.x + body.width - 1;
+        let folder_row = body.y + 2;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            chevron_col,
+            folder_row,
+        ));
+
+        assert!(app.state.collapsed_folder_ids.contains(&folder_id));
+        assert_eq!(app.state.active, Some(0), "collapse never changes focus");
+        // One shared state: the spaces panel hides the member too.
+        assert!(
+            !crate::ui::workspace_list_entries(&app.state)
+                .iter()
+                .any(|entry| matches!(
+                    entry,
+                    crate::ui::WorkspaceListEntry::Workspace { ws_idx: 1, .. }
+                )),
+            "collapsing from the agents panel collapses the spaces panel folder"
+        );
+        let snapshot = capture_snapshot(&app.state);
+        assert!(snapshot.collapsed_folder_ids.contains(&folder_id));
+
+        // The collapsed folder header stays at the same row: toggle back.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            chevron_col,
+            folder_row,
+        ));
+        assert!(!app.state.collapsed_folder_ids.contains(&folder_id));
+    }
+
+    #[test]
+    fn clicking_agents_panel_space_chevron_toggles_agent_list_collapse() {
+        let (mut app, folder_id) = folder_view_collapse_mouse_app();
+        let two_id = app.state.workspaces[1].id.clone();
+        let body = agent_panel_body(&app);
+        let chevron_col = body.x + body.width - 1;
+        let space_row = body.y + 3;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            chevron_col,
+            space_row,
+        ));
+
+        assert!(app.state.collapsed_agent_space_ids.contains(&two_id));
+        assert!(
+            !app.state.collapsed_folder_ids.contains(&folder_id),
+            "agent-list collapse is independent of folder collapse"
+        );
+        assert_eq!(
+            crate::ui::agent_panel_entries(&app.state).len(),
+            2,
+            "collapse never filters the flat agent sequence"
+        );
+        let snapshot = capture_snapshot(&app.state);
+        assert!(snapshot.collapsed_agent_space_ids.contains(&two_id));
+
+        // The collapsed space header stays at the same row: toggle back.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            chevron_col,
+            space_row,
+        ));
+        assert!(!app.state.collapsed_agent_space_ids.contains(&two_id));
+    }
+
+    #[test]
+    fn clicking_spaces_panel_folder_chevron_collapses_agents_panel_folder_view() {
+        let (mut app, folder_id) = folder_view_collapse_mouse_app();
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let header = app.state.view.folder_header_areas[0].clone();
+        let chevron = crate::ui::folder_header_chevron_rect(&header);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            chevron.x,
+            chevron.y,
+        ));
+
+        assert!(app.state.collapsed_folder_ids.contains(&folder_id));
+        // One shared state: the agents-panel folder view hides the member's
+        // space header and agents, keeping the folder header.
+        let entries = crate::ui::agent_panel_entries(&app.state);
+        let rows = crate::ui::agent_panel_list_entries(&app.state, &entries);
+        assert!(
+            !rows.iter().any(|row| matches!(
+                row,
+                crate::ui::AgentPanelListEntry::SpaceHeader { ws_idx: 1, .. }
+                    | crate::ui::AgentPanelListEntry::Agent { entry_idx: 1 }
+            )),
+            "collapsing from the spaces panel collapses the folder view: {rows:?}"
+        );
+        assert!(rows
+            .iter()
+            .any(|row| matches!(row, crate::ui::AgentPanelListEntry::FolderHeader { .. })));
+    }
+
+    #[test]
+    fn clicking_agents_panel_header_row_off_chevron_does_not_toggle() {
+        let (mut app, folder_id) = folder_view_collapse_mouse_app();
+        let two_id = app.state.workspaces[1].id.clone();
+        let body = agent_panel_body(&app);
+
+        for row in [body.y + 2, body.y + 3] {
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                body.x + 1,
+                row,
+            ));
+        }
+
+        assert!(!app.state.collapsed_folder_ids.contains(&folder_id));
+        assert!(!app.state.collapsed_agent_space_ids.contains(&two_id));
+    }
+
+    #[test]
+    fn thin_ancestor_header_has_no_collapse_chevron() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("main"), Workspace::test_new("issue")];
+        for (idx, checkout_path) in ["/repo/herdr", "/repo/herdr-issue"].into_iter().enumerate() {
+            app.state.workspaces[idx].worktree_space =
+                Some(crate::workspace::WorktreeSpaceMembership {
+                    key: "repo-key".into(),
+                    label: "herdr".into(),
+                    repo_root: "/repo/herdr".into(),
+                    checkout_path: checkout_path.into(),
+                    is_linked_worktree: idx > 0,
+                });
+        }
+        app.state.ensure_test_terminals();
+        // Only the child has an agent: the parent renders as a thin header.
+        let pane_id = app.state.workspaces[1].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[1].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Claude);
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.sidebar_agents.rows = vec![vec![crate::config::AgentSidebarToken::StateIcon]];
+        app.state.sidebar_agents.row_gap = 0;
+        app.state.agent_panel_sort = AgentPanelSort::Folders;
+        let body = agent_panel_body(&app);
+        let chevron_col = body.x + body.width - 1;
+
+        // Rows: thin header(main), header(issue), agent.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            chevron_col,
+            body.y,
+        ));
+
+        assert!(
+            app.state.collapsed_agent_space_ids.is_empty(),
+            "a thin ancestor header exposes no agent-list collapse"
+        );
     }
 
     #[test]

@@ -1293,6 +1293,7 @@ impl HeadlessServer {
             self.app.state.sidebar_section_split,
             self.app.state.collapsed_space_keys.clone(),
             self.app.state.collapsed_folder_ids.clone(),
+            self.app.state.collapsed_agent_space_ids.clone(),
             &self.app.state.space_order,
         );
 

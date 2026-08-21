@@ -1212,6 +1212,7 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
             collapsed_folder_ids: Default::default(),
+            collapsed_agent_space_ids: Default::default(),
             space_order: Vec::new(),
         };
         let (events, _event_rx) = mpsc::channel(4);
@@ -1307,6 +1308,7 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
             collapsed_folder_ids: Default::default(),
+            collapsed_agent_space_ids: Default::default(),
             space_order: Vec::new(),
         };
         let (events, _event_rx) = mpsc::channel(4);
@@ -1416,6 +1418,7 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
             collapsed_folder_ids: Default::default(),
+            collapsed_agent_space_ids: Default::default(),
             space_order: Vec::new(),
         };
         let (events, _event_rx) = mpsc::channel(4);
@@ -1529,6 +1532,7 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
             collapsed_folder_ids: Default::default(),
+            collapsed_agent_space_ids: Default::default(),
             space_order: Vec::new(),
         };
         let (events, _event_rx) = mpsc::channel(4);
@@ -1725,6 +1729,7 @@ mod tests {
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: Default::default(),
             collapsed_folder_ids: Default::default(),
+            collapsed_agent_space_ids: Default::default(),
             space_order: Vec::new(),
         };
         (snapshot, history)

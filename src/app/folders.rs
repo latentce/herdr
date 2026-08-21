@@ -274,8 +274,12 @@ impl AppState {
     }
 
     /// Drop space-order references to workspaces that no longer exist.
-    /// Called after workspaces are removed from the vec.
+    /// Called after workspaces are removed from the vec; also drops
+    /// agent-list collapse state for the removed workspaces, since workspace
+    /// ids re-seed from the live set and a stale entry could make an
+    /// unrelated future space start out collapsed.
     pub(crate) fn prune_space_order(&mut self) {
+        self.remove_dangling_collapsed_agent_space_ids();
         if self.space_order.is_empty() {
             return;
         }
@@ -403,6 +407,41 @@ impl AppState {
         for id in &dangling {
             self.collapsed_folder_ids.remove(id);
         }
+    }
+
+    /// Remove agent-list collapse entries for workspaces that no longer
+    /// exist, returning the removed ids. Shared by the close path and the
+    /// restore path.
+    fn remove_dangling_collapsed_agent_space_ids(&mut self) -> Vec<String> {
+        if self.collapsed_agent_space_ids.is_empty() {
+            return Vec::new();
+        }
+        let known: std::collections::HashSet<&str> =
+            self.workspaces.iter().map(|ws| ws.id.as_str()).collect();
+        let dangling: Vec<String> = self
+            .collapsed_agent_space_ids
+            .iter()
+            .filter(|id| !known.contains(id.as_str()))
+            .cloned()
+            .collect();
+        for id in &dangling {
+            self.collapsed_agent_space_ids.remove(id);
+        }
+        dangling
+    }
+
+    /// Drop agent-list collapse state for workspaces that no longer exist.
+    /// Called on restore so stale snapshot data cannot linger.
+    pub(crate) fn prune_dangling_collapsed_agent_space_ids(&mut self) {
+        let mut dangling = self.remove_dangling_collapsed_agent_space_ids();
+        if dangling.is_empty() {
+            return;
+        }
+        dangling.sort_unstable();
+        tracing::warn!(
+            workspaces = ?dangling,
+            "restored agent-list collapse state referenced missing workspaces; dropped the dangling entries"
+        );
     }
 
     /// Keep a worktree family in one folder: when members disagree, the whole
@@ -1531,6 +1570,46 @@ mod tests {
         assert!(
             !state.collapsed_folder_ids.contains("f-gone"),
             "collapse state for a missing folder must be dropped"
+        );
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn restore_prunes_dangling_collapsed_agent_space_ids() {
+        let mut state = app_with_workspaces(&["one"]);
+        let w1 = workspace_id(&state, 0);
+        state.collapsed_agent_space_ids.insert(w1.clone());
+        state.collapsed_agent_space_ids.insert("w-gone".into());
+
+        state.prune_dangling_collapsed_agent_space_ids();
+
+        assert!(
+            state.collapsed_agent_space_ids.contains(&w1),
+            "agent-list collapse for a live workspace must survive"
+        );
+        assert!(
+            !state.collapsed_agent_space_ids.contains("w-gone"),
+            "agent-list collapse for a missing workspace must be dropped"
+        );
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn removing_a_workspace_drops_its_agent_list_collapse() {
+        let mut state = app_with_workspaces(&["one", "two"]);
+        let kept = workspace_id(&state, 0);
+        let removed = workspace_id(&state, 1);
+        state.collapsed_agent_space_ids.insert(kept.clone());
+        state.collapsed_agent_space_ids.insert(removed.clone());
+
+        state.workspaces.remove(1);
+        state.prune_space_order();
+
+        assert!(state.collapsed_agent_space_ids.contains(&kept));
+        assert!(
+            !state.collapsed_agent_space_ids.contains(&removed),
+            "workspace ids re-seed from the live set, so a stale entry could \
+             collapse an unrelated future space"
         );
         state.assert_invariants_for_test();
     }
