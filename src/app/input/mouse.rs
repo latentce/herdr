@@ -391,7 +391,7 @@ impl AppState {
 
                 if matches!(
                     self.mode,
-                    Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane
+                    Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::RenameFolder
                 ) {
                     let action = self
                         .rename_modal_inner()
@@ -1041,6 +1041,16 @@ impl AppState {
                     .workspace_list_scrollbar_target_at(mouse.column, mouse.row)
                     .is_some()
                 {
+                    return None;
+                }
+                if let Some(folder_id) = self.folder_header_at(mouse.row) {
+                    self.context_menu = Some(ContextMenuState {
+                        kind: ContextMenuKind::Folder { folder_id },
+                        x: mouse.column,
+                        y: mouse.row,
+                        list: MenuListState::new(0),
+                    });
+                    self.mode = Mode::ContextMenu;
                     return None;
                 }
                 if let Some(idx) = self.workspace_at_row(mouse.row) {
@@ -4505,6 +4515,47 @@ mod tests {
             viewport.y + 4,
         ));
         assert_eq!(app.state.workspaces[0].active_tab, 2);
+    }
+
+    #[test]
+    fn right_click_folder_header_opens_folder_context_menu() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let member = app.state.workspaces[1].id.clone();
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        app.state
+            .assign_workspace_to_folder(&member, Some(&folder_id))
+            .expect("assign");
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let header = app
+            .state
+            .view
+            .folder_header_areas
+            .first()
+            .expect("folder header area")
+            .clone();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            header.rect.x + 1,
+            header.rect.y,
+        ));
+
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        let menu = app.state.context_menu.as_ref().expect("folder menu");
+        assert_eq!(
+            menu.kind,
+            ContextMenuKind::Folder {
+                folder_id: folder_id.clone()
+            }
+        );
+        assert_eq!(menu.items(), vec!["Rename", "Delete"]);
+        app.state.assert_invariants_for_test();
     }
 
     #[test]

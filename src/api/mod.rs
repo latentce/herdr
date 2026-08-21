@@ -33,6 +33,8 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::WorkspaceReportMetadata(_)
             | Method::WorkspaceClose(_)
             | Method::FolderCreate(_)
+            | Method::FolderRename(_)
+            | Method::FolderDelete(_)
             | Method::FolderAssign(_)
             | Method::WorktreeCreate(_)
             | Method::WorktreeOpen(_)

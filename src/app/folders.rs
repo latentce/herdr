@@ -44,6 +44,65 @@ impl AppState {
         Ok(folder_id)
     }
 
+    /// Rename a folder. Identity is the id, so renames never fail on name
+    /// collisions; empty/whitespace-only names are rejected. The stored name
+    /// is trimmed.
+    pub fn rename_folder(
+        &mut self,
+        folder_id: &str,
+        name: &str,
+    ) -> Result<(), FolderMutationError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(FolderMutationError::EmptyName);
+        }
+        let Some(folder) = self.space_order.iter_mut().find_map(|entry| match entry {
+            SpaceOrderEntry::Folder(folder) if folder.id == folder_id => Some(folder),
+            _ => None,
+        }) else {
+            return Err(FolderMutationError::FolderNotFound);
+        };
+        if folder.name != name {
+            folder.name = name.to_string();
+            self.mark_session_dirty();
+        }
+        Ok(())
+    }
+
+    /// Delete a folder, releasing its members to the top level at the
+    /// folder's former position in their previous relative order. Closes
+    /// nothing. Returns the released workspace ids in order.
+    pub fn delete_folder(&mut self, folder_id: &str) -> Result<Vec<String>, FolderMutationError> {
+        if self.folder(folder_id).is_none() {
+            return Err(FolderMutationError::FolderNotFound);
+        }
+
+        // Drop stale member references first so the unwrap cannot promote
+        // them into dangling top-level entries.
+        self.normalize_space_order();
+        let Some(index) = self.space_order.iter().position(
+            |entry| matches!(entry, SpaceOrderEntry::Folder(folder) if folder.id == folder_id),
+        ) else {
+            // Unreachable in practice (normalization keeps folders), but
+            // degrade gracefully.
+            return Err(FolderMutationError::FolderNotFound);
+        };
+        let SpaceOrderEntry::Folder(folder) = self.space_order.remove(index) else {
+            unreachable!("position matched a folder entry");
+        };
+        let released = folder.members;
+        self.space_order.splice(
+            index..index,
+            released
+                .iter()
+                .map(|id| SpaceOrderEntry::Workspace(id.clone())),
+        );
+
+        self.sync_workspaces_to_space_order();
+        self.mark_session_dirty();
+        Ok(released)
+    }
+
     /// Assign a workspace to a folder, or back to the top level when
     /// `folder_id` is `None`, with append semantics. Assigning any worktree
     /// family member moves the whole family. Returns the affected workspace
@@ -518,6 +577,147 @@ mod tests {
         let folder_id = state.create_folder("  work  ").expect("create folder");
 
         assert_eq!(state.folder(&folder_id).expect("folder").name, "work");
+    }
+
+    #[test]
+    fn rename_folder_updates_label_and_trims() {
+        let mut state = app_with_workspaces(&["one"]);
+        let folder_id = state.create_folder("work").expect("create folder");
+
+        state
+            .rename_folder(&folder_id, "  personal  ")
+            .expect("rename folder");
+
+        assert_eq!(state.folder(&folder_id).expect("folder").name, "personal");
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn rename_folder_allows_duplicate_names() {
+        let mut state = app_with_workspaces(&["one"]);
+        let first = state.create_folder("work").expect("first folder");
+        let second = state.create_folder("other").expect("second folder");
+
+        state.rename_folder(&second, "work").expect("rename folder");
+
+        assert_eq!(state.folder(&first).expect("folder").name, "work");
+        assert_eq!(state.folder(&second).expect("folder").name, "work");
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn rename_folder_rejects_empty_names_and_unknown_folders() {
+        let mut state = app_with_workspaces(&["one"]);
+        let folder_id = state.create_folder("work").expect("create folder");
+
+        assert_eq!(
+            state.rename_folder(&folder_id, ""),
+            Err(FolderMutationError::EmptyName)
+        );
+        assert_eq!(
+            state.rename_folder(&folder_id, "  \t"),
+            Err(FolderMutationError::EmptyName)
+        );
+        assert_eq!(
+            state.rename_folder("f-missing", "personal"),
+            Err(FolderMutationError::FolderNotFound)
+        );
+        assert_eq!(
+            state.folder(&folder_id).expect("folder").name,
+            "work",
+            "rejected renames must not mutate"
+        );
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn delete_folder_releases_members_at_former_position_in_order() {
+        let mut state = app_with_workspaces(&["one", "two", "three", "four"]);
+        let w1 = workspace_id(&state, 0);
+        let w2 = workspace_id(&state, 1);
+        let w3 = workspace_id(&state, 2);
+        let w4 = workspace_id(&state, 3);
+        state.install_space_order(vec![
+            SpaceOrderEntry::Workspace(w1.clone()),
+            SpaceOrderEntry::Folder(Folder {
+                id: "f1".into(),
+                name: "work".into(),
+                members: vec![w2.clone(), w3.clone()],
+            }),
+            SpaceOrderEntry::Workspace(w4.clone()),
+        ]);
+
+        let released = state.delete_folder("f1").expect("delete folder");
+
+        assert_eq!(released, vec![w2.clone(), w3.clone()]);
+        assert!(state.folder("f1").is_none(), "folder must be gone");
+        assert_eq!(state.workspace_folder_id(&w2), None);
+        assert_eq!(state.workspace_folder_id(&w3), None);
+        // Members return to the top level at the folder's former position,
+        // preserving their relative order.
+        assert_eq!(
+            state.space_order,
+            vec![
+                SpaceOrderEntry::Workspace(w1.clone()),
+                SpaceOrderEntry::Workspace(w2.clone()),
+                SpaceOrderEntry::Workspace(w3.clone()),
+                SpaceOrderEntry::Workspace(w4.clone()),
+            ]
+        );
+        assert_eq!(workspace_id_order(&state), vec![w1, w2, w3, w4]);
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn delete_folder_preserves_active_and_selected_by_identity() {
+        let mut state = app_with_workspaces(&["one", "two"]);
+        let w2 = workspace_id(&state, 1);
+        let folder_id = state.create_folder("work").expect("create folder");
+        state
+            .assign_workspace_to_folder(&w2, Some(&folder_id))
+            .expect("assign");
+        let w2_idx = state
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == w2)
+            .expect("workspace present");
+        state.active = Some(w2_idx);
+        state.selected = w2_idx;
+
+        state.delete_folder(&folder_id).expect("delete folder");
+
+        let new_idx = state
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == w2)
+            .expect("workspace still present");
+        assert_eq!(state.active, Some(new_idx));
+        assert_eq!(state.selected, new_idx);
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn delete_empty_folder_works() {
+        let mut state = app_with_workspaces(&["one"]);
+        let folder_id = state.create_folder("work").expect("create folder");
+        let before = workspace_id_order(&state);
+
+        let released = state.delete_folder(&folder_id).expect("delete folder");
+
+        assert!(released.is_empty());
+        assert!(state.folder(&folder_id).is_none());
+        assert_eq!(workspace_id_order(&state), before);
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn delete_folder_rejects_unknown_folder() {
+        let mut state = app_with_workspaces(&["one"]);
+
+        assert_eq!(
+            state.delete_folder("f-missing"),
+            Err(FolderMutationError::FolderNotFound)
+        );
     }
 
     #[test]

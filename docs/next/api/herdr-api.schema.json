@@ -270,6 +270,46 @@
             },
             {
               "properties": {
+                "folder": {
+                  "$ref": "#/schemas/event/$defs/FolderInfo"
+                },
+                "type": {
+                  "const": "folder_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "folder"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "folder_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "folder_deleted",
+                  "type": "string"
+                },
+                "workspace_ids": {
+                  "description": "Members released to the top level at the folder's former\nposition, in their previous relative order.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "type",
+                "folder_id",
+                "workspace_ids"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "folder_id": {
                   "type": [
                     "string",
@@ -779,6 +819,8 @@
             "workspace_reordered",
             "workspace_focused",
             "folder_created",
+            "folder_updated",
+            "folder_deleted",
             "folder_assigned",
             "worktree_created",
             "worktree_opened",
@@ -2193,6 +2235,34 @@
           },
           "required": [
             "name"
+          ],
+          "type": "object"
+        },
+        "FolderRenameParams": {
+          "properties": {
+            "folder_id": {
+              "type": "string"
+            },
+            "name": {
+              "description": "New display name; duplicates allowed, empty/whitespace-only rejected.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "folder_id",
+            "name"
+          ],
+          "type": "object"
+        },
+        "FolderTarget": {
+          "description": "Parameters addressing a single folder by id.",
+          "properties": {
+            "folder_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "folder_id"
           ],
           "type": "object"
         },
@@ -3896,6 +3966,30 @@
             {
               "properties": {
                 "type": {
+                  "const": "folder.updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "folder.deleted",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
                   "const": "folder.assigned",
                   "type": "string"
                 }
@@ -4883,6 +4977,38 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "folder.rename",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/FolderRenameParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "folder.delete",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/FolderTarget"
             }
           },
           "required": [
@@ -6720,6 +6846,46 @@
             },
             {
               "properties": {
+                "folder": {
+                  "$ref": "#/schemas/success_response/$defs/FolderInfo"
+                },
+                "type": {
+                  "const": "folder_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "folder"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "folder_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "folder_deleted",
+                  "type": "string"
+                },
+                "workspace_ids": {
+                  "description": "Members released to the top level at the folder's former\nposition, in their previous relative order.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "type",
+                "folder_id",
+                "workspace_ids"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "folder_id": {
                   "type": [
                     "string",
@@ -7244,6 +7410,8 @@
             "workspace_reordered",
             "workspace_focused",
             "folder_created",
+            "folder_updated",
+            "folder_deleted",
             "folder_assigned",
             "worktree_created",
             "worktree_opened",
@@ -9014,6 +9182,46 @@
                 "type",
                 "folders",
                 "order"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "folder": {
+                  "$ref": "#/schemas/success_response/$defs/FolderInfo"
+                },
+                "type": {
+                  "const": "folder_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "folder"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "folder_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "folder_deleted",
+                  "type": "string"
+                },
+                "workspace_ids": {
+                  "description": "Members released to the top level at the folder's former\nposition, in their previous relative order.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "type",
+                "folder_id",
+                "workspace_ids"
               ],
               "type": "object"
             },

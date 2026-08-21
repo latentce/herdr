@@ -1,9 +1,10 @@
 use crate::api::schema::{
-    EmptyParams, LayoutSetSplitRatioParams, Method, PaneFocusDirectionParams, PaneInputSetParams,
-    PaneRenameParams, PaneResizeParams, PaneSplitParams, PaneSwapParams, PaneTarget,
-    PaneZoomParams, TabCreateParams, TabMoveParams, TabRenameParams, TabTarget,
-    WorkspaceCreateParams, WorkspaceMoveBlockParams, WorkspaceMoveParams, WorkspaceRenameParams,
-    WorkspaceTarget, WorktreeCreateParams, WorktreeOpenParams, WorktreeRemoveParams,
+    EmptyParams, FolderRenameParams, FolderTarget, LayoutSetSplitRatioParams, Method,
+    PaneFocusDirectionParams, PaneInputSetParams, PaneRenameParams, PaneResizeParams,
+    PaneSplitParams, PaneSwapParams, PaneTarget, PaneZoomParams, TabCreateParams, TabMoveParams,
+    TabRenameParams, TabTarget, WorkspaceCreateParams, WorkspaceMoveBlockParams,
+    WorkspaceMoveParams, WorkspaceRenameParams, WorkspaceTarget, WorktreeCreateParams,
+    WorktreeOpenParams, WorktreeRemoveParams,
 };
 
 use super::App;
@@ -67,6 +68,18 @@ impl App {
         workspace_id: String,
     ) -> String {
         self.dispatch_runtime_mutation(id, Method::WorkspaceClose(WorkspaceTarget { workspace_id }))
+    }
+
+    pub(crate) fn runtime_folder_rename(
+        &mut self,
+        id: &'static str,
+        params: FolderRenameParams,
+    ) -> String {
+        self.dispatch_runtime_mutation(id, Method::FolderRename(params))
+    }
+
+    pub(crate) fn runtime_folder_delete(&mut self, id: &'static str, folder_id: String) -> String {
+        self.dispatch_runtime_mutation(id, Method::FolderDelete(FolderTarget { folder_id }))
     }
 
     pub(crate) fn runtime_tab_create(

@@ -87,6 +87,10 @@ pub enum Method {
     FolderCreate(FolderCreateParams),
     #[serde(rename = "folder.list")]
     FolderList(EmptyParams),
+    #[serde(rename = "folder.rename")]
+    FolderRename(FolderRenameParams),
+    #[serde(rename = "folder.delete")]
+    FolderDelete(FolderTarget),
     #[serde(rename = "folder.assign")]
     FolderAssign(FolderAssignParams),
     #[serde(rename = "worktree.list")]

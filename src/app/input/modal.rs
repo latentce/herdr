@@ -375,10 +375,25 @@ pub(super) fn open_rename_workspace(
     state.pending_workspace_create_cwd = None;
     state.selected = ws_idx;
     state.rename_pane_target = None;
+    state.rename_folder_target = None;
     state.name_input =
         state.workspaces[ws_idx].display_name_from(&state.terminals, terminal_runtimes);
     state.name_input_replace_on_type = false;
     state.mode = Mode::RenameWorkspace;
+}
+
+pub(super) fn open_rename_folder(state: &mut AppState, folder_id: &str) {
+    let Some(name) = state.folder(folder_id).map(|folder| folder.name.clone()) else {
+        return;
+    };
+    state.creating_new_tab = false;
+    state.requested_new_tab_name = None;
+    state.pending_workspace_create_cwd = None;
+    state.rename_pane_target = None;
+    state.name_input = name;
+    state.rename_folder_target = Some(folder_id.to_string());
+    state.name_input_replace_on_type = false;
+    state.mode = Mode::RenameFolder;
 }
 
 pub(crate) fn open_new_workspace_dialog(state: &mut AppState, cwd: std::path::PathBuf) {
@@ -387,6 +402,7 @@ pub(crate) fn open_new_workspace_dialog(state: &mut AppState, cwd: std::path::Pa
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = Some(cwd);
     state.rename_pane_target = None;
+    state.rename_folder_target = None;
     state.name_input = suggested_name;
     state.name_input_replace_on_type = true;
     state.mode = Mode::RenameWorkspace;
@@ -397,6 +413,7 @@ pub(super) fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.rename_pane_target = None;
+    state.rename_folder_target = None;
     if let Some(ws) = state.active.and_then(|i| state.workspaces.get(i)) {
         if let Some(name) = ws.active_tab_display_name() {
             state.name_input = name;
@@ -418,6 +435,7 @@ pub(super) fn open_rename_pane(state: &mut AppState, pane_id: crate::layout::Pan
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.rename_pane_target = Some(pane_id);
+    state.rename_folder_target = None;
     state.name_input = terminal
         .and_then(|t| t.manual_label.clone())
         .unwrap_or_default();
@@ -443,6 +461,7 @@ pub(super) fn open_new_tab_dialog(state: &mut AppState) {
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.rename_pane_target = None;
+    state.rename_folder_target = None;
     state.name_input = next_new_tab_default_name(state);
     state.name_input_replace_on_type = true;
     state.mode = Mode::RenameTab;
@@ -578,11 +597,17 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                         }
                     }
                 }
+                Mode::RenameFolder if !new_name.is_empty() => {
+                    if let Some(folder_id) = state.rename_folder_target.clone() {
+                        let _ = state.rename_folder(&folder_id, &new_name);
+                    }
+                }
                 _ => {}
             }
             state.creating_new_tab = false;
             state.pending_workspace_create_cwd = None;
             state.rename_pane_target = None;
+            state.rename_folder_target = None;
             state.name_input.clear();
             state.name_input_replace_on_type = false;
             leave_modal(state);
@@ -596,6 +621,7 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
             state.requested_new_tab_name = None;
             state.pending_workspace_create_cwd = None;
             state.rename_pane_target = None;
+            state.rename_folder_target = None;
             state.name_input.clear();
             state.name_input_replace_on_type = false;
             leave_modal(state);
@@ -806,6 +832,15 @@ pub(super) fn apply_context_menu_action(
             Some("Rename"),
         ) => {
             open_rename_workspace(state, terminal_runtimes, ws_idx);
+        }
+        (ContextMenuKind::Folder { folder_id }, Some("Rename")) => {
+            open_rename_folder(state, &folder_id);
+        }
+        (ContextMenuKind::Folder { folder_id }, Some("Delete")) => {
+            // Deleting never closes spaces: members return to the top level,
+            // so no confirmation is needed.
+            let _ = state.delete_folder(&folder_id);
+            leave_modal(state);
         }
         (
             ContextMenuKind::Workspace { ws_idx } | ContextMenuKind::GitWorkspace { ws_idx, .. },
@@ -1094,6 +1129,17 @@ impl App {
                     }
                 }
             }
+            Mode::RenameFolder if !new_name.is_empty() => {
+                if let Some(folder_id) = self.state.rename_folder_target.clone() {
+                    self.runtime_folder_rename(
+                        "tui.folder.rename",
+                        crate::api::schema::FolderRenameParams {
+                            folder_id,
+                            name: new_name,
+                        },
+                    );
+                }
+            }
             _ => {}
         }
 
@@ -1236,6 +1282,15 @@ impl App {
                 | ContextMenuKind::GitWorkspace { ws_idx, .. },
                 Some("Rename"),
             ) => open_rename_workspace(&mut self.state, &self.terminal_runtimes, ws_idx),
+            (ContextMenuKind::Folder { folder_id }, Some("Rename")) => {
+                open_rename_folder(&mut self.state, &folder_id);
+            }
+            (ContextMenuKind::Folder { folder_id }, Some("Delete")) => {
+                // Deleting never closes spaces: members return to the top
+                // level, so no confirmation is needed.
+                self.runtime_folder_delete("tui.folder.delete", folder_id);
+                leave_modal(&mut self.state);
+            }
             (
                 ContextMenuKind::Workspace { ws_idx }
                 | ContextMenuKind::GitWorkspace { ws_idx, .. },
@@ -1389,6 +1444,7 @@ fn cancel_rename_modal(state: &mut AppState) {
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.rename_pane_target = None;
+    state.rename_folder_target = None;
     state.name_input.clear();
     state.name_input_replace_on_type = false;
     leave_modal(state);
@@ -2179,6 +2235,140 @@ mod tests {
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "main");
         assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    fn folder_menu(folder_id: &str) -> ContextMenuState {
+        ContextMenuState {
+            kind: ContextMenuKind::Folder {
+                folder_id: folder_id.to_string(),
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        }
+    }
+
+    #[test]
+    fn folder_context_menu_offers_rename_and_delete() {
+        let menu = folder_menu("f1");
+        assert_eq!(menu.items(), vec!["Rename", "Delete"]);
+    }
+
+    #[test]
+    fn folder_context_menu_rename_opens_prefilled_rename_folder_modal() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        app.state.mode = Mode::ContextMenu;
+
+        let menu = folder_menu(&folder_id);
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Rename")
+            .expect("rename item");
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        assert_eq!(app.state.mode, Mode::RenameFolder);
+        assert_eq!(app.state.name_input, "work");
+        assert_eq!(app.state.rename_folder_target.as_deref(), Some(&*folder_id));
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn rename_folder_modal_enter_saves_new_label() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        open_rename_folder(&mut app.state, &folder_id);
+        app.state.name_input = "  personal  ".into();
+
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert_eq!(
+            app.state.folder(&folder_id).expect("folder").name,
+            "personal"
+        );
+        assert_eq!(app.state.rename_folder_target, None);
+        assert_eq!(app.state.mode, Mode::Terminal);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn rename_folder_modal_ignores_empty_name_on_save() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        open_rename_folder(&mut app.state, &folder_id);
+        app.state.name_input = "   ".into();
+
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert_eq!(app.state.folder(&folder_id).expect("folder").name, "work");
+        assert_eq!(app.state.rename_folder_target, None);
+        assert_eq!(app.state.mode, Mode::Terminal);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn rename_folder_modal_esc_cancels_without_renaming() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        open_rename_folder(&mut app.state, &folder_id);
+        app.state.name_input = "personal".into();
+
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+
+        assert_eq!(app.state.folder(&folder_id).expect("folder").name, "work");
+        assert_eq!(app.state.rename_folder_target, None);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn folder_context_menu_delete_releases_members_without_confirmation() {
+        let mut app = app_with_test_workspaces(&["one", "two"]);
+        let w2 = app.state.workspaces[1].id.clone();
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        app.state
+            .assign_workspace_to_folder(&w2, Some(&folder_id))
+            .expect("assign");
+        app.state.mode = Mode::ContextMenu;
+
+        let menu = folder_menu(&folder_id);
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Delete")
+            .expect("delete item");
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        assert!(app.state.folder(&folder_id).is_none(), "folder deleted");
+        assert_eq!(app.state.workspace_folder_id(&w2), None);
+        assert_eq!(app.state.workspaces.len(), 2, "delete closes nothing");
+        assert_ne!(
+            app.state.mode,
+            Mode::ConfirmClose,
+            "delete must not ask for confirmation"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn pure_state_folder_context_menu_delete_releases_members() {
+        let mut state = state_with_workspaces(&["one", "two"]);
+        state.ensure_test_terminals();
+        let w2 = state.workspaces[1].id.clone();
+        let folder_id = state.create_folder("work").expect("create folder");
+        state
+            .assign_workspace_to_folder(&w2, Some(&folder_id))
+            .expect("assign");
+        state.mode = Mode::ContextMenu;
+        let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+
+        let menu = folder_menu(&folder_id);
+        apply_context_menu_action(&mut state, &mut terminal_runtimes, menu, 1);
+
+        assert!(state.folder(&folder_id).is_none());
+        assert_eq!(state.workspace_folder_id(&w2), None);
+        assert_eq!(state.workspaces.len(), 2);
+        state.assert_invariants_for_test();
     }
 
     #[test]

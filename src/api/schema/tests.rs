@@ -1369,6 +1369,30 @@ fn folder_requests_round_trip() {
             folder_id: None,
         })
     );
+
+    let rename = Request {
+        id: "folder-rename".into(),
+        method: Method::FolderRename(FolderRenameParams {
+            folder_id: "f1".into(),
+            name: "personal".into(),
+        }),
+    };
+    let json = serde_json::to_value(&rename).unwrap();
+    assert_eq!(json["method"], "folder.rename");
+    assert_eq!(json["params"]["folder_id"], "f1");
+    assert_eq!(json["params"]["name"], "personal");
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), rename);
+
+    let delete = Request {
+        id: "folder-delete".into(),
+        method: Method::FolderDelete(FolderTarget {
+            folder_id: "f1".into(),
+        }),
+    };
+    let json = serde_json::to_value(&delete).unwrap();
+    assert_eq!(json["method"], "folder.delete");
+    assert_eq!(json["params"]["folder_id"], "f1");
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), delete);
 }
 
 #[test]
@@ -1422,6 +1446,33 @@ fn folder_responses_round_trip() {
     assert!(json.contains("\"type\":\"folder_assigned\""));
     let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
     assert_eq!(restored, assigned);
+
+    let updated = SuccessResponse {
+        id: "folder-rename".into(),
+        result: ResponseResult::FolderUpdated {
+            folder: FolderInfo {
+                folder_id: "f1".into(),
+                name: "personal".into(),
+                members: vec!["w1".into()],
+            },
+        },
+    };
+    let json = serde_json::to_string(&updated).unwrap();
+    assert!(json.contains("\"type\":\"folder_updated\""));
+    let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, updated);
+
+    let deleted = SuccessResponse {
+        id: "folder-delete".into(),
+        result: ResponseResult::FolderDeleted {
+            folder_id: "f1".into(),
+            workspace_ids: vec!["w1".into(), "w2".into()],
+        },
+    };
+    let json = serde_json::to_string(&deleted).unwrap();
+    assert!(json.contains("\"type\":\"folder_deleted\""));
+    let restored: SuccessResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, deleted);
 }
 
 #[test]
@@ -1453,17 +1504,48 @@ fn folder_events_round_trip() {
     let restored: EventEnvelope = serde_json::from_str(&json).unwrap();
     assert_eq!(restored, assigned);
 
+    let updated = EventEnvelope {
+        event: EventKind::FolderUpdated,
+        data: EventData::FolderUpdated {
+            folder: FolderInfo {
+                folder_id: "f1".into(),
+                name: "personal".into(),
+                members: vec!["w1".into()],
+            },
+        },
+    };
+    let json = serde_json::to_string(&updated).unwrap();
+    assert!(json.contains("\"event\":\"folder_updated\""));
+    let restored: EventEnvelope = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, updated);
+
+    let deleted = EventEnvelope {
+        event: EventKind::FolderDeleted,
+        data: EventData::FolderDeleted {
+            folder_id: "f1".into(),
+            workspace_ids: vec!["w1".into(), "w2".into()],
+        },
+    };
+    let json = serde_json::to_string(&deleted).unwrap();
+    assert!(json.contains("\"event\":\"folder_deleted\""));
+    let restored: EventEnvelope = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, deleted);
+
     let subscription = Request {
         id: "sub-folders".into(),
         method: Method::EventsSubscribe(EventsSubscribeParams {
             subscriptions: vec![
                 Subscription::FolderCreated {},
+                Subscription::FolderUpdated {},
+                Subscription::FolderDeleted {},
                 Subscription::FolderAssigned {},
             ],
         }),
     };
     let json = serde_json::to_string(&subscription).unwrap();
     assert!(json.contains("\"type\":\"folder.created\""));
+    assert!(json.contains("\"type\":\"folder.updated\""));
+    assert!(json.contains("\"type\":\"folder.deleted\""));
     assert!(json.contains("\"type\":\"folder.assigned\""));
     let restored: Request = serde_json::from_str(&json).unwrap();
     assert_eq!(restored, subscription);

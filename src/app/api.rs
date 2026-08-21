@@ -1038,6 +1038,12 @@ impl App {
                 return self.handle_folder_create(request.id, params);
             }
             Method::FolderList(_) => return self.handle_folder_list(request.id),
+            Method::FolderRename(params) => {
+                return self.handle_folder_rename(request.id, params);
+            }
+            Method::FolderDelete(target) => {
+                return self.handle_folder_delete(request.id, target);
+            }
             Method::FolderAssign(params) => {
                 return self.handle_folder_assign(request.id, params);
             }

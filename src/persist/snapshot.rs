@@ -719,6 +719,43 @@ mod tests {
     }
 
     #[test]
+    fn renamed_and_deleted_folders_round_trip_through_capture_and_parse() {
+        let mut state = state_with_workspaces(&["one", "two", "three"]);
+        let member = state.workspaces[0].id.clone();
+        let kept = state.create_folder("work").expect("create kept folder");
+        let dropped = state
+            .create_folder("scratch")
+            .expect("create dropped folder");
+        state
+            .assign_workspace_to_folder(&member, Some(&dropped))
+            .expect("assign");
+        state.rename_folder(&kept, "personal").expect("rename");
+        state.delete_folder(&dropped).expect("delete");
+        // Canonical order after delete: two, three, one (released at the
+        // dropped folder's former position), with the renamed empty folder
+        // kept in place.
+
+        let snap = capture_from_state(&state);
+        let json = serde_json::to_string(&snap).unwrap();
+        let restored = parse_snapshot(&json).unwrap();
+
+        assert_eq!(
+            restored.space_order,
+            vec![
+                SpaceOrderEntrySnapshot::Workspace(state.workspaces[0].id.clone()),
+                SpaceOrderEntrySnapshot::Workspace(state.workspaces[1].id.clone()),
+                SpaceOrderEntrySnapshot::Folder(FolderSnapshot {
+                    id: kept,
+                    name: "personal".into(),
+                    members: Vec::new(),
+                }),
+                SpaceOrderEntrySnapshot::Workspace(member),
+            ],
+            "renames persist, deleted folders stay gone, and empty folders survive"
+        );
+    }
+
+    #[test]
     fn capture_lists_unlisted_workspaces_loose_at_the_end_of_space_order() {
         let mut state = state_with_workspaces(&["one"]);
         state.create_folder("work").expect("create folder");

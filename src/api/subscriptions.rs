@@ -148,6 +148,14 @@ impl ActiveSubscription {
                 event_kind: crate::api::schema::EventKind::FolderCreated,
                 last_sequence: 0,
             })),
+            Subscription::FolderUpdated {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::FolderUpdated,
+                last_sequence: 0,
+            })),
+            Subscription::FolderDeleted {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::FolderDeleted,
+                last_sequence: 0,
+            })),
             Subscription::FolderAssigned {} => Ok(Self::Event(ActiveEventSubscription {
                 event_kind: crate::api::schema::EventKind::FolderAssigned,
                 last_sequence: 0,

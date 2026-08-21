@@ -7,6 +7,19 @@ pub struct FolderCreateParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FolderRenameParams {
+    pub folder_id: String,
+    /// New display name; duplicates allowed, empty/whitespace-only rejected.
+    pub name: String,
+}
+
+/// Parameters addressing a single folder by id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FolderTarget {
+    pub folder_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FolderAssignParams {
     pub workspace_id: String,
     /// Target folder, or `null` to return the workspace to the top level.

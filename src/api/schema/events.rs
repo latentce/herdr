@@ -34,6 +34,10 @@ pub enum Subscription {
     WorkspaceFocused {},
     #[serde(rename = "folder.created")]
     FolderCreated {},
+    #[serde(rename = "folder.updated")]
+    FolderUpdated {},
+    #[serde(rename = "folder.deleted")]
+    FolderDeleted {},
     #[serde(rename = "folder.assigned")]
     FolderAssigned {},
     #[serde(rename = "worktree.created")]
@@ -205,6 +209,8 @@ pub enum EventKind {
     WorkspaceReordered,
     WorkspaceFocused,
     FolderCreated,
+    FolderUpdated,
+    FolderDeleted,
     FolderAssigned,
     WorktreeCreated,
     WorktreeOpened,
@@ -238,6 +244,8 @@ impl EventKind {
             EventKind::WorkspaceReordered => "workspace.reordered",
             EventKind::WorkspaceFocused => "workspace.focused",
             EventKind::FolderCreated => "folder.created",
+            EventKind::FolderUpdated => "folder.updated",
+            EventKind::FolderDeleted => "folder.deleted",
             EventKind::FolderAssigned => "folder.assigned",
             EventKind::WorktreeCreated => "worktree.created",
             EventKind::WorktreeOpened => "worktree.opened",
@@ -272,6 +280,8 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::WorkspaceReordered,
     EventKind::WorkspaceFocused,
     EventKind::FolderCreated,
+    EventKind::FolderUpdated,
+    EventKind::FolderDeleted,
     EventKind::FolderAssigned,
     EventKind::WorktreeCreated,
     EventKind::WorktreeOpened,
@@ -464,6 +474,15 @@ pub enum EventData {
     },
     FolderCreated {
         folder: super::folders::FolderInfo,
+    },
+    FolderUpdated {
+        folder: super::folders::FolderInfo,
+    },
+    FolderDeleted {
+        folder_id: String,
+        /// Members released to the top level at the folder's former
+        /// position, in their previous relative order.
+        workspace_ids: Vec<String>,
     },
     FolderAssigned {
         #[serde(default, skip_serializing_if = "Option::is_none")]

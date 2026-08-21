@@ -845,6 +845,7 @@ pub enum Mode {
     RenameWorkspace,
     RenameTab,
     RenamePane,
+    RenameFolder,
     NewLinkedWorktree,
     OpenExistingWorktree,
     ConfirmRemoveWorktree,
@@ -1208,6 +1209,9 @@ pub enum ContextMenuKind {
     Workspace {
         ws_idx: usize,
     },
+    Folder {
+        folder_id: String,
+    },
     GitWorkspace {
         ws_idx: usize,
         is_linked_worktree: bool,
@@ -1240,6 +1244,7 @@ impl ContextMenuState {
     pub fn items(&self) -> Vec<&'static str> {
         match self.kind {
             ContextMenuKind::Workspace { .. } => vec!["Rename", "Close"],
+            ContextMenuKind::Folder { .. } => vec!["Rename", "Delete"],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: false,
@@ -1425,6 +1430,8 @@ pub struct AppState {
     pub requested_new_tab_name: Option<String>,
     pub pending_workspace_create_cwd: Option<std::path::PathBuf>,
     pub rename_pane_target: Option<PaneId>,
+    /// Folder being renamed while `mode == Mode::RenameFolder`.
+    pub rename_folder_target: Option<String>,
     pub worktree_create: Option<WorktreeCreateState>,
     pub worktree_open: Option<WorktreeOpenState>,
     pub worktree_remove: Option<WorktreeRemoveState>,
@@ -1810,6 +1817,7 @@ impl AppState {
             requested_new_tab_name: None,
             pending_workspace_create_cwd: None,
             rename_pane_target: None,
+            rename_folder_target: None,
             worktree_create: None,
             worktree_open: None,
             worktree_remove: None,
@@ -2257,13 +2265,19 @@ impl AppState {
             assert_tab_index(press.ws_idx, press.tab_idx, "tab press");
         }
         if let Some(menu) = &self.context_menu {
-            match menu.kind {
+            match &menu.kind {
                 ContextMenuKind::Workspace { ws_idx }
                 | ContextMenuKind::GitWorkspace { ws_idx, .. } => {
-                    assert_workspace_index(ws_idx, "context menu workspace")
+                    assert_workspace_index(*ws_idx, "context menu workspace")
+                }
+                ContextMenuKind::Folder { folder_id } => {
+                    assert!(
+                        self.folder(folder_id).is_some(),
+                        "context menu references unknown folder {folder_id}"
+                    );
                 }
                 ContextMenuKind::Tab { ws_idx, tab_idx } => {
-                    assert_tab_index(ws_idx, tab_idx, "context menu tab")
+                    assert_tab_index(*ws_idx, *tab_idx, "context menu tab")
                 }
                 ContextMenuKind::Pane {
                     ws_idx,
@@ -2272,6 +2286,7 @@ impl AppState {
                     source_pane_id,
                     ..
                 } => {
+                    let (ws_idx, tab_idx, pane_id) = (*ws_idx, *tab_idx, *pane_id);
                     assert_tab_index(ws_idx, tab_idx, "context menu pane tab");
                     assert!(
                         self.workspaces[ws_idx].tabs[tab_idx]
@@ -2282,7 +2297,7 @@ impl AppState {
                         ws_idx,
                         tab_idx
                     );
-                    if let Some(source_pane_id) = source_pane_id {
+                    if let Some(source_pane_id) = *source_pane_id {
                         assert_live_pane(source_pane_id, "context menu source pane");
                     }
                 }

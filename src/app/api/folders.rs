@@ -1,6 +1,6 @@
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, FolderAssignParams, FolderCreateParams, FolderInfo,
-    ResponseResult, SpaceOrderEntryInfo, SpaceOrderEntryKind,
+    FolderRenameParams, FolderTarget, ResponseResult, SpaceOrderEntryInfo, SpaceOrderEntryKind,
 };
 use crate::app::folders::FolderMutationError;
 use crate::app::App;
@@ -67,6 +67,55 @@ impl App {
         }
 
         encode_success(id, ResponseResult::FolderList { folders, order })
+    }
+
+    pub(super) fn handle_folder_rename(
+        &mut self,
+        id: String,
+        params: FolderRenameParams,
+    ) -> String {
+        match self.state.rename_folder(&params.folder_id, &params.name) {
+            Ok(()) => {
+                self.schedule_session_save();
+                let Some(folder) = self.state.folder(&params.folder_id) else {
+                    // Unreachable in practice (rename validated existence),
+                    // but degrade gracefully.
+                    return folder_mutation_error(id, &FolderMutationError::FolderNotFound);
+                };
+                let folder = folder_info(folder);
+                self.emit_event(EventEnvelope {
+                    event: EventKind::FolderUpdated,
+                    data: EventData::FolderUpdated {
+                        folder: folder.clone(),
+                    },
+                });
+                encode_success(id, ResponseResult::FolderUpdated { folder })
+            }
+            Err(err) => folder_mutation_error(id, &err),
+        }
+    }
+
+    pub(super) fn handle_folder_delete(&mut self, id: String, target: FolderTarget) -> String {
+        match self.state.delete_folder(&target.folder_id) {
+            Ok(workspace_ids) => {
+                self.schedule_session_save();
+                self.emit_event(EventEnvelope {
+                    event: EventKind::FolderDeleted,
+                    data: EventData::FolderDeleted {
+                        folder_id: target.folder_id.clone(),
+                        workspace_ids: workspace_ids.clone(),
+                    },
+                });
+                encode_success(
+                    id,
+                    ResponseResult::FolderDeleted {
+                        folder_id: target.folder_id,
+                        workspace_ids,
+                    },
+                )
+            }
+            Err(err) => folder_mutation_error(id, &err),
+        }
     }
 
     pub(super) fn handle_folder_assign(
@@ -254,6 +303,202 @@ mod tests {
         assert_eq!(order[1].kind, SpaceOrderEntryKind::Folder);
         assert_eq!(order[1].id, folder_id);
         app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn folder_rename_updates_label_and_emits_folder_updated() {
+        let mut app = test_app(&["one"]);
+        let response = app.handle_folder_create(
+            "create".into(),
+            FolderCreateParams {
+                name: "work".into(),
+            },
+        );
+        let folder_id = created_folder_id(&response);
+
+        let response = app.handle_folder_rename(
+            "rename".into(),
+            FolderRenameParams {
+                folder_id: folder_id.clone(),
+                name: "personal".into(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).expect("success response");
+        assert_eq!(
+            success.result,
+            ResponseResult::FolderUpdated {
+                folder: FolderInfo {
+                    folder_id: folder_id.clone(),
+                    name: "personal".into(),
+                    members: Vec::new(),
+                }
+            }
+        );
+        assert_eq!(
+            app.state.folder(&folder_id).expect("folder").name,
+            "personal"
+        );
+        let events: Vec<(EventKind, EventData)> = app
+            .event_hub
+            .events_after(0)
+            .into_iter()
+            .map(|(_, envelope)| (envelope.event, envelope.data))
+            .collect();
+        assert!(events.iter().any(|(kind, data)| {
+            *kind == EventKind::FolderUpdated
+                && matches!(
+                    data,
+                    EventData::FolderUpdated { folder }
+                        if folder.folder_id == folder_id && folder.name == "personal"
+                )
+        }));
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn folder_rename_never_fails_on_name_collision() {
+        let mut app = test_app(&["one"]);
+        let first = created_folder_id(&app.handle_folder_create(
+            "create-1".into(),
+            FolderCreateParams {
+                name: "work".into(),
+            },
+        ));
+        let second = created_folder_id(&app.handle_folder_create(
+            "create-2".into(),
+            FolderCreateParams {
+                name: "other".into(),
+            },
+        ));
+
+        let response = app.handle_folder_rename(
+            "rename".into(),
+            FolderRenameParams {
+                folder_id: second.clone(),
+                name: "work".into(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).expect("success response");
+        assert!(matches!(
+            success.result,
+            ResponseResult::FolderUpdated { folder } if folder.name == "work"
+        ));
+        assert_eq!(app.state.folder(&first).expect("folder").name, "work");
+        assert_eq!(app.state.folder(&second).expect("folder").name, "work");
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn folder_rename_rejects_empty_name_and_unknown_folder() {
+        let mut app = test_app(&["one"]);
+        let response = app.handle_folder_create(
+            "create".into(),
+            FolderCreateParams {
+                name: "work".into(),
+            },
+        );
+        let folder_id = created_folder_id(&response);
+
+        let response = app.handle_folder_rename(
+            "rename".into(),
+            FolderRenameParams {
+                folder_id: folder_id.clone(),
+                name: "   ".into(),
+            },
+        );
+        let error: ErrorResponse = serde_json::from_str(&response).expect("error response");
+        assert_eq!(error.error.code, "invalid_folder_name");
+
+        let response = app.handle_folder_rename(
+            "rename".into(),
+            FolderRenameParams {
+                folder_id: "f-missing".into(),
+                name: "personal".into(),
+            },
+        );
+        let error: ErrorResponse = serde_json::from_str(&response).expect("error response");
+        assert_eq!(error.error.code, "folder_not_found");
+        assert_eq!(app.state.folder(&folder_id).expect("folder").name, "work");
+    }
+
+    #[test]
+    fn folder_delete_releases_members_and_emits_folder_deleted() {
+        let mut app = test_app(&["one", "two"]);
+        let w1 = app.state.workspaces[0].id.clone();
+        let w2 = app.state.workspaces[1].id.clone();
+        let response = app.handle_folder_create(
+            "create".into(),
+            FolderCreateParams {
+                name: "work".into(),
+            },
+        );
+        let folder_id = created_folder_id(&response);
+        app.handle_folder_assign(
+            "assign".into(),
+            FolderAssignParams {
+                workspace_id: w2.clone(),
+                folder_id: Some(folder_id.clone()),
+            },
+        );
+
+        let response = app.handle_folder_delete(
+            "delete".into(),
+            FolderTarget {
+                folder_id: folder_id.clone(),
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).expect("success response");
+        assert_eq!(
+            success.result,
+            ResponseResult::FolderDeleted {
+                folder_id: folder_id.clone(),
+                workspace_ids: vec![w2.clone()],
+            }
+        );
+        assert!(app.state.folder(&folder_id).is_none());
+        assert_eq!(app.state.workspace_folder_id(&w2), None);
+        // No space was closed by the delete.
+        assert_eq!(
+            app.state
+                .workspaces
+                .iter()
+                .map(|ws| ws.id.clone())
+                .collect::<Vec<_>>(),
+            vec![w1, w2.clone()]
+        );
+        let events: Vec<(EventKind, EventData)> = app
+            .event_hub
+            .events_after(0)
+            .into_iter()
+            .map(|(_, envelope)| (envelope.event, envelope.data))
+            .collect();
+        assert!(events.iter().any(|(kind, data)| {
+            *kind == EventKind::FolderDeleted
+                && matches!(
+                    data,
+                    EventData::FolderDeleted { folder_id: deleted, workspace_ids }
+                        if *deleted == folder_id && *workspace_ids == vec![w2.clone()]
+                )
+        }));
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn folder_delete_rejects_unknown_folder() {
+        let mut app = test_app(&["one"]);
+
+        let response = app.handle_folder_delete(
+            "delete".into(),
+            FolderTarget {
+                folder_id: "f-missing".into(),
+            },
+        );
+
+        let error: ErrorResponse = serde_json::from_str(&response).expect("error response");
+        assert_eq!(error.error.code, "folder_not_found");
     }
 
     #[test]
