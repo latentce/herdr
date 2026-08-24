@@ -700,29 +700,37 @@ impl AppState {
         row: u16,
     ) -> Option<AgentPanelCollapseTarget> {
         let (list_row, row_y, body) = self.agent_panel_row_hit(row)?;
-        let chevron = crate::ui::agent_panel_header_chevron_rect(body, row_y);
-        if chevron.width == 0 || row != chevron.y || col != chevron.x {
-            return None;
-        }
-        match list_row {
+        // The chevron leads the header row after its indent prefix; the
+        // indent depends on the header kind, so resolve it per row.
+        let (target, indent) = match &list_row {
             crate::ui::AgentPanelListEntry::FolderHeader { order_idx } => {
-                match self.space_order.get(order_idx) {
-                    Some(crate::folder::SpaceOrderEntry::Folder(folder)) => {
-                        Some(AgentPanelCollapseTarget::Folder(folder.id.clone()))
-                    }
-                    _ => None,
+                match self.space_order.get(*order_idx) {
+                    Some(crate::folder::SpaceOrderEntry::Folder(folder)) => (
+                        AgentPanelCollapseTarget::Folder(folder.id.clone()),
+                        crate::ui::AGENT_PANEL_HEADER_GUTTER,
+                    ),
+                    _ => return None,
                 }
             }
             crate::ui::AgentPanelListEntry::SpaceHeader {
                 ws_idx,
+                indented,
+                foldered,
                 thin: false,
-                ..
-            } => self
-                .workspaces
-                .get(ws_idx)
-                .map(|ws| AgentPanelCollapseTarget::Space(ws.id.clone())),
-            _ => None,
+            } => {
+                let ws = self.workspaces.get(*ws_idx)?;
+                (
+                    AgentPanelCollapseTarget::Space(ws.id.clone()),
+                    crate::ui::space_header_chevron_indent(*indented, *foldered),
+                )
+            }
+            _ => return None,
+        };
+        let chevron = crate::ui::agent_panel_header_chevron_rect(body, row_y, indent);
+        if chevron.width == 0 || row != chevron.y || col != chevron.x {
+            return None;
         }
+        Some(target)
     }
 
     /// The agents-panel display row under `row`, with the row's top y and the
@@ -1699,7 +1707,8 @@ mod tests {
     fn clicking_agents_panel_folder_chevron_toggles_shared_folder_collapse() {
         let (mut app, folder_id) = folder_view_collapse_mouse_app();
         let body = agent_panel_body(&app);
-        let chevron_col = body.x + body.width - 1;
+        // Folder headers lead with their chevron after the 1-cell gutter.
+        let chevron_col = body.x + 1;
         let folder_row = body.y + 2;
 
         app.handle_mouse(mouse(
@@ -1737,7 +1746,9 @@ mod tests {
         let (mut app, folder_id) = folder_view_collapse_mouse_app();
         let two_id = app.state.workspaces[1].id.clone();
         let body = agent_panel_body(&app);
-        let chevron_col = body.x + body.width - 1;
+        // The foldered space header's chevron sits past the gutter and the
+        // folder margin.
+        let chevron_col = body.x + 3;
         let space_row = body.y + 3;
 
         app.handle_mouse(mouse(
@@ -1805,12 +1816,10 @@ mod tests {
         let two_id = app.state.workspaces[1].id.clone();
         let body = agent_panel_body(&app);
 
-        for row in [body.y + 2, body.y + 3] {
-            app.handle_mouse(mouse(
-                MouseEventKind::Down(MouseButton::Left),
-                body.x + 1,
-                row,
-            ));
+        // The gap cell right after each header's chevron: folder header
+        // chevron at x+1, foldered space header chevron at x+3.
+        for (row, col) in [(body.y + 2, body.x + 2), (body.y + 3, body.x + 4)] {
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
         }
 
         assert!(!app.state.collapsed_folder_ids.contains(&folder_id));
@@ -1849,7 +1858,9 @@ mod tests {
         app.state.sidebar_agents.row_gap = 0;
         app.state.agent_panel_sort = AgentPanelSort::Folders;
         let body = agent_panel_body(&app);
-        let chevron_col = body.x + body.width - 1;
+        // The cell a loose header's leading chevron would occupy (after the
+        // gutter).
+        let chevron_col = body.x + 1;
 
         // Rows: thin header(main), header(issue), agent.
         app.handle_mouse(mouse(

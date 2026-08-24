@@ -1150,29 +1150,30 @@ pub(crate) fn workspace_group_chevron_rect(card: &crate::app::state::WorkspaceCa
     )
 }
 
-/// Collapse/expand chevron cell on a folder header, mirroring the worktree
-/// group chevron placement at the row's right edge.
+/// Collapse/expand chevron cell on a folder header: the state-icon column of
+/// the row (after the 1-cell gutter), filesystem-browser style, so the
+/// chevron aligns with loose space cards' icons and the folder name aligns
+/// with their names.
 pub(crate) fn folder_header_chevron_rect(header: &crate::app::state::FolderHeaderArea) -> Rect {
-    if header.rect.width == 0 || header.rect.height == 0 {
+    if header.rect.width < 2 || header.rect.height == 0 {
         return Rect::default();
     }
 
-    Rect::new(
-        header.rect.x + header.rect.width.saturating_sub(1),
-        header.rect.y,
-        1,
-        1,
-    )
+    Rect::new(header.rect.x + 1, header.rect.y, 1, 1)
 }
 
 /// Collapse/expand chevron cell of an agents-panel folder or space header row
-/// at `row_y`: the row's right edge, mirroring `folder_header_chevron_rect`.
-pub(crate) fn agent_panel_header_chevron_rect(body: Rect, row_y: u16) -> Rect {
-    if body.width == 0 || body.height == 0 {
+/// at `row_y`: the leading cell after the header's indent prefix (gutter,
+/// folder margin, and any family connector), filesystem-browser style,
+/// mirroring `folder_header_chevron_rect`. `indent` is the prefix width
+/// before the chevron: [`AGENT_PANEL_HEADER_GUTTER`] for folder headers,
+/// `space_header_chevron_indent` for space headers.
+pub(crate) fn agent_panel_header_chevron_rect(body: Rect, row_y: u16, indent: u16) -> Rect {
+    if body.width <= indent || body.height == 0 {
         return Rect::default();
     }
 
-    Rect::new(body.x + body.width.saturating_sub(1), row_y, 1, 1)
+    Rect::new(body.x + indent, row_y, 1, 1)
 }
 
 /// Draw a collapse/expand chevron into its 1x1 cell.
@@ -1825,14 +1826,14 @@ fn render_workspace_list(
         let name_style = if is_drop_target {
             Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD)
+            Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
         };
-        // Reserve the trailing chevron cell plus one gap cell so the name
-        // never runs into the collapse affordance.
+        // Reserve the gutter, chevron, and gap cells so the name never runs
+        // into the collapse affordance and aligns with loose space names.
         let name = truncate_end(&folder.name, header.rect.width.saturating_sub(3) as usize);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::raw(" "),
+                Span::raw("   "),
                 Span::styled(name, name_style),
             ])),
             header.rect,
@@ -2128,15 +2129,15 @@ fn render_agent_detail(
                 if let Some(crate::folder::SpaceOrderEntry::Folder(folder)) =
                     app.space_order.get(*order_idx)
                 {
-                    // Reserve the trailing chevron cell plus one gap cell so
-                    // the name never runs into the collapse affordance.
+                    // Reserve the gutter, chevron, and gap cells so the name
+                    // never runs into the collapse affordance.
                     let name = truncate_end(&folder.name, body.width.saturating_sub(3) as usize);
                     frame.render_widget(
                         Paragraph::new(Line::from(vec![
-                            Span::raw(" "),
+                            Span::raw("   "),
                             Span::styled(
                                 name,
-                                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+                                Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD),
                             ),
                         ])),
                         Rect::new(body.x, row_y, body.width, 1),
@@ -2145,7 +2146,7 @@ fn render_agent_detail(
                     render_collapse_chevron(
                         frame,
                         collapsed,
-                        agent_panel_header_chevron_rect(body, row_y),
+                        agent_panel_header_chevron_rect(body, row_y, AGENT_PANEL_HEADER_GUTTER),
                         p.accent,
                     );
                 }
@@ -2169,6 +2170,7 @@ fn render_agent_detail(
                         label
                     };
                     let mut spans = Vec::new();
+                    spans.push(Span::raw(" ".repeat(AGENT_PANEL_HEADER_GUTTER as usize)));
                     if *foldered {
                         spans.push(Span::raw("  "));
                     }
@@ -2179,19 +2181,22 @@ fn render_agent_detail(
                             if is_last_child { "└─ " } else { "├─ " },
                             Style::default().fg(p.overlay0),
                         ));
-                    } else {
-                        spans.push(Span::raw(" "));
                     }
+                    // Leading chevron cell plus one gap cell; the chevron is
+                    // drawn over the first cell below (thin headers keep the
+                    // blank cells so sibling names stay aligned).
+                    spans.push(Span::raw("  "));
                     let prefix_width = space_header_prefix_width(*indented, *foldered);
                     let name_style = if *thin {
                         Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
                     } else {
-                        Style::default().fg(p.subtext0)
+                        // Space header names carry the same weight as folder
+                        // headers, foldered or not; only their agent rows
+                        // below stay regular.
+                        Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
                     };
-                    // Reserve the trailing chevron cell plus one gap cell so
-                    // the name never runs into the collapse affordance.
                     spans.push(Span::styled(
-                        truncate_end(&label, body.width.saturating_sub(prefix_width + 2) as usize),
+                        truncate_end(&label, body.width.saturating_sub(prefix_width) as usize),
                         name_style,
                     ));
                     frame.render_widget(
@@ -2204,7 +2209,11 @@ fn render_agent_detail(
                         render_collapse_chevron(
                             frame,
                             collapsed,
-                            agent_panel_header_chevron_rect(body, row_y),
+                            agent_panel_header_chevron_rect(
+                                body,
+                                row_y,
+                                space_header_chevron_indent(*indented, *foldered),
+                            ),
                             p.accent,
                         );
                     }
@@ -2267,16 +2276,29 @@ fn render_agent_detail(
     }
 }
 
-/// Width of the prefix (folder margin, base indent, and any worktree
-/// connector) before a folder-view space header's name.
-fn space_header_prefix_width(indented: bool, foldered: bool) -> u16 {
-    (if foldered { 2 } else { 0 }) + (if indented { 6 } else { 1 })
+/// 1-cell gutter before the agents panel folder view's top-level headers,
+/// matching the spaces panel's leading gutter so top-level chevrons align
+/// across panels.
+pub(crate) const AGENT_PANEL_HEADER_GUTTER: u16 = 1;
+
+/// Width of the indent (gutter, folder margin, and any worktree connector)
+/// before a folder-view space header's collapse chevron.
+pub(crate) fn space_header_chevron_indent(indented: bool, foldered: bool) -> u16 {
+    AGENT_PANEL_HEADER_GUTTER + (if foldered { 2 } else { 0 }) + (if indented { 6 } else { 0 })
 }
 
-/// Indent applied to agent rows nested under a folder-view space header, so
-/// agents read as children of the space name above them.
+/// Width of the prefix (indent, chevron cell, and gap cell) before a
+/// folder-view space header's name.
+fn space_header_prefix_width(indented: bool, foldered: bool) -> u16 {
+    space_header_chevron_indent(indented, foldered) + 2
+}
+
+/// Indent applied to agent rows nested under a folder-view space header:
+/// one cell past the header's chevron column, so the row's leading state
+/// icon lands under the first letter of the header's name — mirroring how
+/// the spaces panel nests member icons under their folder's name.
 fn space_header_agent_indent(indented: bool, foldered: bool) -> u16 {
-    space_header_prefix_width(indented, foldered) + 1
+    space_header_chevron_indent(indented, foldered) + 1
 }
 
 /// Whether the next header row after `idx` (skipping agent rows) is an
@@ -2426,23 +2448,55 @@ mod tests {
             row_text(buffer, agent_area.y + 1, 25).ends_with("folders"),
             "the header label names the active ordering"
         );
+        // Filesystem-browser layout: a 1-cell gutter (matching the spaces
+        // panel) then the chevron leading each collapsible header, foldered
+        // headers keep the folder-nesting margin, and agent rows start under
+        // their header name's first letter.
         let one_row = row_text(buffer, body.y, 25);
         assert!(
-            one_row.starts_with(" one") && one_row.ends_with('▾'),
-            "space headers carry a trailing collapse chevron: {one_row:?}"
+            one_row.starts_with(" ▾ one"),
+            "space headers lead with a collapse chevron after the gutter: {one_row:?}"
         );
         assert_eq!(row_text(buffer, body.y + 1, 25), "   pi");
         let folder_row = row_text(buffer, body.y + 2, 25);
         assert!(
-            folder_row.starts_with(" work") && folder_row.ends_with('▾'),
-            "folder headers carry a trailing collapse chevron: {folder_row:?}"
+            folder_row.starts_with(" ▾ work"),
+            "folder headers lead with a collapse chevron after the gutter: {folder_row:?}"
         );
+        // The gutter aligns top-level chevrons across panels: the agents
+        // panel folder chevron sits in the spaces panel's chevron column.
+        let spaces_chevron_x =
+            folder_header_chevron_rect(&compute_workspace_list_areas(&app, area).1[0]).x;
+        assert_eq!(buffer[(spaces_chevron_x, body.y + 2)].symbol(), "▾");
         let two_row = row_text(buffer, body.y + 3, 25);
         assert!(
-            two_row.starts_with("   two") && two_row.ends_with('▾'),
-            "foldered space headers carry a trailing collapse chevron: {two_row:?}"
+            two_row.starts_with("   ▾ two"),
+            "foldered space headers lead with a collapse chevron: {two_row:?}"
         );
         assert_eq!(row_text(buffer, body.y + 4, 25), "     pi");
+
+        // Space header names carry the same weight as folder headers,
+        // foldered or not.
+        let one_style = buffer[(find_symbol_x(buffer, body.y, body.width, "o"), body.y)].style();
+        assert!(
+            one_style.add_modifier.contains(Modifier::BOLD),
+            "a space header name is bold like a folder header"
+        );
+        let work_style = buffer[(
+            find_symbol_x(buffer, body.y + 2, body.width, "w"),
+            body.y + 2,
+        )]
+            .style();
+        assert!(work_style.add_modifier.contains(Modifier::BOLD));
+        let two_style = buffer[(
+            find_symbol_x(buffer, body.y + 3, body.width, "t"),
+            body.y + 3,
+        )]
+            .style();
+        assert!(
+            two_style.add_modifier.contains(Modifier::BOLD),
+            "a foldered space header name is bold too"
+        );
     }
 
     #[test]
@@ -2474,13 +2528,17 @@ mod tests {
         };
         let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
         let body = agent_panel_body_rect(agent_area, false);
-        let chevron_x = body.x + body.width - 1;
+        // Chevrons lead their headers after the 1-cell gutter: top-level
+        // headers one past the body's left edge, foldered space headers past
+        // the 2-cell folder margin on top of the gutter.
+        let top_level_chevron_x = body.x + 1;
+        let foldered_chevron_x = body.x + 3;
 
         // Rows: header(one), pi, folder(work), header(two), pi.
         let buffer = render(&app);
-        assert_eq!(buffer[(chevron_x, body.y)].symbol(), "▾");
-        assert_eq!(buffer[(chevron_x, body.y + 2)].symbol(), "▾");
-        assert_eq!(buffer[(chevron_x, body.y + 3)].symbol(), "▾");
+        assert_eq!(buffer[(top_level_chevron_x, body.y)].symbol(), "▾");
+        assert_eq!(buffer[(top_level_chevron_x, body.y + 2)].symbol(), "▾");
+        assert_eq!(buffer[(foldered_chevron_x, body.y + 3)].symbol(), "▾");
 
         app.collapsed_folder_ids.insert(folder_id);
         let one_id = app.workspaces[0].id.clone();
@@ -2491,7 +2549,7 @@ mod tests {
         // collapsed folder chevron and the collapsed space of a non-active
         // workspace below.
         assert_eq!(
-            buffer[(chevron_x, body.y + 2)].symbol(),
+            buffer[(top_level_chevron_x, body.y + 2)].symbol(),
             "▸",
             "the collapsed folder header shows a collapsed chevron"
         );
@@ -2502,7 +2560,7 @@ mod tests {
         app.collapsed_agent_space_ids.insert(two_id);
         let buffer = render(&app);
         assert_eq!(
-            buffer[(chevron_x, body.y + 3)].symbol(),
+            buffer[(foldered_chevron_x, body.y + 3)].symbol(),
             "▸",
             "the collapsed space header shows a collapsed chevron"
         );
@@ -2535,15 +2593,16 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
         let body = agent_panel_body_rect(agent_area, false);
-        let chevron_x = body.x + body.width - 1;
 
         // Rows: thin header(main), header(issue), pi.
         assert_eq!(
-            buffer[(chevron_x, body.y)].symbol(),
+            buffer[(body.x + 1, body.y)].symbol(),
             " ",
             "a thin ancestor header has no agent list to collapse"
         );
-        assert_eq!(buffer[(chevron_x, body.y + 1)].symbol(), "▾");
+        // The indented child's chevron follows the gutter and its family
+        // connector.
+        assert_eq!(buffer[(body.x + 7, body.y + 1)].symbol(), "▾");
     }
 
     #[test]
@@ -4507,6 +4566,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(parent_name_x, plain_name_x);
         assert_eq!(buffer[(cards[1].rect.x + 3, cards[1].rect.y)].symbol(), "├");
         assert_eq!(buffer[(cards[2].rect.x + 3, cards[2].rect.y)].symbol(), "└");
+        // The group chevron stays at the parent card's right edge.
         assert_eq!(
             buffer[(cards[0].rect.x + cards[0].rect.width - 1, cards[0].rect.y)].symbol(),
             "▾"
@@ -5321,21 +5381,19 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .collect::<String>()
         };
 
+        // Filesystem-browser layout: the chevron sits in the state-icon
+        // column and the folder name aligns with loose space names.
         let expanded_row = render(&mut app);
         assert!(
-            expanded_row.contains('▾'),
-            "expanded folder header must show an expanded chevron: {expanded_row:?}"
+            expanded_row.starts_with(" ▾ work"),
+            "expanded folder header must lead with an expanded chevron: {expanded_row:?}"
         );
 
         app.collapsed_folder_ids.insert(folder_id);
         let collapsed_row = render(&mut app);
         assert!(
-            collapsed_row.contains('▸'),
-            "collapsed folder header must show a collapsed chevron: {collapsed_row:?}"
-        );
-        assert!(
-            collapsed_row.contains("work"),
-            "collapsed folder header must keep the folder name: {collapsed_row:?}"
+            collapsed_row.starts_with(" ▸ work"),
+            "collapsed folder header must lead with a collapsed chevron: {collapsed_row:?}"
         );
     }
 
