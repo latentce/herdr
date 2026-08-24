@@ -3659,7 +3659,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     /// loose plain/git spaces and worktree families, folders (some left
     /// empty), membership and positions driven through the real mutation
     /// seams, agents on a random subset of spaces, and a random collapse
-    /// combination across all three collapse dimensions.
+    /// combination across all three collapse dimensions. The `chance`
+    /// percentages are mix knobs tuned so every shape shows up often across
+    /// the sweep; the vacuity guards in the property test keep them honest.
     fn arbitrary_organization_state(seed: u64) -> crate::app::state::AppState {
         let mut rng = PropertyRng::new(seed);
         let mut app = crate::app::state::AppState::test_new();
@@ -3763,10 +3765,19 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn folder_view_mirrors_spaces_panel_for_arbitrary_organization_states() {
         // Vacuity guards: the sweep must actually exercise foldered
-        // agent-bearing spaces, worktree families, and active collapse.
+        // agent-bearing spaces, worktree families, and every collapse
+        // dimension.
         let mut saw_foldered_agents = false;
         let mut saw_family = false;
-        let mut saw_collapse = false;
+        let mut saw_folder_collapse = false;
+        let mut saw_agent_space_collapse = false;
+        let mut saw_group_collapse = false;
+        let flat_sequence = |entries: &[AgentPanelEntry]| -> Vec<(usize, PaneId)> {
+            entries
+                .iter()
+                .map(|entry| (entry.ws_idx, entry.pane_id))
+                .collect()
+        };
         for seed in 0..300 {
             let mut app = arbitrary_organization_state(seed);
             app.assert_invariants_for_test();
@@ -3790,9 +3801,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .workspaces
                 .iter()
                 .any(|ws| ws.worktree_space().is_some());
-            saw_collapse |= !app.collapsed_folder_ids.is_empty()
-                || !app.collapsed_agent_space_ids.is_empty()
-                || !app.collapsed_space_keys.is_empty();
+            saw_folder_collapse |= !app.collapsed_folder_ids.is_empty();
+            saw_agent_space_collapse |= !app.collapsed_agent_space_ids.is_empty();
+            saw_group_collapse |= !app.collapsed_space_keys.is_empty();
 
             // The spaces panel's fully expanded visual order, projected to
             // agent-bearing spaces.
@@ -3822,18 +3833,28 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 "both panels must tell the same story (seed {seed})"
             );
 
-            // Collapse never filters the flat sequence.
-            let with_collapse: Vec<(usize, PaneId)> = entries
+            // Display rows only ever hide agents: under every collapse
+            // combination the visible agent rows stay a subsequence of the
+            // flat sequence.
+            let rows = agent_panel_list_entries(&app, &entries);
+            let visible_agents: Vec<usize> = rows
                 .iter()
-                .map(|entry| (entry.ws_idx, entry.pane_id))
+                .filter_map(|row| match row {
+                    AgentPanelListEntry::Agent { entry_idx } => Some(*entry_idx),
+                    _ => None,
+                })
                 .collect();
+            assert!(
+                visible_agents.windows(2).all(|pair| pair[0] < pair[1]),
+                "visible agent rows must follow the flat sequence (seed {seed})"
+            );
+
+            // Collapse never filters the flat sequence.
+            let with_collapse = flat_sequence(&entries);
             app.collapsed_folder_ids.clear();
             app.collapsed_agent_space_ids.clear();
             app.collapsed_space_keys.clear();
-            let without_collapse: Vec<(usize, PaneId)> = agent_panel_entries(&app)
-                .iter()
-                .map(|entry| (entry.ws_idx, entry.pane_id))
-                .collect();
+            let without_collapse = flat_sequence(&agent_panel_entries(&app));
             assert_eq!(
                 with_collapse, without_collapse,
                 "collapse must never change the flat agent sequence (seed {seed})"
@@ -3844,7 +3865,18 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             "sweep never foldered an agent-bearing space"
         );
         assert!(saw_family, "sweep never generated a worktree family");
-        assert!(saw_collapse, "sweep never generated collapse state");
+        assert!(
+            saw_folder_collapse,
+            "sweep never generated folder collapse state"
+        );
+        assert!(
+            saw_agent_space_collapse,
+            "sweep never generated agent-list collapse state"
+        );
+        assert!(
+            saw_group_collapse,
+            "sweep never generated worktree-group collapse state"
+        );
     }
 
     #[test]
