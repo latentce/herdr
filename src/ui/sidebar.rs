@@ -3625,6 +3625,228 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         }
     }
 
+    /// Deterministic xorshift* PRNG for the mirroring property sweep: no
+    /// rand dependency, and failures stay reproducible by seed.
+    struct PropertyRng(u64);
+
+    impl PropertyRng {
+        fn new(seed: u64) -> Self {
+            Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
+        }
+
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            if n == 0 {
+                return 0;
+            }
+            (self.next() % n as u64) as usize
+        }
+
+        fn chance(&mut self, percent: u64) -> bool {
+            self.next() % 100 < percent
+        }
+    }
+
+    /// Build an arbitrary valid organization state from `seed`: a mix of
+    /// loose plain/git spaces and worktree families, folders (some left
+    /// empty), membership and positions driven through the real mutation
+    /// seams, agents on a random subset of spaces, and a random collapse
+    /// combination across all three collapse dimensions.
+    fn arbitrary_organization_state(seed: u64) -> crate::app::state::AppState {
+        let mut rng = PropertyRng::new(seed);
+        let mut app = crate::app::state::AppState::test_new();
+
+        let mut workspaces = Vec::new();
+        let mut family_keys = Vec::new();
+        for unit in 0..1 + rng.below(6) {
+            match rng.below(3) {
+                0 => {
+                    let key = format!("family-{unit}");
+                    workspaces.push(workspace_with_worktree_space(
+                        "main",
+                        Some(&key),
+                        &format!("/repo/{key}"),
+                    ));
+                    for child in 0..1 + rng.below(3) {
+                        workspaces.push(workspace_with_worktree_space(
+                            &format!("{key}-child-{child}"),
+                            Some(&key),
+                            &format!("/repo/{key}-{child}"),
+                        ));
+                    }
+                    family_keys.push(key);
+                }
+                1 => workspaces.push(workspace_with_git_space(
+                    &format!("git-{unit}"),
+                    &format!("git-key-{unit}"),
+                )),
+                _ => workspaces.push(Workspace::test_new(&format!("plain-{unit}"))),
+            }
+        }
+        app.workspaces = workspaces;
+
+        let mut folder_ids = Vec::new();
+        for folder in 0..rng.below(4) {
+            folder_ids.push(
+                app.create_folder(&format!("folder-{folder}"))
+                    .expect("create folder"),
+            );
+        }
+        for _ in 0..rng.below(12) {
+            let ws_id = app.workspaces[rng.below(app.workspaces.len())].id.clone();
+            let folder_id = if folder_ids.is_empty() || rng.chance(30) {
+                None
+            } else {
+                Some(folder_ids[rng.below(folder_ids.len())].clone())
+            };
+            let position = rng
+                .chance(60)
+                .then(|| rng.below(app.workspaces.len() + folder_ids.len() + 1));
+            app.assign_workspace_to_folder(&ws_id, folder_id.as_deref(), position)
+                .expect("assign workspace");
+        }
+        for _ in 0..rng.below(3) {
+            if folder_ids.is_empty() {
+                break;
+            }
+            let folder_id = folder_ids[rng.below(folder_ids.len())].clone();
+            let position = rng.below(app.space_order.len() + 1);
+            app.move_folder(&folder_id, position).expect("move folder");
+        }
+
+        for folder_id in &folder_ids {
+            if rng.chance(35) {
+                app.collapsed_folder_ids.insert(folder_id.clone());
+            }
+        }
+        for key in &family_keys {
+            if rng.chance(35) {
+                app.collapsed_space_keys.insert(key.clone());
+            }
+        }
+
+        app.ensure_test_terminals();
+        for ws_idx in 0..app.workspaces.len() {
+            if rng.chance(60) {
+                set_root_agent(&mut app, ws_idx, Agent::Claude);
+            }
+            if rng.chance(35) {
+                let ws_id = app.workspaces[ws_idx].id.clone();
+                app.collapsed_agent_space_ids.insert(ws_id);
+            }
+        }
+
+        app.mode = if rng.chance(50) {
+            Mode::Navigate
+        } else {
+            Mode::Terminal
+        };
+        app.active = Some(rng.below(app.workspaces.len()));
+        app.selected = rng.below(app.workspaces.len());
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Folders;
+        app
+    }
+
+    /// Ticket-10 mirroring property: for arbitrary organization states —
+    /// folders, loose spaces, worktree families, and collapse combinations —
+    /// the spaces panel's order projected to agent-bearing spaces equals the
+    /// folder view's flat order, and no collapse combination changes the
+    /// flat agent sequence.
+    #[test]
+    fn folder_view_mirrors_spaces_panel_for_arbitrary_organization_states() {
+        // Vacuity guards: the sweep must actually exercise foldered
+        // agent-bearing spaces, worktree families, and active collapse.
+        let mut saw_foldered_agents = false;
+        let mut saw_family = false;
+        let mut saw_collapse = false;
+        for seed in 0..300 {
+            let mut app = arbitrary_organization_state(seed);
+            app.assert_invariants_for_test();
+
+            let entries = agent_panel_entries(&app);
+            let agent_bearing: std::collections::HashSet<usize> =
+                entries.iter().map(|entry| entry.ws_idx).collect();
+            saw_foldered_agents |= app.space_order.iter().any(|entry| {
+                matches!(
+                    entry,
+                    crate::folder::SpaceOrderEntry::Folder(folder)
+                        if folder.members.iter().any(|member| {
+                            app.workspaces
+                                .iter()
+                                .position(|ws| &ws.id == member)
+                                .is_some_and(|ws_idx| agent_bearing.contains(&ws_idx))
+                        })
+                )
+            });
+            saw_family |= app
+                .workspaces
+                .iter()
+                .any(|ws| ws.worktree_space().is_some());
+            saw_collapse |= !app.collapsed_folder_ids.is_empty()
+                || !app.collapsed_agent_space_ids.is_empty()
+                || !app.collapsed_space_keys.is_empty();
+
+            // The spaces panel's fully expanded visual order, projected to
+            // agent-bearing spaces.
+            let spaces_panel_order: Vec<usize> = workspace_list_entries_expanded(&app)
+                .iter()
+                .filter_map(|entry| match entry {
+                    WorkspaceListEntry::Workspace { ws_idx, .. }
+                        if agent_bearing.contains(ws_idx) =>
+                    {
+                        Some(*ws_idx)
+                    }
+                    _ => None,
+                })
+                .collect();
+
+            // The folder view's flat agent order, one run per space. Equality
+            // with the projection (each space exactly once) also proves every
+            // space's agents stay contiguous.
+            let mut folder_view_order: Vec<usize> = Vec::new();
+            for entry in &entries {
+                if folder_view_order.last() != Some(&entry.ws_idx) {
+                    folder_view_order.push(entry.ws_idx);
+                }
+            }
+            assert_eq!(
+                folder_view_order, spaces_panel_order,
+                "both panels must tell the same story (seed {seed})"
+            );
+
+            // Collapse never filters the flat sequence.
+            let with_collapse: Vec<(usize, PaneId)> = entries
+                .iter()
+                .map(|entry| (entry.ws_idx, entry.pane_id))
+                .collect();
+            app.collapsed_folder_ids.clear();
+            app.collapsed_agent_space_ids.clear();
+            app.collapsed_space_keys.clear();
+            let without_collapse: Vec<(usize, PaneId)> = agent_panel_entries(&app)
+                .iter()
+                .map(|entry| (entry.ws_idx, entry.pane_id))
+                .collect();
+            assert_eq!(
+                with_collapse, without_collapse,
+                "collapse must never change the flat agent sequence (seed {seed})"
+            );
+        }
+        assert!(
+            saw_foldered_agents,
+            "sweep never foldered an agent-bearing space"
+        );
+        assert!(saw_family, "sweep never generated a worktree family");
+        assert!(saw_collapse, "sweep never generated collapse state");
+    }
+
     #[test]
     fn hidden_agent_entry_scrolls_to_its_nearest_visible_header() {
         let (mut app, folder_id) = collapse_projection_state();
