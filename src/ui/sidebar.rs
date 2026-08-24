@@ -246,10 +246,10 @@ pub(crate) fn folder_view_workspace_ranks(app: &AppState) -> Vec<usize> {
 ///
 /// Collapse only filters display rows, never the flat sequence. Folder
 /// collapse is the same state as the spaces panel (`collapsed_folder_ids`):
-/// a collapsed folder keeps its header and hides its members, except the
-/// active (or selected) one — the spaces panel's rule. A space in
-/// `collapsed_agent_space_ids` keeps its header and hides its agent list,
-/// except the active pane's row.
+/// a collapsed folder keeps its header and hides all member rows — the
+/// spaces panel's rule. A space in `collapsed_agent_space_ids` keeps its
+/// header and hides its whole agent list; the header carries the active
+/// indication instead.
 pub(crate) fn agent_panel_list_entries(
     app: &AppState,
     entries: &[AgentPanelEntry],
@@ -270,9 +270,9 @@ pub(crate) fn agent_panel_list_entries(
         }
     }
     let ws_has_agents = |ws_idx: usize| agents_by_ws.get(ws_idx).is_some_and(|a| !a.is_empty());
-    // Append a space's agent rows, filtered by its agent-list collapse: a
-    // collapsed space shows only the active pane's row, mirroring how the
-    // spaces panel's collapsed containers keep the active child visible.
+    // Append a space's agent rows. A collapsed agent list hides all of its
+    // rows — the active pane's included — like a collapsed folder; the
+    // space header carries the active indication instead.
     let extend_agent_rows = |rows: &mut Vec<AgentPanelListEntry>, ws_idx: usize| {
         let Some(agent_entries) = agents_by_ws.get(ws_idx) else {
             return;
@@ -281,26 +281,16 @@ pub(crate) fn agent_panel_list_entries(
             .workspaces
             .get(ws_idx)
             .is_some_and(|ws| app.collapsed_agent_space_ids.contains(&ws.id));
+        if collapsed {
+            return;
+        }
         rows.extend(
             agent_entries
                 .iter()
-                .copied()
-                .filter(|entry_idx| {
-                    !collapsed
-                        || entries.get(*entry_idx).is_some_and(|entry| {
-                            app.is_active_pane(entry.ws_idx, entry.tab_idx, entry.pane_id)
-                        })
-                })
-                .map(|entry_idx| AgentPanelListEntry::Agent { entry_idx }),
+                .map(|entry_idx| AgentPanelListEntry::Agent {
+                    entry_idx: *entry_idx,
+                }),
         );
-    };
-
-    // The member kept visible inside a collapsed folder: the selected space
-    // in Navigate mode, the active one otherwise — the spaces panel's rule.
-    let visible_ws_idx = if matches!(app.mode, Mode::Navigate) {
-        Some(app.selected)
-    } else {
-        app.active
     };
 
     let workspace_entries = workspace_list_entries_expanded(app);
@@ -353,18 +343,9 @@ pub(crate) fn agent_panel_list_entries(
                     in_collapsed_folder = false;
                 }
                 if *foldered && in_collapsed_folder {
-                    // Mirror the spaces panel: hidden members stay hidden
-                    // except the active (or selected) one, shown un-indented.
-                    if visible_ws_idx != Some(*ws_idx) || !ws_has_agents(*ws_idx) {
-                        continue;
-                    }
-                    rows.push(AgentPanelListEntry::SpaceHeader {
-                        ws_idx: *ws_idx,
-                        indented: false,
-                        foldered: true,
-                        thin: false,
-                    });
-                    extend_agent_rows(&mut rows, *ws_idx);
+                    // Mirror the spaces panel: a collapsed folder hides all
+                    // member rows; the folder header carries the active
+                    // indication instead.
                     continue;
                 }
                 let thin = !ws_has_agents(*ws_idx);
@@ -593,6 +574,22 @@ pub(crate) fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], i
     )
 }
 
+/// Whether `entry` is the folder header row for `folder_id`.
+pub(crate) fn entry_is_folder_header(
+    app: &AppState,
+    entry: &WorkspaceListEntry,
+    folder_id: &str,
+) -> bool {
+    matches!(
+        entry,
+        WorkspaceListEntry::FolderHeader { order_idx }
+            if matches!(
+                app.space_order.get(*order_idx),
+                Some(crate::folder::SpaceOrderEntry::Folder(folder)) if folder.id == folder_id
+            )
+    )
+}
+
 pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested: usize) -> usize {
     let ws_area = workspace_list_rect(area, app.sidebar_section_split);
     let body = workspace_list_body_rect(ws_area, false);
@@ -767,15 +764,10 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
                         continue;
                     }
                     if folder_collapsed {
-                        // Mirror worktree-group collapse: hidden members stay
-                        // hidden except the active (or selected) one.
-                        if visible_group_idx == Some(ws_idx) {
-                            entries.push(WorkspaceListEntry::Workspace {
-                                ws_idx,
-                                indented: false,
-                                foldered: true,
-                            });
-                        }
+                        // Unlike worktree-group collapse, a collapsed folder
+                        // hides all members unconditionally; the folder
+                        // header carries the active/selected highlight
+                        // instead (see `collapsed_folder_header_highlight`).
                         continue;
                     }
                     emit_workspace(ws_idx, true, &mut emitted_groups, &mut entries);
@@ -1216,6 +1208,36 @@ fn workspace_selection_background(p: &Palette, is_active: bool) -> Color {
         p.active_row_bg
     } else {
         p.selection_bg
+    }
+}
+
+/// Highlight carried by a collapsed folder header standing in for its hidden
+/// members: like VSCode lighting up a collapsed folder that contains the
+/// open file. An expanded folder never highlights — its member rows carry
+/// the highlight themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct FolderHeaderHighlight {
+    /// The Navigate-mode selected space is hidden inside the folder.
+    pub selected: bool,
+    /// The active space is hidden inside the folder.
+    pub active: bool,
+}
+
+pub(crate) fn collapsed_folder_header_highlight(
+    app: &AppState,
+    folder: &crate::folder::Folder,
+) -> FolderHeaderHighlight {
+    if !app.collapsed_folder_ids.contains(&folder.id) {
+        return FolderHeaderHighlight::default();
+    }
+    let contains = |ws_idx: usize| {
+        app.workspaces
+            .get(ws_idx)
+            .is_some_and(|ws| folder.members.contains(&ws.id))
+    };
+    FolderHeaderHighlight {
+        selected: matches!(app.mode, Mode::Navigate) && contains(app.selected),
+        active: app.active.is_some_and(contains),
     }
 }
 
@@ -1817,14 +1839,24 @@ fn render_workspace_list(
         };
         let is_dragged = dragged_folder_id == Some(header.folder_id.as_str());
         let is_drop_target = drop_into_folder_id == Some(header.folder_id.as_str());
-        if is_dragged {
+        let highlight = collapsed_folder_header_highlight(app, folder);
+        if highlight.selected || highlight.active || is_dragged {
+            let bg = if highlight.selected {
+                workspace_selection_background(p, highlight.active)
+            } else if is_dragged {
+                p.surface1
+            } else {
+                p.active_row_bg
+            };
             let buf = frame.buffer_mut();
             for x in header.rect.x..header.rect.x + header.rect.width {
-                buf[(x, header.rect.y)].set_style(Style::default().bg(p.surface1));
+                buf[(x, header.rect.y)].set_style(Style::default().bg(bg));
             }
         }
         let name_style = if is_drop_target {
             Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+        } else if highlight.selected || highlight.active {
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
         };
@@ -2129,17 +2161,28 @@ fn render_agent_detail(
                 if let Some(crate::folder::SpaceOrderEntry::Folder(folder)) =
                     app.space_order.get(*order_idx)
                 {
+                    // A collapsed folder hides all member rows; its header
+                    // indicates a hidden active space, like the spaces panel.
+                    let highlight = collapsed_folder_header_highlight(app, folder);
+                    let row_style = if highlight.active {
+                        Style::default().bg(p.active_row_bg)
+                    } else {
+                        Style::default()
+                    };
+                    let name_style = if highlight.active {
+                        Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
+                    };
                     // Reserve the gutter, chevron, and gap cells so the name
                     // never runs into the collapse affordance.
                     let name = truncate_end(&folder.name, body.width.saturating_sub(3) as usize);
                     frame.render_widget(
                         Paragraph::new(Line::from(vec![
                             Span::raw("   "),
-                            Span::styled(
-                                name,
-                                Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD),
-                            ),
-                        ])),
+                            Span::styled(name, name_style),
+                        ]))
+                        .style(row_style),
                         Rect::new(body.x, row_y, body.width, 1),
                     );
                     let collapsed = app.collapsed_folder_ids.contains(&folder.id);
@@ -2187,8 +2230,20 @@ fn render_agent_detail(
                     // blank cells so sibling names stay aligned).
                     spans.push(Span::raw("  "));
                     let prefix_width = space_header_prefix_width(*indented, *foldered);
+                    let collapsed = !*thin && app.collapsed_agent_space_ids.contains(&ws.id);
+                    // A collapsed agent list hides all rows; the header
+                    // indicates the hidden active agent, like a collapsed
+                    // folder header.
+                    let indicates_active = collapsed && app.active == Some(*ws_idx);
+                    let row_style = if indicates_active {
+                        Style::default().bg(p.active_row_bg)
+                    } else {
+                        Style::default()
+                    };
                     let name_style = if *thin {
                         Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
+                    } else if indicates_active {
+                        Style::default().fg(p.text).add_modifier(Modifier::BOLD)
                     } else {
                         // Space header names carry the same weight as folder
                         // headers, foldered or not; only their agent rows
@@ -2200,12 +2255,11 @@ fn render_agent_detail(
                         name_style,
                     ));
                     frame.render_widget(
-                        Paragraph::new(Line::from(spans)),
+                        Paragraph::new(Line::from(spans)).style(row_style),
                         Rect::new(body.x, row_y, body.width, 1),
                     );
                     // Thin ancestor headers have no agent list to collapse.
                     if !*thin {
-                        let collapsed = app.collapsed_agent_space_ids.contains(&ws.id);
                         render_collapse_chevron(
                             frame,
                             collapsed,
@@ -2544,12 +2598,15 @@ mod tests {
         let one_id = app.workspaces[0].id.clone();
         app.collapsed_agent_space_ids.insert(one_id);
         let buffer = render(&app);
-        // Rows: header(one) with hidden active-pane exception... the active
-        // pane's row stays visible, so "one" keeps an expanded list; use the
-        // collapsed folder chevron and the collapsed space of a non-active
-        // workspace below.
+        // Rows: header(one) with its agent list hidden, folder(work) with
+        // its members hidden.
         assert_eq!(
-            buffer[(top_level_chevron_x, body.y + 2)].symbol(),
+            buffer[(top_level_chevron_x, body.y)].symbol(),
+            "▸",
+            "the collapsed space header shows a collapsed chevron"
+        );
+        assert_eq!(
+            buffer[(top_level_chevron_x, body.y + 1)].symbol(),
             "▸",
             "the collapsed folder header shows a collapsed chevron"
         );
@@ -2569,6 +2626,103 @@ mod tests {
             "",
             "the collapsed space hides its agent rows"
         );
+    }
+
+    #[test]
+    fn folder_view_collapsed_folder_header_indicates_hidden_active_space() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        let member = app.workspaces[1].id.clone();
+        let folder_id = app.create_folder("work").expect("create folder");
+        app.assign_workspace_to_folder(&member, Some(&folder_id), None)
+            .expect("assign");
+        // Canonical order: one, [work: two]
+        app.ensure_test_terminals();
+        app.mode = Mode::Terminal;
+        app.active = Some(1);
+        for ws_idx in 0..app.workspaces.len() {
+            set_root_agent(&mut app, ws_idx, Agent::Pi);
+        }
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Folders;
+        app.sidebar_agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
+        app.sidebar_agents.row_gap = 0;
+        app.collapsed_folder_ids.insert(folder_id);
+
+        let area = Rect::new(0, 0, 26, 20);
+        let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+        let body = agent_panel_body_rect(agent_area, false);
+
+        // Rows: header(one), pi, folder(work) with every member row hidden.
+        assert_eq!(
+            row_text(buffer, body.y + 3, 25),
+            "",
+            "a collapsed folder hides all member rows, the active space included"
+        );
+        let name_x = find_symbol_x(buffer, body.y + 2, body.width, "w");
+        let header = buffer[(name_x, body.y + 2)].style();
+        assert_eq!(
+            header.bg,
+            Some(app.palette.active_row_bg),
+            "the folder header indicates the hidden active space"
+        );
+        assert_eq!(header.fg, Some(app.palette.text));
+    }
+
+    #[test]
+    fn folder_view_collapsed_space_header_indicates_hidden_active_agent() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.ensure_test_terminals();
+        app.mode = Mode::Terminal;
+        app.active = Some(0);
+        for ws_idx in 0..app.workspaces.len() {
+            set_root_agent(&mut app, ws_idx, Agent::Pi);
+        }
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Folders;
+        app.sidebar_agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
+        app.sidebar_agents.row_gap = 0;
+        let one_id = app.workspaces[0].id.clone();
+        app.collapsed_agent_space_ids.insert(one_id);
+
+        let area = Rect::new(0, 0, 26, 20);
+        let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let (_, agent_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+        let body = agent_panel_body_rect(agent_area, false);
+
+        // Rows: header(one) with its agent list hidden, header(two), pi.
+        let two_row = row_text(buffer, body.y + 1, 25);
+        assert!(
+            two_row.starts_with(" ▾ two"),
+            "the collapsed space hides its agent rows: {two_row:?}"
+        );
+        let name_x = find_symbol_x(buffer, body.y, body.width, "o");
+        let header = buffer[(name_x, body.y)].style();
+        assert_eq!(
+            header.bg,
+            Some(app.palette.active_row_bg),
+            "the space header indicates the hidden active agent"
+        );
+        assert_eq!(header.fg, Some(app.palette.text));
+
+        // The inactive space's collapsed header stays unhighlighted.
+        app.active = Some(1);
+        let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let header = buffer[(name_x, body.y)].style();
+        assert_eq!(header.bg, Some(app.palette.sidebar_bg));
+        assert_eq!(header.fg, Some(app.palette.subtext0));
     }
 
     #[test]
@@ -2835,6 +2989,121 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         assert_eq!(
             terminal.backend().buffer()[(workspace_area.x, workspace_area.y)].bg,
             app.palette.selection_bg
+        );
+    }
+
+    /// Loose "one" plus folder "work" containing "two". Canonical order:
+    /// one, [work: two] — ws_idx 0 = one, 1 = two.
+    fn folder_highlight_state() -> (crate::app::state::AppState, String) {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        let member = app.workspaces[1].id.clone();
+        let folder_id = app.create_folder("work").expect("create folder");
+        app.assign_workspace_to_folder(&member, Some(&folder_id), None)
+            .expect("assign");
+        app.mode = Mode::Terminal;
+        (app, folder_id)
+    }
+
+    #[test]
+    fn collapsed_folder_header_highlight_tracks_hidden_active_and_selected() {
+        let (mut app, folder_id) = folder_highlight_state();
+        app.active = Some(1);
+        let folder = app.folder(&folder_id).expect("folder").clone();
+
+        // Expanded: the member row carries the highlight, not the header.
+        assert_eq!(
+            collapsed_folder_header_highlight(&app, &folder),
+            FolderHeaderHighlight::default()
+        );
+
+        app.collapsed_folder_ids.insert(folder_id.clone());
+        assert_eq!(
+            collapsed_folder_header_highlight(&app, &folder),
+            FolderHeaderHighlight {
+                selected: false,
+                active: true,
+            }
+        );
+
+        // The Navigate-mode selection inside the folder lights the header.
+        app.mode = Mode::Navigate;
+        app.selected = 1;
+        app.active = None;
+        assert_eq!(
+            collapsed_folder_header_highlight(&app, &folder),
+            FolderHeaderHighlight {
+                selected: true,
+                active: false,
+            }
+        );
+
+        // Selection means nothing outside Navigate mode.
+        app.mode = Mode::Terminal;
+        assert_eq!(
+            collapsed_folder_header_highlight(&app, &folder),
+            FolderHeaderHighlight::default()
+        );
+
+        // Active/selected spaces outside the folder never light the header.
+        app.mode = Mode::Navigate;
+        app.selected = 0;
+        app.active = Some(0);
+        assert_eq!(
+            collapsed_folder_header_highlight(&app, &folder),
+            FolderHeaderHighlight::default()
+        );
+    }
+
+    #[test]
+    fn collapsed_folder_header_carries_active_space_background() {
+        let (mut app, folder_id) = folder_highlight_state();
+        app.active = Some(1);
+        app.collapsed_folder_ids.insert(folder_id);
+
+        let area = Rect::new(0, 0, 26, 20);
+        let (cards, headers) = compute_workspace_list_areas(&app, area);
+        app.view.workspace_card_areas = cards;
+        app.view.folder_header_areas = headers;
+        let header_row = app.view.folder_header_areas[0].rect.y;
+        let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        assert_eq!(
+            buffer[(0, header_row)].bg,
+            app.palette.active_row_bg,
+            "the collapsed folder header carries the active-space background"
+        );
+        let name = buffer[(find_symbol_x(buffer, header_row, 25, "w"), header_row)].style();
+        assert_eq!(name.fg, Some(app.palette.text));
+        assert!(name.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn collapsed_folder_header_carries_navigate_selection_background() {
+        let (mut app, folder_id) = folder_highlight_state();
+        app.mode = Mode::Navigate;
+        app.selected = 1;
+        app.active = None;
+        app.collapsed_folder_ids.insert(folder_id);
+
+        let area = Rect::new(0, 0, 26, 20);
+        let (cards, headers) = compute_workspace_list_areas(&app, area);
+        app.view.workspace_card_areas = cards;
+        app.view.folder_header_areas = headers;
+        let header_row = app.view.folder_header_areas[0].rect.y;
+        let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        assert_eq!(
+            terminal.backend().buffer()[(0, header_row)].bg,
+            app.palette.selection_bg,
+            "the collapsed folder header carries the Navigate selection background"
         );
     }
 
@@ -3483,7 +3752,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn folder_view_collapsed_folder_keeps_active_space_visible() {
+    fn folder_view_collapsed_folder_hides_active_space_members() {
         let (mut app, folder_id) = collapse_projection_state();
         app.active = Some(1);
         app.collapsed_folder_ids.insert(folder_id);
@@ -3502,15 +3771,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 },
                 AgentPanelListEntry::Agent { entry_idx: 0 },
                 AgentPanelListEntry::FolderHeader { order_idx: 1 },
-                AgentPanelListEntry::SpaceHeader {
-                    ws_idx: 1,
-                    indented: false,
-                    foldered: true,
-                    thin: false,
-                },
-                AgentPanelListEntry::Agent { entry_idx: 1 },
             ],
-            "the active member stays visible inside a collapsed folder, like the spaces panel"
+            "a collapsed folder hides all members, the active space included"
+        );
+        assert_eq!(
+            entries.len(),
+            2,
+            "hidden agents stay in the flat agent sequence"
         );
     }
 
@@ -3584,7 +3851,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn folder_view_collapsed_space_keeps_active_pane_row_visible() {
+    fn folder_view_collapsed_space_hides_active_pane_row() {
         let mut ws = Workspace::test_new("one");
         let root = ws.tabs[0].root_pane;
         let second = ws.test_split(ratatui::layout::Direction::Horizontal);
@@ -3608,26 +3875,21 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let entries = agent_panel_entries(&app);
         let rows = agent_panel_list_entries(&app, &entries);
 
-        let focused_entry = entries
-            .iter()
-            .position(|entry| entry.pane_id == root)
-            .expect("focused pane entry");
         assert_eq!(
             rows,
-            vec![
-                AgentPanelListEntry::SpaceHeader {
-                    ws_idx: 0,
-                    indented: false,
-                    foldered: false,
-                    thin: false,
-                },
-                AgentPanelListEntry::Agent {
-                    entry_idx: focused_entry,
-                },
-            ],
-            "the active pane's row stays visible inside a collapsed space"
+            vec![AgentPanelListEntry::SpaceHeader {
+                ws_idx: 0,
+                indented: false,
+                foldered: false,
+                thin: false,
+            }],
+            "a collapsed space hides all agent rows, the active pane's included"
         );
-        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries.len(),
+            2,
+            "hidden agents stay in the flat agent sequence"
+        );
     }
 
     #[test]
@@ -3950,6 +4212,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         // Collapsed folder: the hidden agent maps to the folder header row.
         app.collapsed_agent_space_ids.clear();
         app.collapsed_folder_ids.insert(folder_id);
+        assert_eq!(agent_panel_row_for_entry(&app, 1), 2);
+
+        // Even the active space's agent maps to the folder header once the
+        // folder hides all members.
+        app.active = Some(1);
         assert_eq!(agent_panel_row_for_entry(&app, 1), 2);
     }
 
@@ -5230,7 +5497,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn collapsed_folder_keeps_active_member_visible() {
+    fn collapsed_folder_hides_active_member() {
         let mut app = AppState::test_new();
         app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
         let member = app.workspaces[1].id.clone();
@@ -5251,17 +5518,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     foldered: false,
                 },
                 WorkspaceListEntry::FolderHeader { order_idx: 1 },
-                WorkspaceListEntry::Workspace {
-                    ws_idx: 1,
-                    indented: false,
-                    foldered: true,
-                },
-            ]
+            ],
+            "a collapsed folder hides all members, the active one included"
         );
     }
 
     #[test]
-    fn collapsed_folder_keeps_selected_member_visible_in_navigate_mode() {
+    fn collapsed_folder_hides_selected_member_in_navigate_mode() {
         let mut app = AppState::test_new();
         app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
         let member = app.workspaces[1].id.clone();
@@ -5282,12 +5545,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     foldered: false,
                 },
                 WorkspaceListEntry::FolderHeader { order_idx: 1 },
-                WorkspaceListEntry::Workspace {
-                    ws_idx: 1,
-                    indented: false,
-                    foldered: true,
-                },
-            ]
+            ],
+            "a collapsed folder hides all members, the selected one included"
         );
     }
 

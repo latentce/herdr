@@ -611,6 +611,22 @@ impl AppState {
         crate::folder::folder_id_of_workspace(&self.space_order, workspace_id)
     }
 
+    /// The collapsed folder hiding the given workspace's spaces-panel row,
+    /// if any. A collapsed folder hides all of its members, so membership
+    /// alone decides.
+    pub(crate) fn collapsed_folder_containing(&self, ws_idx: usize) -> Option<&Folder> {
+        let ws_id = self.workspaces.get(ws_idx)?.id.as_str();
+        self.space_order.iter().find_map(|entry| match entry {
+            SpaceOrderEntry::Folder(folder)
+                if self.collapsed_folder_ids.contains(&folder.id)
+                    && folder.members.iter().any(|member| member == ws_id) =>
+            {
+                Some(folder)
+            }
+            _ => None,
+        })
+    }
+
     /// Move targets for the given workspace's "Move to folder ▸" menu:
     /// `(folder_id, name)` in canonical top-level order, excluding the folder
     /// the workspace is already in.

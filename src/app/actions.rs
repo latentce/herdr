@@ -1191,13 +1191,32 @@ impl AppState {
         }
 
         let entries = crate::ui::workspace_list_entries(self);
-        let Some(target_entry_idx) = entries.iter().position(|entry| {
+        let ws_entry_idx = entries.iter().position(|entry| {
             matches!(
                 entry,
                 crate::ui::WorkspaceListEntry::Workspace { ws_idx, .. } if *ws_idx == idx
             )
-        }) else {
-            return;
+        });
+        // A space hidden inside a collapsed folder has no row of its own;
+        // its folder header carries the highlight, so scroll that into view
+        // instead.
+        let (target_entry_idx, folder_id) = match ws_entry_idx {
+            Some(entry_idx) => (entry_idx, None),
+            None => {
+                let Some(folder_id) = self
+                    .collapsed_folder_containing(idx)
+                    .map(|folder| folder.id.clone())
+                else {
+                    return;
+                };
+                let Some(entry_idx) = entries
+                    .iter()
+                    .position(|entry| crate::ui::entry_is_folder_header(self, entry, &folder_id))
+                else {
+                    return;
+                };
+                (entry_idx, Some(folder_id))
+            }
         };
 
         self.workspace_scroll = crate::ui::normalized_workspace_scroll(
@@ -1205,8 +1224,17 @@ impl AppState {
             self.view.sidebar_rect,
             self.workspace_scroll,
         );
-        let mut cards = crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect);
-        if cards.iter().any(|card| card.ws_idx == idx) {
+        let target_visible =
+            |cards: &[crate::app::state::WorkspaceCardArea],
+             headers: &[crate::app::state::FolderHeaderArea]| {
+                match folder_id.as_deref() {
+                    None => cards.iter().any(|card| card.ws_idx == idx),
+                    Some(folder_id) => headers.iter().any(|header| header.folder_id == folder_id),
+                }
+            };
+        let (mut cards, mut headers) =
+            crate::ui::compute_workspace_list_areas(self, self.view.sidebar_rect);
+        if target_visible(&cards, &headers) {
             return;
         }
 
@@ -1215,7 +1243,7 @@ impl AppState {
             return;
         }
 
-        while !cards.iter().any(|card| card.ws_idx == idx) {
+        while !target_visible(&cards, &headers) {
             let previous_scroll = self.workspace_scroll;
             self.workspace_scroll = self.workspace_scroll.saturating_add(1);
             if self.workspace_scroll == previous_scroll {
@@ -1229,8 +1257,9 @@ impl AppState {
             if self.workspace_scroll == previous_scroll {
                 break;
             }
-            cards = crate::ui::compute_workspace_card_areas(self, self.view.sidebar_rect);
-            if cards.is_empty() {
+            (cards, headers) =
+                crate::ui::compute_workspace_list_areas(self, self.view.sidebar_rect);
+            if cards.is_empty() && headers.is_empty() {
                 break;
             }
         }
@@ -1327,45 +1356,84 @@ impl AppState {
             return;
         }
         let order = self.visible_workspace_order();
-        let current_pos = order
-            .iter()
-            .position(|idx| *idx == self.selected)
-            .unwrap_or(0);
-        let target_pos = current_pos
-            .saturating_add_signed(delta)
-            .min(order.len().saturating_sub(1));
+        let target_pos = match order.iter().position(|idx| *idx == self.selected) {
+            Some(current_pos) => current_pos.saturating_add_signed(delta),
+            // The selection is hidden inside a collapsed folder: anchor
+            // movement at the gap the folder occupies, so the first step
+            // lands on the visible neighbor in the travel direction.
+            None => {
+                let gap = self.folder_hidden_gap_position(self.selected);
+                if delta > 0 {
+                    gap.saturating_add_signed(delta - 1)
+                } else {
+                    gap.saturating_add_signed(delta)
+                }
+            }
+        }
+        .min(order.len().saturating_sub(1));
         if let Some(ws_idx) = order.get(target_pos).copied() {
             self.selected = ws_idx;
             self.ensure_workspace_visible(ws_idx);
         }
     }
 
-    #[cfg(test)]
-    pub fn next_workspace(&mut self) {
-        if self.workspaces.is_empty() {
-            return;
+    /// The workspace `delta` visible steps away from the current one (the
+    /// active space, or the selection when nothing is active), wrapping
+    /// around the visible order. A current space hidden inside a collapsed
+    /// folder anchors at the folder's gap, so the first step lands on its
+    /// visible neighbor in the travel direction.
+    pub(crate) fn relative_visible_workspace(&self, delta: isize) -> Option<usize> {
+        let order = self.visible_workspace_order();
+        if order.is_empty() {
+            return None;
         }
         let current = self.active.unwrap_or(self.selected);
-        let order = self.visible_workspace_order();
-        let current_pos = order.iter().position(|idx| *idx == current).unwrap_or(0);
-        let next = order[(current_pos + 1) % order.len()];
-        self.switch_workspace(next);
+        let next = match order.iter().position(|idx| *idx == current) {
+            Some(current_pos) => (current_pos as isize + delta).rem_euclid(order.len() as isize),
+            None => {
+                let gap = self.folder_hidden_gap_position(current) as isize;
+                let step = if delta > 0 { delta - 1 } else { delta };
+                (gap + step).rem_euclid(order.len() as isize)
+            }
+        } as usize;
+        order.get(next).copied()
+    }
+
+    /// Position in the visible workspace order where the collapsed folder
+    /// hiding the given workspace sits: the number of visible spaces above
+    /// its folder header. Falls back to the top when the workspace is not
+    /// hidden by a collapsed folder.
+    fn folder_hidden_gap_position(&self, ws_idx: usize) -> usize {
+        let Some(folder_id) = self
+            .collapsed_folder_containing(ws_idx)
+            .map(|folder| folder.id.clone())
+        else {
+            return 0;
+        };
+        let mut visible_before = 0usize;
+        for entry in crate::ui::workspace_list_entries(self) {
+            if crate::ui::entry_is_folder_header(self, &entry, &folder_id) {
+                return visible_before;
+            }
+            if matches!(entry, crate::ui::WorkspaceListEntry::Workspace { .. }) {
+                visible_before += 1;
+            }
+        }
+        0
+    }
+
+    #[cfg(test)]
+    pub fn next_workspace(&mut self) {
+        if let Some(next) = self.relative_visible_workspace(1) {
+            self.switch_workspace(next);
+        }
     }
 
     #[cfg(test)]
     pub fn previous_workspace(&mut self) {
-        if self.workspaces.is_empty() {
-            return;
+        if let Some(prev) = self.relative_visible_workspace(-1) {
+            self.switch_workspace(prev);
         }
-        let current = self.active.unwrap_or(self.selected);
-        let order = self.visible_workspace_order();
-        let current_pos = order.iter().position(|idx| *idx == current).unwrap_or(0);
-        let prev = if current_pos == 0 {
-            order[order.len() - 1]
-        } else {
-            order[current_pos - 1]
-        };
-        self.switch_workspace(prev);
     }
 
     pub fn move_workspace(&mut self, source_idx: usize, insert_idx: usize) -> bool {
@@ -4664,6 +4732,98 @@ mod tests {
             .workspace_card_areas
             .iter()
             .any(|card| card.ws_idx == 7));
+    }
+
+    #[test]
+    fn navigate_moves_from_folder_hidden_selection_to_visible_neighbors() {
+        let mut state = app_with_workspaces(&["a", "b", "c", "d"]);
+        let b_id = state.workspaces[1].id.clone();
+        let c_id = state.workspaces[2].id.clone();
+        let folder_id = state.create_folder("work").expect("create folder");
+        state
+            .assign_workspace_to_folder(&b_id, Some(&folder_id), None)
+            .expect("assign b");
+        state
+            .assign_workspace_to_folder(&c_id, Some(&folder_id), None)
+            .expect("assign c");
+        state.move_folder(&folder_id, 1).expect("move folder");
+        // Canonical order: a, [work: b, c], d — ws indices a=0, b=1, c=2, d=3.
+        state.mode = Mode::Navigate;
+        state.active = None;
+        state.collapsed_folder_ids.insert(folder_id);
+
+        // The selection is hidden inside the collapsed folder: movement
+        // anchors at the folder's position instead of restarting at the top.
+        state.selected = 1;
+        state.move_selected_workspace_by_visible_delta(1);
+        assert_eq!(
+            state.selected, 3,
+            "down lands on the space after the folder"
+        );
+
+        state.selected = 2;
+        state.move_selected_workspace_by_visible_delta(-1);
+        assert_eq!(state.selected, 0, "up lands on the space before the folder");
+    }
+
+    #[test]
+    fn workspace_cycling_anchors_at_the_folder_hiding_the_active_space() {
+        let mut state = app_with_workspaces(&["a", "b", "c", "d"]);
+        let b_id = state.workspaces[1].id.clone();
+        let c_id = state.workspaces[2].id.clone();
+        let folder_id = state.create_folder("work").expect("create folder");
+        state
+            .assign_workspace_to_folder(&b_id, Some(&folder_id), None)
+            .expect("assign b");
+        state
+            .assign_workspace_to_folder(&c_id, Some(&folder_id), None)
+            .expect("assign c");
+        state.move_folder(&folder_id, 1).expect("move folder");
+        // Canonical order: a, [work: b, c], d — ws indices a=0, b=1, c=2, d=3.
+        state.active = Some(1);
+        state.selected = 1;
+        state.collapsed_folder_ids.insert(folder_id);
+
+        assert_eq!(
+            state.relative_visible_workspace(1),
+            Some(3),
+            "next cycles to the space after the hiding folder"
+        );
+        assert_eq!(
+            state.relative_visible_workspace(-1),
+            Some(0),
+            "previous cycles to the space before the hiding folder"
+        );
+    }
+
+    #[test]
+    fn switch_to_folder_hidden_workspace_scrolls_its_folder_header_into_view() {
+        let mut state =
+            app_with_workspaces(&["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"]);
+        let last_id = state.workspaces[11].id.clone();
+        let folder_id = state.create_folder("work").expect("create folder");
+        state
+            .assign_workspace_to_folder(&last_id, Some(&folder_id), None)
+            .expect("assign");
+        // Canonical order: a..k, [work: l]
+        state.collapsed_folder_ids.insert(folder_id.clone());
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 80, 14));
+
+        state.switch_workspace(11);
+        crate::ui::compute_view(&mut state, ratatui::layout::Rect::new(0, 0, 80, 14));
+
+        assert!(
+            state.workspace_scroll > 0,
+            "the folder header must start out of view for this test to bite"
+        );
+        assert!(
+            state
+                .view
+                .folder_header_areas
+                .iter()
+                .any(|header| header.folder_id == folder_id),
+            "the collapsed folder header carrying the active highlight scrolls into view"
+        );
     }
 
     #[test]

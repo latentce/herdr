@@ -238,6 +238,12 @@ impl App {
                     leave_navigate_mode(&mut self.state);
                 }
             }
+            NavigateAction::SwitchToSelectedWorkspace => {
+                if self.state.selected < self.state.workspaces.len() {
+                    self.focus_workspace_idx_via_api(self.state.selected);
+                    leave_navigate_mode(&mut self.state);
+                }
+            }
             NavigateAction::SwitchTab(idx) => {
                 if self
                     .state
@@ -261,13 +267,13 @@ impl App {
                 self.state.mode = Mode::Navigate;
             }
             NavigateAction::PreviousWorkspace => {
-                if let Some(ws_idx) = self.relative_visible_workspace(-1) {
+                if let Some(ws_idx) = self.state.relative_visible_workspace(-1) {
                     self.focus_workspace_idx_via_api(ws_idx);
                     leave_navigate_mode(&mut self.state);
                 }
             }
             NavigateAction::NextWorkspace => {
-                if let Some(ws_idx) = self.relative_visible_workspace(1) {
+                if let Some(ws_idx) = self.state.relative_visible_workspace(1) {
                     self.focus_workspace_idx_via_api(ws_idx);
                     leave_navigate_mode(&mut self.state);
                 }
@@ -741,17 +747,6 @@ impl App {
         let target =
             crate::layout::find_in_direction(focused, direction, &self.state.view.pane_infos)?;
         Some((ws_idx, focused.id, target))
-    }
-
-    fn relative_visible_workspace(&self, delta: isize) -> Option<usize> {
-        let order = self.state.visible_workspace_order();
-        if order.is_empty() {
-            return None;
-        }
-        let current = self.state.active.unwrap_or(self.state.selected);
-        let current_pos = order.iter().position(|idx| *idx == current).unwrap_or(0);
-        let next = (current_pos as isize + delta).rem_euclid(order.len() as isize) as usize;
-        order.get(next).copied()
     }
 
     fn active_tab_move(&self, delta: isize) -> Option<(usize, usize, usize)> {
@@ -1296,13 +1291,8 @@ fn navigate_reserved_action_for_key(state: &AppState, key: &TerminalKey) -> Opti
     if modifiers.is_empty() {
         match code {
             KeyCode::Enter => {
-                return (!state.workspaces.is_empty()).then_some(NavigateAction::SwitchWorkspace(
-                    state
-                        .visible_workspace_order()
-                        .iter()
-                        .position(|idx| *idx == state.selected)
-                        .unwrap_or(state.selected),
-                ));
+                return (!state.workspaces.is_empty())
+                    .then_some(NavigateAction::SwitchToSelectedWorkspace);
             }
             KeyCode::Tab => return Some(NavigateAction::CyclePaneNext),
             KeyCode::BackTab => return Some(NavigateAction::CyclePanePrevious),
@@ -1380,6 +1370,10 @@ pub(crate) enum NavigateAction {
     RenameWorkspace,
     CloseWorkspace,
     SwitchWorkspace(usize),
+    /// Switch to `state.selected` directly (Navigate-mode Enter). Unlike
+    /// `SwitchWorkspace`, this does not go through visible positions, so it
+    /// also reaches a selection hidden inside a collapsed folder.
+    SwitchToSelectedWorkspace,
     SwitchTab(usize),
     FocusAgent(usize),
     WorkspacePicker,
@@ -1430,6 +1424,7 @@ fn copy_mode_survives_prefix_action(action: NavigateAction) -> bool {
     matches!(
         action,
         NavigateAction::SwitchWorkspace(_)
+            | NavigateAction::SwitchToSelectedWorkspace
             | NavigateAction::SwitchTab(_)
             | NavigateAction::FocusAgent(_)
             | NavigateAction::PreviousWorkspace
@@ -1684,6 +1679,12 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::SwitchWorkspace(idx) => {
             if let Some(ws_idx) = state.workspace_at_visible_position(idx) {
                 state.switch_workspace(ws_idx);
+                leave_navigate_mode(state);
+            }
+        }
+        NavigateAction::SwitchToSelectedWorkspace => {
+            if state.selected < state.workspaces.len() {
+                state.switch_workspace(state.selected);
                 leave_navigate_mode(state);
             }
         }
@@ -2359,6 +2360,44 @@ mod tests {
 
         assert_eq!(state.active, Some(2));
         assert_eq!(state.selected, 2);
+    }
+
+    #[test]
+    fn navigate_enter_switches_to_selection_hidden_in_collapsed_folder() {
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        let mut state = state_with_workspaces(&["one", "two"]);
+        let member = state.workspaces[1].id.clone();
+        let folder_id = state.create_folder("work").expect("create folder");
+        state
+            .assign_workspace_to_folder(&member, Some(&folder_id), None)
+            .expect("assign");
+        // Canonical order: one, [work: two]
+        state.mode = Mode::Navigate;
+        state.active = Some(0);
+        state.selected = 1;
+        state.collapsed_folder_ids.insert(folder_id);
+
+        let action = navigate_reserved_action_for_key(
+            &state,
+            &TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        assert_eq!(
+            action,
+            Some(NavigateAction::SwitchToSelectedWorkspace),
+            "enter targets the selection directly, not a visible position"
+        );
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::SwitchToSelectedWorkspace,
+            ActionContext::Navigate,
+        );
+        assert_eq!(
+            state.active,
+            Some(1),
+            "enter activates the selection even while its folder hides it"
+        );
     }
 
     #[test]
