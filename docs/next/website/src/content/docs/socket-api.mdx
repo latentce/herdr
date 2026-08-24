@@ -101,6 +101,7 @@ Raw socket method names use dot notation:
 | Client | `client.window_title.set`, `client.window_title.clear` |
 | Session | `session.snapshot` |
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
+| Folder | `folder.create`, `folder.list`, `folder.rename`, `folder.assign`, `folder.move`, `folder.delete` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
@@ -409,6 +410,48 @@ Remove a linked checkout:
 Use at most one of `workspace_id` or `cwd` for `worktree.list`, `worktree.create`, and `worktree.open`; omit both to use the active workspace. Use exactly one of `path` or `branch` for `worktree.open`. Raw socket `cwd` and `path` values must be absolute; the CLI expands relative `--cwd` and `--path` values before sending requests. Workspace responses include optional `worktree` provenance when a workspace belongs to a Herdr worktree group. Worktree commands can emit `workspace.updated` when an existing workspace gains or changes worktree provenance.
 
 Worktree commands also emit lifecycle events. `worktree.create` emits `workspace.created`, `tab.created`, `pane.created`, and `worktree.created`. `worktree.open` emits `worktree.opened`, and it also emits workspace/tab/pane creation events when it opens a new Herdr workspace. `worktree.remove` emits `worktree.removed`; if the linked workspace is still open, it also emits `workspace.closed`.
+
+## Folders
+
+Folder methods organize the sidebar's space order. The server owns one
+top-level ordered sequence interleaving folders and loose workspaces, plus an
+ordered member list per folder. Every read reflects that canonical order:
+`folder.list` returns the folders and the top-level order, workspace
+lists follow the flattened order, and workspace records carry a nullable
+`folder_id`.
+
+```json
+{"id":"req_1","method":"folder.create","params":{"name":"projects"}}
+{"id":"req_2","method":"folder.list","params":{}}
+{"id":"req_3","method":"folder.rename","params":{"folder_id":"f1","name":"active"}}
+{"id":"req_4","method":"folder.assign","params":{"workspace_id":"w2","folder_id":"f1","position":0}}
+{"id":"req_5","method":"folder.move","params":{"folder_id":"f1","position":0}}
+{"id":"req_6","method":"folder.delete","params":{"folder_id":"f1"}}
+```
+
+`folder.create` returns the new folder's id. Names must contain visible text;
+duplicate names are allowed because the id is the identity.
+
+`folder.assign` moves a workspace into a folder, or back to the top level when
+`folder_id` is `null`. Assigning any worktree family member moves the whole
+family, and the response and event report all affected workspaces. The optional
+`position` is the final index of the affected block inside the target
+container: the folder's member list, or the top-level order (where a folder
+counts as one entry) when `folder_id` is `null`. Omitted positions append;
+out-of-range positions clamp to the end. Assigning to the current container
+with a position is a plain reorder inside it: a same-folder positional assign
+emits `folder.updated`, and a top-level assign with `folder_id: null` plus a
+position is a top-level reorder.
+
+`folder.move` repositions a folder within the top-level order and returns the
+effective position. `folder.delete` releases members back to the top level at
+the folder's former position in their previous relative order; it never closes
+workspaces. Empty folders are legitimate, persistable state.
+
+Folder collapse is per-client visual state and appears in no API payload.
+
+Folder methods emit `folder.created`, `folder.updated` (rename or member
+reorder), `folder.assigned`, `folder.moved`, and `folder.deleted` events.
 
 ## Agent view queries
 
@@ -824,6 +867,8 @@ updated `PaneLayoutSnapshot` for one tab. Clients that bootstrap with
 `workspace_id` and `tab_id`.
 
 Worktree event subscriptions include `worktree.created`, `worktree.opened`, and `worktree.removed`. Worktree events describe Git checkout lifecycle. `worktree.created` includes the opened `workspace` and created `worktree`. `worktree.opened` includes the target `workspace`, opened `worktree`, and `already_open`. `worktree.removed` includes the `workspace_id`, removed `worktree`, and `forced`.
+
+Folder event subscriptions include `folder.created`, `folder.updated`, `folder.deleted`, `folder.assigned`, and `folder.moved`. `folder.created` and `folder.updated` include the folder record with its ordered members. `folder.deleted` includes the released `workspace_ids`. `folder.assigned` includes the affected `workspace_ids` (the whole worktree family for family assigns) and the target `folder_id`, omitted for top-level assigns. `folder.moved` includes the `folder_id` and effective top-level `position`.
 
 Use `events.subscribe` for lifecycle events. Dedicated wait helpers are documented separately when a one-shot wait is supported.
 

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+- Spaces can now be organized into named folders in the sidebar: create, rename, and delete folders from right-click menus, move spaces by menu or drag-and-drop to exact positions, and drop a space onto a folder header to file it. Deleting a folder releases its members in place and never closes spaces.
+- Worktree families move as one unit when foldered: assigning or dragging any member moves the whole family, and new worktree children automatically join their family's folder.
+- Folders collapse and expand with a header chevron in both the spaces panel and the agents panel, with a shared collapse state that persists across restarts.
+- The agents panel gained a third `folders` ordering that mirrors the spaces panel's organization: agents nest under their space and folder, worktree families keep their nesting, and each space's agent list can be collapsed independently. The choice persists like the existing orderings and can be set as the startup default.
+- The socket API gained `folder.create`, `folder.list`, `folder.rename`, `folder.assign`, `folder.move`, and `folder.delete` methods with matching `folder.*` events; workspace records now carry a nullable `folder_id`, and the sidebar space order is a server-owned session fact that survives restarts.
+
 ## [0.8.2] - 2026-08-19
 
 ### Added
