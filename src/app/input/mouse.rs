@@ -963,12 +963,12 @@ impl AppState {
                 }
 
                 let workspace_press = self.workspace_presses.remove(&source_id);
-                // A folder press that never became a drag is an inert click:
-                // folder headers have no click action outside the chevron.
-                self.folder_presses.remove(&source_id);
+                // A folder press that never became a drag is a click: the
+                // whole header row toggles the folder's collapse.
+                let folder_press = self.folder_presses.remove(&source_id);
                 let tab_press = self.tab_presses.remove(&source_id);
                 if foreign_chrome_drag {
-                    return self.chrome_press_action(workspace_press, tab_press);
+                    return self.chrome_press_action(workspace_press, folder_press, tab_press);
                 }
 
                 match self.drag.take() {
@@ -1018,7 +1018,9 @@ impl AppState {
                         }
                     }
                     Some(_) => {}
-                    None => return self.chrome_press_action(workspace_press, tab_press),
+                    None => {
+                        return self.chrome_press_action(workspace_press, folder_press, tab_press)
+                    }
                 }
             }
 
@@ -1615,6 +1617,7 @@ impl AppState {
     fn chrome_press_action(
         &mut self,
         workspace_press: Option<WorkspacePressState>,
+        folder_press: Option<FolderPressState>,
         tab_press: Option<TabPressState>,
     ) -> Option<MouseAction> {
         if let Some(press) = workspace_press {
@@ -1622,6 +1625,11 @@ impl AppState {
             return Some(MouseAction::FocusWorkspace {
                 ws_idx: press.ws_idx,
             });
+        }
+        if let Some(press) = folder_press {
+            toggle_collapse(&mut self.collapsed_folder_ids, press.folder_id);
+            self.mark_session_dirty();
+            return None;
         }
         if let Some(press) = tab_press {
             if self.active == Some(press.ws_idx) {

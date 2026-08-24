@@ -690,47 +690,38 @@ impl AppState {
         }
     }
 
-    /// The collapse chevron hit (if any) at this cell of the agents panel:
-    /// a folder header's chevron toggles the shared folder collapse, a space
-    /// header's chevron toggles that space's agent-list collapse. Thin
-    /// ancestor headers have no agents of their own and expose no chevron.
+    /// The collapse hit (if any) at this cell of the agents panel: anywhere
+    /// on a folder header row toggles the shared folder collapse, anywhere
+    /// on a space header row toggles that space's agent-list collapse. Thin
+    /// ancestor headers have no agents of their own and stay inert.
     pub(super) fn agent_panel_collapse_target_at(
         &self,
         col: u16,
         row: u16,
     ) -> Option<AgentPanelCollapseTarget> {
-        let (list_row, row_y, body) = self.agent_panel_row_hit(row)?;
-        // The chevron leads the header row after its indent prefix; the
-        // indent depends on the header kind, so resolve it per row.
-        let (target, indent) = match &list_row {
+        let (list_row, _row_y, body) = self.agent_panel_row_hit(row)?;
+        if col < body.x || col >= body.x + body.width {
+            return None;
+        }
+        match &list_row {
             crate::ui::AgentPanelListEntry::FolderHeader { order_idx } => {
                 match self.space_order.get(*order_idx) {
-                    Some(crate::folder::SpaceOrderEntry::Folder(folder)) => (
-                        AgentPanelCollapseTarget::Folder(folder.id.clone()),
-                        crate::ui::AGENT_PANEL_HEADER_GUTTER,
-                    ),
-                    _ => return None,
+                    Some(crate::folder::SpaceOrderEntry::Folder(folder)) => {
+                        Some(AgentPanelCollapseTarget::Folder(folder.id.clone()))
+                    }
+                    _ => None,
                 }
             }
             crate::ui::AgentPanelListEntry::SpaceHeader {
                 ws_idx,
-                indented,
-                foldered,
                 thin: false,
+                ..
             } => {
                 let ws = self.workspaces.get(*ws_idx)?;
-                (
-                    AgentPanelCollapseTarget::Space(ws.id.clone()),
-                    crate::ui::space_header_chevron_indent(*indented, *foldered),
-                )
+                Some(AgentPanelCollapseTarget::Space(ws.id.clone()))
             }
-            _ => return None,
-        };
-        let chevron = crate::ui::agent_panel_header_chevron_rect(body, row_y, indent);
-        if chevron.width == 0 || row != chevron.y || col != chevron.x {
-            return None;
+            _ => None,
         }
-        Some(target)
     }
 
     /// The agents-panel display row under `row`, with the row's top y and the
@@ -772,11 +763,11 @@ impl AppState {
     }
 }
 
-/// A collapse chevron hit in the agents panel folder view.
+/// A collapse hit on a header row of the agents panel.
 pub(super) enum AgentPanelCollapseTarget {
-    /// A folder header's chevron: toggles the shared folder collapse.
+    /// A folder header row: toggles the shared folder collapse.
     Folder(String),
-    /// A space header's chevron: toggles that space's agent-list collapse.
+    /// A space header row: toggles that space's agent-list collapse.
     Space(String),
 }
 
@@ -1642,7 +1633,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_folder_header_row_does_not_toggle_collapse() {
+    fn clicking_folder_header_row_toggles_collapse() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
         let member = app.state.workspaces[1].id.clone();
@@ -1654,15 +1645,31 @@ mod tests {
         app.state.mode = Mode::Terminal;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
         let header = app.state.view.folder_header_areas[0].clone();
+        let (col, row) = (header.rect.x + 2, header.rect.y);
 
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            header.rect.x + 2,
-            header.rect.y,
-        ));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
 
+        // The press alone toggles nothing: it may still become a drag.
         assert!(!app.state.collapsed_folder_ids.contains(&folder_id));
         assert!(app.state.workspace_presses.is_empty());
+
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), col, row));
+
+        assert!(app.state.collapsed_folder_ids.contains(&folder_id));
+        assert!(app.state.folder_presses.is_empty());
+        // Collapse is purely visual: nothing closed, moved, or reordered.
+        assert_eq!(app.state.workspaces.len(), 2);
+        assert_eq!(
+            app.state.workspace_folder_id(&member),
+            Some(folder_id.as_str())
+        );
+        let snapshot = capture_snapshot(&app.state);
+        assert!(snapshot.collapsed_folder_ids.contains(&folder_id));
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), col, row));
+
+        assert!(!app.state.collapsed_folder_ids.contains(&folder_id));
     }
 
     /// Folder-view agents panel: loose "one" then folder "work" containing
@@ -1811,23 +1818,45 @@ mod tests {
     }
 
     #[test]
-    fn clicking_agents_panel_header_row_off_chevron_does_not_toggle() {
+    fn clicking_agents_panel_header_row_off_chevron_toggles() {
         let (mut app, folder_id) = folder_view_collapse_mouse_app();
         let two_id = app.state.workspaces[1].id.clone();
         let body = agent_panel_body(&app);
+        let folder_row = body.y + 2;
 
-        // The gap cell right after each header's chevron: folder header
-        // chevron at x+1, foldered space header chevron at x+3.
-        for (row, col) in [(body.y + 2, body.x + 2), (body.y + 3, body.x + 4)] {
-            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
-        }
+        // Anywhere on the folder header row (chevron at x+1) toggles the
+        // shared folder collapse, out to the row's last body cell.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x + body.width - 1,
+            folder_row,
+        ));
+        assert!(app.state.collapsed_folder_ids.contains(&folder_id));
 
+        // The collapsed folder header stays at the same row: toggle back.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x + 2,
+            folder_row,
+        ));
         assert!(!app.state.collapsed_folder_ids.contains(&folder_id));
-        assert!(!app.state.collapsed_agent_space_ids.contains(&two_id));
+
+        // Anywhere on the foldered space header row (chevron at x+3) toggles
+        // that space's agent-list collapse.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x + 4,
+            body.y + 3,
+        ));
+        assert!(app.state.collapsed_agent_space_ids.contains(&two_id));
+        assert!(
+            !app.state.collapsed_folder_ids.contains(&folder_id),
+            "agent-list collapse is independent of folder collapse"
+        );
     }
 
     #[test]
-    fn thin_ancestor_header_has_no_collapse_chevron() {
+    fn thin_ancestor_header_row_stays_inert() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("main"), Workspace::test_new("issue")];
         for (idx, checkout_path) in ["/repo/herdr", "/repo/herdr-issue"].into_iter().enumerate() {
@@ -1859,15 +1888,11 @@ mod tests {
         app.state.agent_panel_sort = AgentPanelSort::Folders;
         let body = agent_panel_body(&app);
         // The cell a loose header's leading chevron would occupy (after the
-        // gutter).
-        let chevron_col = body.x + 1;
-
+        // gutter), plus a cell further along the row.
         // Rows: thin header(main), header(issue), agent.
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            chevron_col,
-            body.y,
-        ));
+        for col in [body.x + 1, body.x + 5] {
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, body.y));
+        }
 
         assert!(
             app.state.collapsed_agent_space_ids.is_empty(),
