@@ -417,8 +417,9 @@ Folder methods organize the sidebar's space order. The server owns one
 top-level ordered sequence interleaving folders and loose workspaces, plus an
 ordered member list per folder. Every read reflects that canonical order:
 `folder.list` returns the folders and the top-level order, workspace
-lists follow the flattened order, and workspace records carry a nullable
-`folder_id`.
+lists follow the flattened order, and workspace records carry a `folder_id`
+when the workspace is in a folder (the field is omitted for loose
+workspaces).
 
 ```json
 {"id":"req_1","method":"folder.create","params":{"name":"projects"}}
