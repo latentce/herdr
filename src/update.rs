@@ -22,7 +22,11 @@ use std::time::{Duration, Instant};
 use interprocess::local_socket::traits::Stream as _;
 use serde::{Deserialize, Deserializer};
 
-const STABLE_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
+// Fork patch: stable updates come from this fork's releases
+// instead of the official herdr.dev manifest. The preview channel still
+// points at upstream.
+const STABLE_UPDATE_MANIFEST_URL: &str =
+    "https://github.com/latentce/herdr/releases/latest/download/latest.json";
 const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
 const HOMEBREW_FORMULA_API_URL: &str = "https://formulae.brew.sh/api/formula/herdr.json";
 const HERDR_UPDATE_COMMAND: &str = "herdr update";
@@ -200,6 +204,10 @@ struct UpdateManifest {
     /// Thin-client protocol spoken by this release, when advertised by the manifest.
     #[cfg(not(windows))]
     protocol: Option<u32>,
+    // Fork patch: per-base fork revision (the N in vX.Y.Z-fork.N). Absent or
+    // zero in upstream manifests.
+    #[serde(default)]
+    fork_revision: u64,
     notes: String,
     assets: BTreeMap<String, AssetRef>,
     #[serde(default)]
@@ -380,7 +388,13 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
     let latest = Version::parse(&manifest.version)
         .ok_or_else(|| format!("invalid version in update manifest: {}", manifest.version))?;
 
-    if !stable_channel_should_install(&latest, &current, crate::build_info::is_preview()) {
+    if !stable_channel_should_install(
+        &latest,
+        &current,
+        crate::build_info::is_preview(),
+        manifest.fork_revision,
+        installed_fork_revision(),
+    ) {
         return Ok(None); // up to date
     }
 
@@ -408,7 +422,12 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
         })?;
 
     Ok(Some(ReleaseInfo {
-        identity: latest.to_string(),
+        // Fork patch: show the full fork identity for fork builds.
+        identity: if manifest.fork_revision > 0 {
+            format!("{latest}-fork.{}", manifest.fork_revision)
+        } else {
+            latest.to_string()
+        },
         version: latest,
         channel: UpdateChannel::Stable,
         build_id: None,
@@ -427,8 +446,25 @@ fn stable_channel_should_install(
     latest: &Version,
     current: &Version,
     installed_is_preview: bool,
+    manifest_fork_revision: u64,
+    installed_fork_revision: u64,
 ) -> bool {
-    installed_is_preview || latest > current
+    installed_is_preview
+        || latest > current
+        // Fork patch: same upstream base, newer fork revision (vX.Y.Z-fork.N).
+        || (latest == current && manifest_fork_revision > installed_fork_revision)
+}
+
+// Fork patch: fork builds bake their revision through HERDR_BUILD_CHANNEL=fork
+// and HERDR_BUILD_ID=<n>; plain upstream builds count as revision 0.
+fn installed_fork_revision() -> u64 {
+    if crate::build_info::channel() == "fork" {
+        crate::build_info::build_id()
+            .and_then(|id| id.parse().ok())
+            .unwrap_or(0)
+    } else {
+        0
+    }
 }
 
 fn preview_display_version(base_version: &str, build_id: &str) -> String {
@@ -3502,13 +3538,33 @@ mod tests {
         assert!(stable_channel_should_install(
             &latest_stable,
             &installed_base,
-            true
+            true,
+            0,
+            0
         ));
         assert!(!stable_channel_should_install(
             &latest_stable,
             &installed_base,
-            false
+            false,
+            0,
+            0
         ));
+    }
+
+    // Fork patch: fork revision comparison for vX.Y.Z-fork.N releases.
+    #[test]
+    fn stable_channel_installs_when_manifest_fork_revision_is_newer() {
+        let base = Version::parse("0.8.2").unwrap();
+        let next = Version::parse("0.8.3").unwrap();
+        // same base: only a higher fork revision installs
+        assert!(stable_channel_should_install(&base, &base, false, 1, 0));
+        assert!(stable_channel_should_install(&base, &base, false, 2, 1));
+        assert!(!stable_channel_should_install(&base, &base, false, 1, 1));
+        assert!(!stable_channel_should_install(&base, &base, false, 1, 2));
+        // an upstream base bump wins even though the revision resets
+        assert!(stable_channel_should_install(&next, &base, false, 1, 5));
+        // a lagging manifest base never installs
+        assert!(!stable_channel_should_install(&base, &next, false, 9, 0));
     }
 
     #[test]
