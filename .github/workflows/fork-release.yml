@@ -230,7 +230,7 @@ jobs:
               "version": version,
               "protocol": protocol,
               "notes": (
-                  f"Fork build of herdr v{version}-fork with latentce patches.\n"
+                  f"Fork build of herdr v{version}-fork.\n"
                   f"Upstream release notes: "
                   f"https://github.com/herdrdev/herdr/releases/tag/v{version}"
               ),
@@ -258,5 +258,5 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --target "$COMMIT" \
             --title "herdr v$VERSION-fork" \
-            --notes "Fork build of herdr v$VERSION-fork with latentce patches. Upstream notes: https://github.com/herdrdev/herdr/releases/tag/v$VERSION" \
+            --notes "Fork build of herdr v$VERSION-fork. Upstream notes: https://github.com/herdrdev/herdr/releases/tag/v$VERSION" \
             "${FILES[@]}"

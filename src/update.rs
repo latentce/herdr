@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use interprocess::local_socket::traits::Stream as _;
 use serde::{Deserialize, Deserializer};
 
-// Fork patch: stable updates come from the latentce/herdr fork releases
+// Fork patch: stable updates come from this fork's releases
 // instead of the official herdr.dev manifest. The preview channel still
 // points at upstream.
 const STABLE_UPDATE_MANIFEST_URL: &str =
