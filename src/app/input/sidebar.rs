@@ -511,7 +511,8 @@ impl AppState {
                     .count();
                 (Some(folder_id.clone()), Some(position))
             }
-            WorkspaceDropTarget::IntoFolder(folder_id) => (Some(folder_id.clone()), None),
+            WorkspaceDropTarget::InFolderEnd { folder_id }
+            | WorkspaceDropTarget::IntoFolder(folder_id) => (Some(folder_id.clone()), None),
         };
 
         // Suppress no-op drops by simulating the assign against the same
@@ -609,7 +610,9 @@ impl AppState {
             }
             WorkspaceDropTarget::End => entries.len().saturating_sub(1),
             // A folder can never be dropped into another folder.
-            WorkspaceDropTarget::InFolderBefore { .. } | WorkspaceDropTarget::IntoFolder(_) => {
+            WorkspaceDropTarget::InFolderBefore { .. }
+            | WorkspaceDropTarget::InFolderEnd { .. }
+            | WorkspaceDropTarget::IntoFolder(_) => {
                 return None;
             }
         };
@@ -2813,6 +2816,57 @@ mod tests {
     }
 
     #[test]
+    fn dropping_family_member_on_end_of_folder_slot_appends_whole_family_at_end() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![
+            workspace_with_space("main", "repo-key"),
+            workspace_with_space("issue", "repo-key"),
+            Workspace::test_new("x"),
+            Workspace::test_new("y"),
+        ];
+        app.state.ensure_test_terminals();
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        for name in ["x", "y"] {
+            let id = ws_id(&app, name);
+            app.state
+                .assign_workspace_to_folder(&id, Some(&folder_id), None)
+                .expect("assign member");
+        }
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 40));
+        let target_row = indicator_row(
+            &app,
+            &crate::app::state::WorkspaceDropTarget::InFolderEnd {
+                folder_id: folder_id.clone(),
+            },
+        );
+
+        // Grab the linked "issue" child: the whole family lands at the end
+        // of the folder as one block.
+        let source_row = card_rect(&app, "issue").y;
+        drag_from_to(&mut app, source_row, target_row);
+
+        assert_eq!(
+            app.state.folder(&folder_id).unwrap().members,
+            [
+                ws_id(&app, "x"),
+                ws_id(&app, "y"),
+                ws_id(&app, "main"),
+                ws_id(&app, "issue"),
+            ]
+        );
+        assert!(matches!(
+            folder_events(&app).as_slice(),
+            [crate::api::schema::EventData::FolderAssigned {
+                folder_id: Some(_),
+                workspace_ids,
+            }] if workspace_ids.len() == 2
+        ));
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
     fn dropping_space_onto_collapsed_folder_header_still_appends() {
         let (mut app, folder_id) = app_with_folder();
         app.state.collapsed_folder_ids.insert(folder_id.clone());
@@ -3025,6 +3079,250 @@ mod tests {
 
         assert_eq!(app.state.space_order, before_order);
         assert!(folder_events(&app).is_empty());
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn dropping_foldered_space_on_gap_below_last_member_appends_at_folder_end() {
+        let (mut app, folder_id) = app_with_folder();
+        let target_row = indicator_row(
+            &app,
+            &crate::app::state::WorkspaceDropTarget::InFolderEnd {
+                folder_id: folder_id.clone(),
+            },
+        );
+        // The end-of-folder slot sits on the row directly below the last
+        // member.
+        let last = card_rect(&app, "c");
+        assert_eq!(target_row, last.y + last.height);
+
+        let source_row = card_rect(&app, "b").y;
+        drag_from_to(&mut app, source_row, target_row);
+
+        assert_eq!(
+            app.state.folder(&folder_id).unwrap().members,
+            [ws_id(&app, "c"), ws_id(&app, "b")]
+        );
+        // A same-folder drop to the end is a member-order change.
+        assert!(matches!(
+            folder_events(&app).as_slice(),
+            [crate::api::schema::EventData::FolderUpdated { .. }]
+        ));
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn dropping_loose_space_on_gap_below_last_member_joins_folder_at_end() {
+        let (mut app, folder_id) = app_with_folder();
+        let a_id = ws_id(&app, "a");
+        let target_row = indicator_row(
+            &app,
+            &crate::app::state::WorkspaceDropTarget::InFolderEnd {
+                folder_id: folder_id.clone(),
+            },
+        );
+
+        let source_row = card_rect(&app, "a").y;
+        drag_from_to(&mut app, source_row, target_row);
+
+        assert_eq!(
+            app.state.folder(&folder_id).unwrap().members,
+            [ws_id(&app, "b"), ws_id(&app, "c"), a_id.clone()]
+        );
+        assert_eq!(
+            app.state.workspace_folder_id(&a_id),
+            Some(folder_id.as_str())
+        );
+        assert!(matches!(
+            folder_events(&app).as_slice(),
+            [crate::api::schema::EventData::FolderAssigned {
+                folder_id: Some(_),
+                ..
+            }]
+        ));
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn dropping_one_zone_below_end_of_folder_slot_ejects_to_top_level() {
+        let (mut app, folder_id) = app_with_folder();
+        let b_id = ws_id(&app, "b");
+        let end_of_folder_row = indicator_row(
+            &app,
+            &crate::app::state::WorkspaceDropTarget::InFolderEnd {
+                folder_id: folder_id.clone(),
+            },
+        );
+        // The folder is the last entry in the panel: the trailing top-level
+        // slot stays reachable one row below the end-of-folder slot.
+        let top_level_row = indicator_row(&app, &crate::app::state::WorkspaceDropTarget::End);
+        assert_eq!(top_level_row, end_of_folder_row + 1);
+
+        let source_row = card_rect(&app, "b").y;
+        drag_from_to(&mut app, source_row, top_level_row);
+
+        assert_eq!(app.state.workspace_folder_id(&b_id), None);
+        assert_eq!(
+            app.state.folder(&folder_id).unwrap().members,
+            [ws_id(&app, "c")]
+        );
+        assert_eq!(
+            app.state
+                .workspaces
+                .iter()
+                .map(|ws| ws.display_name())
+                .collect::<Vec<_>>(),
+            ["a", "d", "c", "b"]
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn end_of_folder_slot_reachable_when_folder_is_followed_by_loose_space() {
+        let (mut app, folder_id) = app_with_folder();
+        // Reposition the folder above the loose spaces: [work{b, c}, a, d].
+        app.state.move_folder(&folder_id, 0).expect("move folder");
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 40));
+
+        let end_of_folder_row = indicator_row(
+            &app,
+            &crate::app::state::WorkspaceDropTarget::InFolderEnd {
+                folder_id: folder_id.clone(),
+            },
+        );
+        // The following top-level slot keeps a distinguishable row below the
+        // end-of-folder slot.
+        let before_a_row = indicator_row(
+            &app,
+            &crate::app::state::WorkspaceDropTarget::Before(ws_idx(&app, "a")),
+        );
+        assert!(before_a_row > end_of_folder_row);
+
+        let source_row = card_rect(&app, "b").y;
+        drag_from_to(&mut app, source_row, end_of_folder_row);
+
+        assert_eq!(
+            app.state.folder(&folder_id).unwrap().members,
+            [ws_id(&app, "c"), ws_id(&app, "b")]
+        );
+        assert_eq!(app.state.workspace_folder_id(&ws_id(&app, "a")), None);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn dragging_last_member_to_end_of_folder_slot_changes_nothing() {
+        let (mut app, folder_id) = app_with_folder();
+        let before_order = app.state.space_order.clone();
+        let target_row = indicator_row(
+            &app,
+            &crate::app::state::WorkspaceDropTarget::InFolderEnd {
+                folder_id: folder_id.clone(),
+            },
+        );
+
+        let source_row = card_rect(&app, "c").y;
+        drag_from_to(&mut app, source_row, target_row);
+
+        assert_eq!(app.state.space_order, before_order);
+        assert!(folder_events(&app).is_empty());
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn folder_drag_resolves_end_of_folder_row_to_top_level_slot() {
+        let (mut app, folder_id) = app_with_folder();
+        let end_of_folder_row = indicator_row(
+            &app,
+            &crate::app::state::WorkspaceDropTarget::InFolderEnd {
+                folder_id: folder_id.clone(),
+            },
+        );
+        let header_row = app.state.view.folder_header_areas[0].rect.y;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            2,
+            header_row,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            2,
+            end_of_folder_row,
+        ));
+        match app.state.drag.as_ref().map(|drag| &drag.target) {
+            Some(DragTarget::FolderReorder {
+                drop_target: Some(target),
+                ..
+            }) => assert!(
+                crate::ui::is_top_level_drop_target(target),
+                "folder drag targeted {target:?}"
+            ),
+            other => panic!("expected folder drag, got {:?}", other.is_some()),
+        }
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            2,
+            end_of_folder_row,
+        ));
+
+        // The resolution seam also rejects the in-folder target outright.
+        assert!(app
+            .state
+            .folder_drop_move_params(
+                &folder_id,
+                &crate::app::state::WorkspaceDropTarget::InFolderEnd {
+                    folder_id: folder_id.clone(),
+                },
+            )
+            .is_none());
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn gap_before_a_following_folder_header_stays_a_top_level_slot() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![
+            Workspace::test_new("a"),
+            Workspace::test_new("b"),
+            Workspace::test_new("c"),
+        ];
+        app.state.ensure_test_terminals();
+        let first = app.state.create_folder("first").expect("create folder");
+        let second = app.state.create_folder("second").expect("create folder");
+        let b_id = ws_id(&app, "b");
+        let c_id = ws_id(&app, "c");
+        app.state
+            .assign_workspace_to_folder(&b_id, Some(&first), None)
+            .expect("assign member");
+        app.state
+            .assign_workspace_to_folder(&c_id, Some(&second), None)
+            .expect("assign member");
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 40));
+
+        // The single gap between the first folder's last member and the
+        // second folder's header keeps its top-level meaning: a space must
+        // still be able to land between the folders (appending to the first
+        // folder stays available via its header drop).
+        assert!(crate::ui::workspace_drop_indicator_row(
+            &app.state,
+            &app.state.view.workspace_card_areas,
+            &app.state.view.folder_header_areas,
+            app.state.workspace_list_rect(),
+            &crate::app::state::WorkspaceDropTarget::InFolderEnd {
+                folder_id: first.clone(),
+            },
+        )
+        .is_none());
+        let before_second_row = indicator_row(
+            &app,
+            &crate::app::state::WorkspaceDropTarget::BeforeFolder(second.clone()),
+        );
+        assert_eq!(
+            app.state.workspace_drop_target_at_row(before_second_row),
+            Some(crate::app::state::WorkspaceDropTarget::BeforeFolder(second))
+        );
         app.state.assert_invariants_for_test();
     }
 

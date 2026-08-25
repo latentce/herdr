@@ -1370,8 +1370,12 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
 /// Legal insertion points for a spaces-panel drag, in visual order. Each slot
 /// pairs a drop target with its indicator row. Slots exist before every
 /// top-level block (loose space, worktree family, or folder) and before every
-/// member block inside an expanded folder; appending into a folder happens by
-/// dropping onto its header row, which is not a slot.
+/// member block inside an expanded folder. The gap directly below a folder's
+/// last member is an end-of-folder slot (append), with the following
+/// top-level slot pushed one row further — except when a folder header
+/// follows: the single gap keeps its top-level meaning there because the
+/// header row itself already appends (`IntoFolder`), which is also how
+/// appending into a folder works in general.
 pub(crate) fn workspace_drop_slots(
     app: &AppState,
     cards: &[crate::app::state::WorkspaceCardArea],
@@ -1418,11 +1422,18 @@ pub(crate) fn workspace_drop_slots(
     // trailing slot after the last card or header.
     let mut last_visible: Option<(usize, u16)> = None;
     let mut previous_was_header = false;
+    // Folder id and bottom row of the folder member block ending at the
+    // previous visible entry, for the end-of-folder slot below it.
+    let mut previous_folder_member: Option<(String, u16)> = None;
     for (entry_idx, entry) in entries.iter().enumerate() {
         let was_header = std::mem::replace(&mut previous_was_header, false);
         match entry {
             WorkspaceListEntry::FolderHeader { order_idx } => {
                 previous_was_header = true;
+                // No end-of-folder slot before a header: the single gap row
+                // must keep its top-level meaning (the header row itself is
+                // claimed by the append-into-folder drop).
+                previous_folder_member = None;
                 let Some(folder_id) = folder_id_at(*order_idx) else {
                     continue;
                 };
@@ -1442,15 +1453,19 @@ pub(crate) fn workspace_drop_slots(
                 let Some(rect) = card_rect(*ws_idx) else {
                     continue;
                 };
-                last_visible = Some((entry_idx, rect.y.saturating_add(rect.height)));
-                if *indented {
-                    // Never split a worktree family: no slots inside a block.
-                    continue;
-                }
+                let bottom = rect.y.saturating_add(rect.height);
+                last_visible = Some((entry_idx, bottom));
+                let ended_folder = previous_folder_member.take();
                 if *foldered {
                     let Some(folder_id) = containing_folder(entry_idx) else {
                         continue;
                     };
+                    if *indented {
+                        // Never split a worktree family: no slots inside a
+                        // block, but the block still extends the folder run.
+                        previous_folder_member = Some((folder_id, bottom));
+                        continue;
+                    }
                     // A folder header hugs its first member, so the slot for
                     // position 0 sits on the member's own top row; later
                     // member slots use the gap row above, like top level.
@@ -1462,14 +1477,39 @@ pub(crate) fn workspace_drop_slots(
                     if let Some(row) = row.filter(|row| *row < list_bottom) {
                         slots.push((
                             WorkspaceDropTarget::InFolderBefore {
-                                folder_id,
+                                folder_id: folder_id.clone(),
                                 ws_idx: *ws_idx,
                             },
                             row,
                         ));
                     }
-                } else if let Some(row) = rect.y.checked_sub(1).filter(|row| *row < list_bottom) {
-                    slots.push((WorkspaceDropTarget::Before(*ws_idx), row));
+                    previous_folder_member = Some((folder_id, bottom));
+                } else {
+                    if *indented {
+                        // Never split a worktree family: no slots inside a block.
+                        continue;
+                    }
+                    // A folder run ends right above this top-level entry: the
+                    // gap directly below the folder's last member appends at
+                    // the folder end, and this entry's own slot moves one row
+                    // further when the two would otherwise collide.
+                    let mut before_row = rect.y.checked_sub(1);
+                    if let Some((folder_id, member_bottom)) = ended_folder {
+                        let end_row = rect
+                            .y
+                            .checked_sub(1)
+                            .map(|row| row.min(member_bottom))
+                            .filter(|row| *row < list_bottom);
+                        if let Some(end_row) = end_row {
+                            slots.push((WorkspaceDropTarget::InFolderEnd { folder_id }, end_row));
+                            if before_row == Some(end_row) {
+                                before_row = Some(rect.y);
+                            }
+                        }
+                    }
+                    if let Some(row) = before_row.filter(|row| *row < list_bottom) {
+                        slots.push((WorkspaceDropTarget::Before(*ws_idx), row));
+                    }
                 }
             }
         }
@@ -1505,7 +1545,25 @@ pub(crate) fn workspace_drop_slots(
             .last()
             .is_none_or(|(last_target, _)| *last_target != target)
     {
-        slots.push((target, last_bottom));
+        // When the list ends with a folder member, the row directly below it
+        // appends at the folder end and the trailing top-level slot moves one
+        // row further — but only when that row still fits, so the top-level
+        // slot always stays reachable.
+        let end_of_folder = match (&target, previous_folder_member) {
+            (WorkspaceDropTarget::Before(_) | WorkspaceDropTarget::End, Some((folder_id, _)))
+                if last_bottom.saturating_add(1) < list_bottom =>
+            {
+                Some(folder_id)
+            }
+            _ => None,
+        };
+        match end_of_folder {
+            Some(folder_id) => {
+                slots.push((WorkspaceDropTarget::InFolderEnd { folder_id }, last_bottom));
+                slots.push((target, last_bottom.saturating_add(1)));
+            }
+            None => slots.push((target, last_bottom)),
+        }
     }
     slots
 }
@@ -2033,11 +2091,22 @@ fn render_workspace_list(
     }
 
     if let Some(y) = insertion_row.filter(|y| *y < list_bottom) {
+        // In-folder insertion lines start at the folder name's column so
+        // they read as inside the folder, distinct from full-width
+        // top-level slots.
+        let indent: u16 = match drag_drop_target {
+            Some(
+                crate::app::state::WorkspaceDropTarget::InFolderBefore { .. }
+                | crate::app::state::WorkspaceDropTarget::InFolderEnd { .. },
+            ) => 3,
+            _ => 0,
+        };
+        let indicator_left = (area.x + indent).min(area.x + area.width);
         let indicator_right = scrollbar_rect
             .map(|rect| rect.x)
             .unwrap_or(area.x + area.width);
         let buf = frame.buffer_mut();
-        for x in area.x..indicator_right {
+        for x in indicator_left..indicator_right {
             buf[(x, y)].set_symbol("─");
             buf[(x, y)].set_style(Style::default().fg(p.accent));
         }
@@ -4980,6 +5049,141 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             terminal.backend().buffer()[(list_area.x, indicator_row)].symbol(),
             "─"
         );
+    }
+
+    #[test]
+    fn in_folder_drag_indicators_start_at_the_folder_name_column() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("a"),
+            Workspace::test_new("b"),
+            Workspace::test_new("c"),
+        ];
+        let folder_id = app.create_folder("work").expect("create folder");
+        for name in ["b", "c"] {
+            let id = app
+                .workspaces
+                .iter()
+                .find(|ws| ws.display_name() == name)
+                .expect("workspace exists")
+                .id
+                .clone();
+            app.assign_workspace_to_folder(&id, Some(&folder_id), None)
+                .expect("assign member");
+        }
+        app.sidebar_spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
+        app.sidebar_spaces.row_gap = 0;
+        let area = Rect::new(0, 0, 30, 20);
+        let (cards, headers) = compute_workspace_list_areas(&app, area);
+        app.view.workspace_card_areas = cards;
+        app.view.folder_header_areas = headers;
+        let list_area = workspace_list_rect(area, app.sidebar_section_split);
+        let c_idx = app
+            .workspaces
+            .iter()
+            .position(|ws| ws.display_name() == "c")
+            .expect("workspace exists");
+        let targets = [
+            crate::app::state::WorkspaceDropTarget::InFolderEnd {
+                folder_id: folder_id.clone(),
+            },
+            crate::app::state::WorkspaceDropTarget::InFolderBefore {
+                folder_id: folder_id.clone(),
+                ws_idx: c_idx,
+            },
+        ];
+
+        for target in targets {
+            let indicator_row = workspace_drop_indicator_row(
+                &app,
+                &app.view.workspace_card_areas,
+                &app.view.folder_header_areas,
+                list_area,
+                &target,
+            )
+            .unwrap();
+            app.drag = Some(crate::app::state::DragState {
+                target: crate::app::state::DragTarget::WorkspaceReorder {
+                    source_id: 0,
+                    source_ws_idx: 0,
+                    drop_target: Some(target.clone()),
+                },
+            });
+
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_workspace_list(
+                        &app,
+                        &TerminalRuntimeRegistry::new(),
+                        frame,
+                        list_area,
+                        false,
+                    )
+                })
+                .unwrap();
+
+            // The insertion line starts at the folder name's column, not the
+            // panel edge, so it reads as inside the folder.
+            let buffer = terminal.backend().buffer();
+            for x in 0..3 {
+                assert_ne!(
+                    buffer[(list_area.x + x, indicator_row)].symbol(),
+                    "─",
+                    "column {x} should stay clear for {target:?}"
+                );
+            }
+            assert_eq!(
+                buffer[(list_area.x + 3, indicator_row)].symbol(),
+                "─",
+                "line should start at the folder name column for {target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cramped_list_keeps_trailing_top_level_slot_over_end_of_folder() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
+        let folder_id = app.create_folder("work").expect("create folder");
+        for ws_idx in [0, 1] {
+            let id = app.workspaces[ws_idx].id.clone();
+            app.assign_workspace_to_folder(&id, Some(&folder_id), None)
+                .expect("assign member");
+        }
+        app.sidebar_spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
+        app.sidebar_spaces.row_gap = 0;
+        let area = Rect::new(0, 0, 30, 20);
+        let (cards, headers) = compute_workspace_list_areas(&app, area);
+        let last = cards.last().expect("folder members visible").rect;
+        let last_bottom = last.y + last.height;
+        let list_area = workspace_list_rect(area, app.sidebar_section_split);
+
+        // With room for two rows below the folder, both slots exist.
+        let roomy = workspace_drop_slots(&app, &cards, &headers, list_area);
+        assert!(roomy.contains(&(
+            crate::app::state::WorkspaceDropTarget::InFolderEnd {
+                folder_id: folder_id.clone(),
+            },
+            last_bottom,
+        )));
+        assert!(roomy.contains(&(crate::app::state::WorkspaceDropTarget::End, last_bottom + 1,)));
+
+        // With only one free row left, the trailing top-level slot wins so
+        // ejecting from the folder always stays reachable (the header drop
+        // still appends).
+        let cramped = Rect::new(
+            list_area.x,
+            list_area.y,
+            list_area.width,
+            last_bottom + 2 - list_area.y,
+        );
+        let slots = workspace_drop_slots(&app, &cards, &headers, cramped);
+        assert!(slots.contains(&(crate::app::state::WorkspaceDropTarget::End, last_bottom)));
+        assert!(!slots.iter().any(|(target, _)| matches!(
+            target,
+            crate::app::state::WorkspaceDropTarget::InFolderEnd { .. }
+        )));
     }
 
     #[test]

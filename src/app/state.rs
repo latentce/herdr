@@ -1151,6 +1151,9 @@ pub(crate) enum WorkspaceDropTarget {
     /// Inside a folder, before the member block anchored at this workspace
     /// index.
     InFolderBefore { folder_id: String, ws_idx: usize },
+    /// Inside a folder, after its last member (the gap row directly below
+    /// the folder's last member block).
+    InFolderEnd { folder_id: String },
     /// Append into this folder (dropped onto its header row).
     IntoFolder(String),
     /// Top level, after the last entry.
@@ -2402,6 +2405,7 @@ impl AppState {
                     }
                     Some(
                         WorkspaceDropTarget::BeforeFolder(folder_id)
+                        | WorkspaceDropTarget::InFolderEnd { folder_id }
                         | WorkspaceDropTarget::IntoFolder(folder_id),
                     ) => {
                         assert!(
@@ -2435,6 +2439,7 @@ impl AppState {
                             drop_target,
                             Some(
                                 WorkspaceDropTarget::InFolderBefore { .. }
+                                    | WorkspaceDropTarget::InFolderEnd { .. }
                                     | WorkspaceDropTarget::IntoFolder(_)
                             )
                         ),
