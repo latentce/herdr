@@ -9,6 +9,12 @@ use crate::detect::AgentState;
 use crate::layout::{PaneId, PaneInfo, SplitBorder};
 use crate::selection::Selection;
 
+pub(crate) use super::folders::FolderPressState;
+pub use super::folders::{
+    FolderHeaderArea, PendingFolderCreate, MENU_ITEM_MOVE_TO_FOLDER, MENU_ITEM_NEW_FOLDER,
+    MENU_ITEM_REMOVE_FROM_FOLDER,
+};
+
 pub(crate) type InstalledPluginRegistry =
     std::collections::HashMap<String, crate::api::schema::InstalledPluginInfo>;
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -657,13 +663,6 @@ pub struct WorkspaceCardArea {
     pub foldered: bool,
 }
 
-/// Screen area of one folder header row in the spaces panel.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FolderHeaderArea {
-    pub folder_id: String,
-    pub rect: Rect,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeCreateState {
     pub source_workspace_id: String,
@@ -1217,25 +1216,12 @@ pub(crate) struct WorkspacePressState {
     pub start_row: u16,
 }
 
-pub(crate) struct FolderPressState {
-    pub folder_id: String,
-    pub start_col: u16,
-    pub start_row: u16,
-}
-
 pub(crate) struct TabPressState {
     pub ws_idx: usize,
     pub tab_idx: usize,
     pub start_col: u16,
     pub start_row: u16,
 }
-
-/// "Move to folder ▸" opens the folder-target submenu for a space.
-pub const MENU_ITEM_MOVE_TO_FOLDER: &str = "Move to folder \u{25b8}";
-/// "Remove from folder" returns a foldered space to the top level.
-pub const MENU_ITEM_REMOVE_FROM_FOLDER: &str = "Remove from folder";
-/// "New folder..." prompts for a name and creates a folder.
-pub const MENU_ITEM_NEW_FOLDER: &str = "New folder...";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextMenuKind {
@@ -1277,14 +1263,6 @@ pub enum ContextMenuKind {
         has_manual_label: bool,
         right_click_passthrough: bool,
     },
-}
-
-/// Folder creation prompted through the shared rename modal.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingFolderCreate {
-    /// Space to move into the folder once created (the create-and-move flow
-    /// from "Move to folder ▸ New folder..."). `None` creates an empty folder.
-    pub move_workspace_id: Option<String>,
 }
 
 /// Right-click context menu state.
@@ -1481,11 +1459,6 @@ pub struct AppState {
     pub(crate) pane_id_aliases: std::collections::HashMap<u32, PaneId>,
     pub(crate) public_pane_id_aliases: std::collections::HashMap<String, PaneId>,
     pub workspaces: Vec<Workspace>,
-    /// Space order — the explicit top-level sequence interleaving folders and
-    /// loose spaces. Workspaces absent from it are implicitly loose at the
-    /// end. `workspaces` is kept sorted to the canonical flattening of this
-    /// order (see `canonical_workspace_order`).
-    pub space_order: Vec<crate::folder::SpaceOrderEntry>,
     pub active: Option<usize>,
     pub(crate) previous_pane_focus: Option<PaneFocusTarget>,
     pub selected: usize,
@@ -1516,26 +1489,11 @@ pub struct AppState {
     pub requested_new_tab_name: Option<String>,
     pub pending_workspace_create_cwd: Option<std::path::PathBuf>,
     pub rename_pane_target: Option<PaneId>,
-    /// Folder being renamed while `mode == Mode::RenameFolder`.
-    pub rename_folder_target: Option<String>,
-    /// Folder creation prompt while `mode == Mode::RenameFolder` and no
-    /// `rename_folder_target` is set.
-    pub pending_folder_create: Option<PendingFolderCreate>,
     pub worktree_create: Option<WorktreeCreateState>,
     pub worktree_open: Option<WorktreeOpenState>,
     pub worktree_remove: Option<WorktreeRemoveState>,
     pub worktree_directory: std::path::PathBuf,
     pub collapsed_space_keys: std::collections::HashSet<String>,
-    /// Folder ids collapsed in the sidebar. One shared state across the
-    /// spaces panel and the agents panel folder view. Per-client presentation
-    /// state: persisted in the session snapshot (like `collapsed_space_keys`)
-    /// but never exposed through the API.
-    pub collapsed_folder_ids: std::collections::HashSet<String>,
-    /// Workspace ids whose agent list is collapsed in the agents panel folder
-    /// view. Independent of folder collapse and of other spaces. Per-client
-    /// presentation state: persisted in the session snapshot but never
-    /// exposed through the API.
-    pub collapsed_agent_space_ids: std::collections::HashSet<String>,
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
@@ -1554,8 +1512,6 @@ pub struct AppState {
     pub(crate) drag: Option<DragState>,
     pub(crate) workspace_presses:
         std::collections::HashMap<crate::app::InputSourceId, WorkspacePressState>,
-    pub(crate) folder_presses:
-        std::collections::HashMap<crate::app::InputSourceId, FolderPressState>,
     pub(crate) tab_presses: std::collections::HashMap<crate::app::InputSourceId, TabPressState>,
     pub selection: Option<Selection>,
     pub selection_autoscroll: Option<SelectionAutoscroll>,
@@ -1684,6 +1640,29 @@ pub struct AppState {
     /// Terminal runtimes that should be shut down by the app/runtime layer
     /// after state has detached their terminal metadata.
     pub(crate) terminal_runtime_shutdowns: Vec<crate::terminal::TerminalId>,
+    // Fork: folders
+    /// Space order — the explicit top-level sequence interleaving folders and
+    /// loose spaces. Workspaces absent from it are implicitly loose at the
+    /// end. `workspaces` is kept sorted to the canonical flattening of this
+    /// order (see `canonical_workspace_order`).
+    pub space_order: Vec<crate::folder::SpaceOrderEntry>,
+    /// Folder being renamed while `mode == Mode::RenameFolder`.
+    pub rename_folder_target: Option<String>,
+    /// Folder creation prompt while `mode == Mode::RenameFolder` and no
+    /// `rename_folder_target` is set.
+    pub pending_folder_create: Option<PendingFolderCreate>,
+    /// Folder ids collapsed in the sidebar. One shared state across the
+    /// spaces panel and the agents panel folder view. Per-client presentation
+    /// state: persisted in the session snapshot (like `collapsed_space_keys`)
+    /// but never exposed through the API.
+    pub collapsed_folder_ids: std::collections::HashSet<String>,
+    /// Workspace ids whose agent list is collapsed in the agents panel folder
+    /// view. Independent of folder collapse and of other spaces. Per-client
+    /// presentation state: persisted in the session snapshot but never
+    /// exposed through the API.
+    pub collapsed_agent_space_ids: std::collections::HashSet<String>,
+    pub(crate) folder_presses:
+        std::collections::HashMap<crate::app::InputSourceId, FolderPressState>,
 }
 
 impl AppState {
@@ -1894,7 +1873,6 @@ impl AppState {
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces: Vec::new(),
-            space_order: Vec::new(),
             active: None,
             previous_pane_focus: None,
             selected: 0,
@@ -1918,15 +1896,11 @@ impl AppState {
             requested_new_tab_name: None,
             pending_workspace_create_cwd: None,
             rename_pane_target: None,
-            rename_folder_target: None,
-            pending_folder_create: None,
             worktree_create: None,
             worktree_open: None,
             worktree_remove: None,
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
-            collapsed_folder_ids: std::collections::HashSet::new(),
-            collapsed_agent_space_ids: std::collections::HashSet::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -1959,7 +1933,6 @@ impl AppState {
             },
             drag: None,
             workspace_presses: std::collections::HashMap::new(),
-            folder_presses: std::collections::HashMap::new(),
             tab_presses: std::collections::HashMap::new(),
             selection: None,
             selection_autoscroll: None,
@@ -2067,6 +2040,13 @@ impl AppState {
             host_mouse_pixels: None,
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
+            // Fork: folders
+            space_order: Vec::new(),
+            rename_folder_target: None,
+            pending_folder_create: None,
+            collapsed_folder_ids: std::collections::HashSet::new(),
+            collapsed_agent_space_ids: std::collections::HashSet::new(),
+            folder_presses: std::collections::HashMap::new(),
         }
     }
 

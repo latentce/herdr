@@ -21,6 +21,34 @@ pub enum FolderMutationError {
     FolderNotFound,
 }
 
+/// Screen area of one folder header row in the spaces panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderHeaderArea {
+    pub folder_id: String,
+    pub rect: ratatui::layout::Rect,
+}
+
+pub(crate) struct FolderPressState {
+    pub folder_id: String,
+    pub start_col: u16,
+    pub start_row: u16,
+}
+
+/// "Move to folder ▸" opens the folder-target submenu for a space.
+pub const MENU_ITEM_MOVE_TO_FOLDER: &str = "Move to folder \u{25b8}";
+/// "Remove from folder" returns a foldered space to the top level.
+pub const MENU_ITEM_REMOVE_FROM_FOLDER: &str = "Remove from folder";
+/// "New folder..." prompts for a name and creates a folder.
+pub const MENU_ITEM_NEW_FOLDER: &str = "New folder...";
+
+/// Folder creation prompted through the shared rename modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingFolderCreate {
+    /// Space to move into the folder once created (the create-and-move flow
+    /// from "Move to folder ▸ New folder..."). `None` creates an empty folder.
+    pub move_workspace_id: Option<String>,
+}
+
 impl AppState {
     /// Create a folder with the given name, appended at the end of the
     /// top-level space order. Returns the new folder's stable id.

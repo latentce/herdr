@@ -25,7 +25,6 @@ use super::{
     ScrollbarClickTarget, TAB_DRAG_THRESHOLD, WORKSPACE_DRAG_THRESHOLD,
 };
 
-/// Toggle an id's membership in a collapse set.
 fn toggle_collapse(set: &mut std::collections::HashSet<String>, id: String) {
     if !set.remove(&id) {
         set.insert(id);
@@ -2153,7 +2152,6 @@ mod tests {
         workspace::Workspace,
     };
 
-    /// The index of the "Close" item in the currently open context menu.
     fn close_item_index(state: &AppState) -> usize {
         state
             .context_menu

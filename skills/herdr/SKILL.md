@@ -65,6 +65,7 @@ Public IDs are opaque stable handles:
 - workspace: `w1`
 - tab: `w1:t1`
 - pane: `w1:p1`
+- folder: `f1` (folder names are display labels and may repeat; target folders by ID from `herdr folder list`)
 
 Closed tab and pane IDs are not reused. A pane moved into another workspace receives a new workspace-qualified pane ID. After `pane move`, continue with `.result.move_result.pane.pane_id` or the live agent name. The old value is reported as `.result.move_result.previous_pane_id`; only the moved process's inherited caller context keeps resolving that old ID, so do not use it as a general agent target.
 
