@@ -4,6 +4,12 @@ name: Fork Release
 # branch (which carries local patches), builds binaries, and publishes a
 # GitHub release on this fork together with a `latest.json` update manifest.
 #
+# Releases are tagged vX.Y.Z-fork.N: X.Y.Z is the upstream base release and N
+# is the fork revision, restarting at 1 for each upstream base. A new revision
+# is published whenever the fork branch moves (new fork feature or new
+# upstream release), so fork-only changes ship between upstream releases and
+# installed builds pick them up through `herdr update`.
+#
 # The patched binary points its stable update channel at:
 #   https://github.com/latentce/herdr/releases/latest/download/latest.json
 # so installed fork builds self-update from these releases.
@@ -34,6 +40,7 @@ jobs:
     outputs:
       build_needed: ${{ steps.decide.outputs.build_needed }}
       version: ${{ steps.decide.outputs.version }}
+      revision: ${{ steps.decide.outputs.revision }}
       fork_tag: ${{ steps.decide.outputs.fork_tag }}
       commit: ${{ steps.merge.outputs.commit }}
     steps:
@@ -43,7 +50,7 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.FORK_SYNC_TOKEN }}
 
-      - name: Find latest upstream stable release
+      - name: Decide fork release tag
         id: decide
         env:
           GH_TOKEN: ${{ github.token }}
@@ -59,15 +66,36 @@ jobs:
             exit 1
           fi
           VERSION="${UPSTREAM_TAG#v}"
-          FORK_TAG="${UPSTREAM_TAG}-fork"
-          echo "Latest upstream release: $UPSTREAM_TAG (fork tag: $FORK_TAG)"
-          if gh release view "$FORK_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $FORK_TAG already exists; nothing to do."
-            echo "build_needed=false" >> "$GITHUB_OUTPUT"
-          else
+
+          # Releases are vX.Y.Z-fork.N; N resets for each upstream base.
+          # Build when this base has no release yet, or when the fork branch
+          # moved since the newest release for this base.
+          LAST_REVISION=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            --json tagName -q '.[].tagName' \
+            | grep -E "^${UPSTREAM_TAG}-fork\.[0-9]+$" \
+            | sed "s|^${UPSTREAM_TAG}-fork\.||" \
+            | sort -n | tail -1 || true)
+          HEAD_COMMIT=$(git rev-parse HEAD)
+          if [ -z "$LAST_REVISION" ]; then
+            REVISION=1
+            echo "No release for $UPSTREAM_TAG yet; building ${UPSTREAM_TAG}-fork.1."
             echo "build_needed=true" >> "$GITHUB_OUTPUT"
+          else
+            LAST_COMMIT=$(gh release view "${UPSTREAM_TAG}-fork.${LAST_REVISION}" \
+              --repo "$GITHUB_REPOSITORY" --json targetCommitish -q .targetCommitish)
+            if [ "$LAST_COMMIT" = "$HEAD_COMMIT" ]; then
+              REVISION="$LAST_REVISION"
+              echo "${UPSTREAM_TAG}-fork.${LAST_REVISION} already covers $HEAD_COMMIT; nothing to do."
+              echo "build_needed=false" >> "$GITHUB_OUTPUT"
+            else
+              REVISION=$((LAST_REVISION + 1))
+              echo "Fork branch moved since ${UPSTREAM_TAG}-fork.${LAST_REVISION}; building ${UPSTREAM_TAG}-fork.${REVISION}."
+              echo "build_needed=true" >> "$GITHUB_OUTPUT"
+            fi
           fi
+          FORK_TAG="${UPSTREAM_TAG}-fork.${REVISION}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
           echo "fork_tag=$FORK_TAG" >> "$GITHUB_OUTPUT"
           echo "upstream_tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
 
@@ -121,6 +149,10 @@ jobs:
     env:
       LIBGHOSTTY_VT_OPTIMIZE: ReleaseFast
       LIBGHOSTTY_VT_SIMD: 'true'
+      # Bake the fork identity: `herdr --version` reports vX.Y.Z-fork.N and
+      # the updater compares revisions for same-base fork releases.
+      HERDR_BUILD_CHANNEL: fork
+      HERDR_BUILD_ID: ${{ needs.sync.outputs.revision }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -215,6 +247,7 @@ jobs:
       - name: Generate latest.json
         env:
           VERSION: ${{ needs.sync.outputs.version }}
+          REVISION: ${{ needs.sync.outputs.revision }}
           FORK_TAG: ${{ needs.sync.outputs.fork_tag }}
         run: |
           set -euo pipefail
@@ -222,6 +255,7 @@ jobs:
           import hashlib, json, os, re
 
           version = os.environ["VERSION"]
+          revision = int(os.environ["REVISION"])
           fork_tag = os.environ["FORK_TAG"]
           repo = os.environ["GITHUB_REPOSITORY"]
           base = f"https://github.com/{repo}/releases/download/{fork_tag}"
@@ -254,8 +288,9 @@ jobs:
           manifest = {
               "version": version,
               "protocol": protocol,
+              "fork_revision": revision,
               "notes": (
-                  f"Fork build of herdr v{version}-fork "
+                  f"Fork build of herdr v{version}-fork.{revision} "
                   f"(see CHANGELOG.fork.md).\n"
                   f"Upstream release notes: "
                   f"https://github.com/herdrdev/herdr/releases/tag/v{version}"
@@ -282,7 +317,7 @@ jobs:
             FILES+=("$f")
           done
           {
-            echo "Fork build of herdr v$VERSION-fork."
+            echo "Fork build of herdr ${FORK_TAG}."
             echo "Upstream notes: https://github.com/herdrdev/herdr/releases/tag/v$VERSION"
             echo
             cat CHANGELOG.fork.md
@@ -290,6 +325,6 @@ jobs:
           gh release create "$FORK_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$COMMIT" \
-            --title "herdr v$VERSION-fork" \
+            --title "herdr $FORK_TAG" \
             --notes-file release-notes.md \
             "${FILES[@]}"
