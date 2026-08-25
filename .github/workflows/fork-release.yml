@@ -108,13 +108,15 @@ jobs:
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             name: herdr-linux-aarch64
-          # To also build macOS assets, uncomment:
-          # - target: x86_64-apple-darwin
-          #   os: macos-latest
-          #   name: herdr-macos-x86_64
-          # - target: aarch64-apple-darwin
-          #   os: macos-latest
-          #   name: herdr-macos-aarch64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            name: herdr-macos-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: herdr-macos-aarch64
+          - target: x86_64-pc-windows-msvc
+            os: windows-2022
+            name: herdr-windows-x86_64.zip
     runs-on: ${{ matrix.os }}
     env:
       LIBGHOSTTY_VT_OPTIMIZE: ReleaseFast
@@ -166,8 +168,28 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package artifact
+        if: runner.os != 'Windows'
         shell: bash
         run: cp target/${{ matrix.target }}/release/herdr ${{ matrix.name }}
+
+      - name: Package artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.sync.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $package = Join-Path $env:RUNNER_TEMP "Microsoft.Windows.Console.ConPTY.nupkg"
+          $stage = Join-Path $env:RUNNER_TEMP "herdr-windows-x86_64"
+          .\scripts\package_windows_conpty.ps1 `
+            -HerdrExe target\${{ matrix.target }}\release\herdr.exe `
+            -PackagePath $package `
+            -StageDir $stage `
+            -OutputPath ${{ matrix.name }}
+          $version = (& (Join-Path $stage "herdr.exe") --version | Out-String).Trim()
+          if ($version -notmatch [regex]::Escape($env:VERSION) -or $version -match "preview") {
+            throw "Packaged Windows binary has unexpected version identity: $version"
+          }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -215,22 +237,26 @@ jobs:
               "linux-aarch64": "herdr-linux-aarch64",
               "macos-x86_64": "herdr-macos-x86_64",
               "macos-aarch64": "herdr-macos-aarch64",
+              "windows-x86_64": "herdr-windows-x86_64.zip",
           }
           assets, sha256 = {}, {}
+          missing = []
           for key, filename in platforms.items():
               if not os.path.exists(filename):
+                  missing.append(filename)
                   continue
               digest = hashlib.sha256(open(filename, "rb").read()).hexdigest()
               assets[key] = f"{base}/{filename}"
               sha256[key] = digest
-          if not assets:
-              raise SystemExit("no release assets found")
+          if missing:
+              raise SystemExit(f"missing release assets: {', '.join(missing)}")
 
           manifest = {
               "version": version,
               "protocol": protocol,
               "notes": (
-                  f"Fork build of herdr v{version}-fork.\n"
+                  f"Fork build of herdr v{version}-fork "
+                  f"(see CHANGELOG.fork.md).\n"
                   f"Upstream release notes: "
                   f"https://github.com/herdrdev/herdr/releases/tag/v{version}"
               ),
@@ -251,12 +277,19 @@ jobs:
         run: |
           set -euo pipefail
           FILES=(latest.json)
-          for f in herdr-linux-x86_64 herdr-linux-aarch64 herdr-macos-x86_64 herdr-macos-aarch64; do
-            [ -f "$f" ] && FILES+=("$f")
+          for f in herdr-linux-x86_64 herdr-linux-aarch64 herdr-macos-x86_64 herdr-macos-aarch64 herdr-windows-x86_64.zip; do
+            [ -f "$f" ] || { echo "::error::missing release asset $f"; exit 1; }
+            FILES+=("$f")
           done
+          {
+            echo "Fork build of herdr v$VERSION-fork."
+            echo "Upstream notes: https://github.com/herdrdev/herdr/releases/tag/v$VERSION"
+            echo
+            cat CHANGELOG.fork.md
+          } > release-notes.md
           gh release create "$FORK_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$COMMIT" \
             --title "herdr v$VERSION-fork" \
-            --notes "Fork build of herdr v$VERSION-fork. Upstream notes: https://github.com/herdrdev/herdr/releases/tag/v$VERSION" \
+            --notes-file release-notes.md \
             "${FILES[@]}"
