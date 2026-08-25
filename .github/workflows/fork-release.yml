@@ -59,7 +59,7 @@ jobs:
             exit 1
           fi
           VERSION="${UPSTREAM_TAG#v}"
-          FORK_TAG="fork-${UPSTREAM_TAG}"
+          FORK_TAG="${UPSTREAM_TAG}-fork"
           echo "Latest upstream release: $UPSTREAM_TAG (fork tag: $FORK_TAG)"
           if gh release view "$FORK_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $FORK_TAG already exists; nothing to do."
@@ -230,7 +230,7 @@ jobs:
               "version": version,
               "protocol": protocol,
               "notes": (
-                  f"Fork build of herdr v{version} with latentce patches.\n"
+                  f"Fork build of herdr v{version}-fork with latentce patches.\n"
                   f"Upstream release notes: "
                   f"https://github.com/herdrdev/herdr/releases/tag/v{version}"
               ),
@@ -257,6 +257,6 @@ jobs:
           gh release create "$FORK_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$COMMIT" \
-            --title "herdr v$VERSION (fork)" \
-            --notes "Fork build of herdr v$VERSION with latentce patches. Upstream notes: https://github.com/herdrdev/herdr/releases/tag/v$VERSION" \
+            --title "herdr v$VERSION-fork" \
+            --notes "Fork build of herdr v$VERSION-fork with latentce patches. Upstream notes: https://github.com/herdrdev/herdr/releases/tag/v$VERSION" \
             "${FILES[@]}"
