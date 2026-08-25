@@ -1,7 +1,7 @@
 > [!NOTE]
-> **This is a personal fork of [herdrdev/herdr](https://github.com/herdrdev/herdr)** that tracks upstream stable releases and adds local patches on the [`fork`](../../tree/fork) branch. Builds are published automatically as [`vX.Y.Z-fork` releases](../../releases) by [`fork-release.yml`](.github/workflows/fork-release.yml), and installed binaries self-update from this fork.
+> **This is a personal fork of [herdrdev/herdr](https://github.com/herdrdev/herdr)** that tracks upstream stable releases and adds local patches on the [`fork`](../../tree/fork) branch. Builds are published automatically as [`vX.Y.Z-fork` releases](../../releases) by [`fork-release.yml`](.github/workflows/fork-release.yml), and installed binaries self-update from this fork. Everything the fork adds on top of upstream is listed in [CHANGELOG.fork.md](CHANGELOG.fork.md).
 >
-> Install the fork build (Linux):
+> Install the fork build (Linux/macOS; Windows builds are on the [releases page](../../releases)):
 >
 > ```bash
 > curl -fsSL https://latentce.github.io/herdr/install.sh | sh
