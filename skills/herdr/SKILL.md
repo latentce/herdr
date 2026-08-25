@@ -5,7 +5,7 @@ description: "Control Herdr, a terminal multiplexer for coding agents. Use only 
 
 # Herdr
 
-Herdr organizes terminals into workspaces, tabs, and panes, recognizes coding agents running inside panes, and exposes the current session through the `herdr` CLI.
+Herdr organizes terminals into workspaces, tabs, and panes, groups workspaces into folders, recognizes coding agents running inside panes, and exposes the current session through the `herdr` CLI.
 
 Before issuing any control command, verify that this agent is running inside a Herdr-managed pane:
 
@@ -31,6 +31,7 @@ Then print the relevant command group by running the group without a subcommand:
 herdr agent
 herdr pane
 herdr workspace
+herdr folder
 herdr tab
 herdr worktree
 herdr terminal

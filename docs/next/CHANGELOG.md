@@ -8,6 +8,7 @@
 - Folders collapse and expand with a header chevron in both the spaces panel and the agents panel, with a shared collapse state that persists across restarts. A collapsed folder hides all of its spaces, and its header lights up when the active space is inside it.
 - The agents panel gained a third `folders` ordering that mirrors the spaces panel's organization: agents nest under their space and folder, worktree families keep their nesting, and each space's agent list can be collapsed independently. The choice persists like the existing orderings and can be set as the startup default.
 - The socket API gained `folder.create`, `folder.list`, `folder.rename`, `folder.assign`, `folder.move`, and `folder.delete` methods with matching `folder.*` events; workspace records now carry a `folder_id` when foldered, and the sidebar space order is a server-owned session fact that survives restarts.
+- A new `herdr folder` CLI group wraps the folder socket methods 1:1 (`list`, `create`, `rename`, `assign`, `move`, `delete`), so shells and agents can organize folders without speaking raw socket JSON.
 
 ## [0.8.2] - 2026-08-19
 

@@ -421,6 +421,9 @@ lists follow the flattened order, and workspace records carry a `folder_id`
 when the workspace is in a folder (the field is omitted for loose
 workspaces).
 
+The `herdr folder` CLI group wraps these six methods 1:1 for shells and
+agents; see the [CLI reference](/docs/cli-reference/).
+
 ```json
 {"id":"req_1","method":"folder.create","params":{"name":"projects"}}
 {"id":"req_2","method":"folder.list","params":{}}
