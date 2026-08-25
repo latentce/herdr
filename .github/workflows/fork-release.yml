@@ -320,7 +320,10 @@ jobs:
             echo "Fork build of herdr ${FORK_TAG}."
             echo "Upstream notes: https://github.com/herdrdev/herdr/releases/tag/v$VERSION"
             echo
-            cat CHANGELOG.fork.md
+            # Embed only the changelog sections; the file's title and intro
+            # paragraph are for the repo view and hard-wrap badly in release
+            # notes, where GitHub renders single newlines as line breaks.
+            sed -n '/^## /,$p' CHANGELOG.fork.md
           } > release-notes.md
           gh release create "$FORK_TAG" \
             --repo "$GITHUB_REPOSITORY" \
