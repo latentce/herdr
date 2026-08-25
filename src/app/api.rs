@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 mod agent_view;
 mod agents;
 mod env;
+mod folders;
 mod integrations;
 mod layouts;
 mod pane_graphics;
@@ -1032,6 +1033,22 @@ impl App {
             }
             Method::WorkspaceClose(target) => {
                 return self.handle_workspace_close(request.id, target)
+            }
+            Method::FolderCreate(params) => {
+                return self.handle_folder_create(request.id, params);
+            }
+            Method::FolderList(_) => return self.handle_folder_list(request.id),
+            Method::FolderRename(params) => {
+                return self.handle_folder_rename(request.id, params);
+            }
+            Method::FolderDelete(target) => {
+                return self.handle_folder_delete(request.id, target);
+            }
+            Method::FolderAssign(params) => {
+                return self.handle_folder_assign(request.id, params);
+            }
+            Method::FolderMove(params) => {
+                return self.handle_folder_move(request.id, params);
             }
             Method::WorktreeList(params) => return self.handle_worktree_list(request.id, params),
             Method::WorktreeCreate(params) => {

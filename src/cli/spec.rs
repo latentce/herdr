@@ -34,6 +34,7 @@ pub(super) fn command() -> Command {
         .subcommand(server_command())
         .subcommand(api_command())
         .subcommand(workspace_command())
+        .subcommand(folder_command())
         .subcommand(worktree_command())
         .subcommand(tab_command())
         .subcommand(notification_command())
@@ -230,6 +231,45 @@ fn workspace_command() -> Command {
                 .arg(option("ttl-ms", "N")),
         )
         .subcommand(id_command("close", "workspace_id", "Close a workspace"))
+}
+
+fn folder_command() -> Command {
+    Command::new("folder")
+        .about("Organize workspaces into folders over the socket API")
+        .after_help("Assigning any worktree family member moves the whole family.")
+        .subcommand(Command::new("list").about("List folders and the top-level space order"))
+        .subcommand(
+            Command::new("create")
+                .about("Create a folder")
+                .arg(option("name", "TEXT").required(true)),
+        )
+        .subcommand(
+            Command::new("rename")
+                .about("Rename a folder")
+                .arg(required("folder_id", "FOLDER_ID"))
+                .arg(required("name", "NAME").num_args(1..)),
+        )
+        .subcommand(
+            Command::new("assign")
+                .about("Move a workspace into a folder or back to the top level")
+                .arg(required("workspace_id", "WORKSPACE_ID"))
+                .arg(option("folder", "FOLDER_ID"))
+                .arg(option("position", "N"))
+                .after_help(
+                    "Omitting --folder moves the workspace to the top level. Assigning any worktree family member moves the whole family.",
+                ),
+        )
+        .subcommand(
+            Command::new("move")
+                .about("Reposition a folder in the top-level order")
+                .arg(required("folder_id", "FOLDER_ID"))
+                .arg(option("position", "N").required(true)),
+        )
+        .subcommand(id_command(
+            "delete",
+            "folder_id",
+            "Delete a folder and release its members",
+        ))
 }
 
 fn worktree_command() -> Command {
@@ -1143,6 +1183,8 @@ mod tests {
     fn spec_marks_runtime_required_options_as_required() {
         for (path, options) in [
             (&["workspace", "report-metadata"][..], &["source"][..]),
+            (&["folder", "create"][..], &["name"][..]),
+            (&["folder", "move"][..], &["position"][..]),
             (&["pane", "neighbor"][..], &["direction"][..]),
             (&["pane", "focus"][..], &["direction"][..]),
             (&["pane", "resize"][..], &["direction"][..]),

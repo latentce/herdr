@@ -11,6 +11,14 @@ A workspace is the top-level project container. Use one workspace per repo, task
 
 A workspace owns tabs and panes. Its sidebar state rolls up from the agents inside it, so you can see which project needs attention.
 
+## Folder
+
+A folder groups workspaces in the sidebar. Create one from the spaces panel's right-click menu, then organize by dragging spaces into it, dropping them at exact positions, or using each space's "Move to folder" menu. Worktree families always move together.
+
+The order of folders and loose spaces is owned by the server and shared by every client, and the agents panel can mirror it with its `folders` ordering. Collapsing a folder is a visual choice that persists across restarts. Deleting a folder never closes spaces; members return to the top level in place.
+
+Folders are also controllable through the socket API and the `herdr folder` CLI. See [Socket API](/docs/socket-api/) and the [CLI reference](/docs/cli-reference/).
+
 ## Tab
 
 A tab is a layout inside a workspace. Use tabs to separate views like `agents`, `logs`, `server`, or `review`.

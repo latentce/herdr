@@ -452,20 +452,31 @@ impl App {
         membership: crate::workspace::WorktreeSpaceMembership,
         emit_update: bool,
     ) {
-        let changed = if let Some(workspace) = self.state.workspaces.get_mut(ws_idx) {
+        let key = membership.key.clone();
+        let (changed, workspace_id) = if let Some(workspace) = self.state.workspaces.get_mut(ws_idx)
+        {
             if workspace.worktree_space.as_ref() == Some(&membership) {
-                false
+                (false, None)
             } else {
                 workspace.worktree_space = Some(membership);
-                true
+                (true, Some(workspace.id.clone()))
             }
         } else {
-            false
+            (false, None)
         };
         if changed {
+            // Worktree family members always share a folder: a member joining
+            // the family follows the parent checkout's folder membership.
+            // Colocation may re-sort the workspaces vec, so re-resolve the
+            // index by identity before emitting.
+            self.state.ensure_worktree_family_colocated(&key);
             self.state.mark_session_dirty();
             if emit_update {
-                self.emit_workspace_updated(ws_idx);
+                if let Some(ws_idx) = workspace_id
+                    .and_then(|id| self.state.workspaces.iter().position(|ws| ws.id == id))
+                {
+                    self.emit_workspace_updated(ws_idx);
+                }
             }
         }
     }

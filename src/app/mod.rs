@@ -14,6 +14,7 @@ mod api_helpers;
 pub(crate) use api_helpers::limit_snapshot_lines;
 mod config_io;
 mod creation;
+pub(crate) mod folders;
 mod git_refresh;
 mod ids;
 mod input;
@@ -256,6 +257,7 @@ fn agent_panel_sort_from_config(
     match sort {
         crate::config::AgentPanelSortConfig::Spaces => state::AgentPanelSort::Spaces,
         crate::config::AgentPanelSortConfig::Priority => state::AgentPanelSort::Priority,
+        crate::config::AgentPanelSortConfig::Folders => state::AgentPanelSort::Folders,
     }
 }
 
@@ -402,6 +404,9 @@ impl App {
             sidebar_width_source,
             sidebar_section_split,
             collapsed_space_keys,
+            collapsed_folder_ids,
+            collapsed_agent_space_ids,
+            restored_space_order,
         ) = if no_session {
             (
                 Vec::new(),
@@ -411,6 +416,9 @@ impl App {
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
                 std::collections::HashSet::new(),
+                std::collections::HashSet::new(),
+                std::collections::HashSet::new(),
+                Vec::new(),
             )
         } else if let Some(snap) = crate::persist::load() {
             let history = config
@@ -447,6 +455,12 @@ impl App {
                     },
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
+                    snap.collapsed_folder_ids,
+                    snap.collapsed_agent_space_ids,
+                    snap.space_order
+                        .into_iter()
+                        .map(crate::folder::SpaceOrderEntry::from)
+                        .collect(),
                 )
             } else {
                 crate::logging::session_restored(ws.len(), "ok");
@@ -464,6 +478,12 @@ impl App {
                     },
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
+                    snap.collapsed_folder_ids,
+                    snap.collapsed_agent_space_ids,
+                    snap.space_order
+                        .into_iter()
+                        .map(crate::folder::SpaceOrderEntry::from)
+                        .collect(),
                 )
             }
         } else {
@@ -475,6 +495,9 @@ impl App {
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
                 std::collections::HashSet::new(),
+                std::collections::HashSet::new(),
+                std::collections::HashSet::new(),
+                Vec::new(),
             )
         };
 
@@ -593,6 +616,7 @@ impl App {
                 layout: state::ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
+                folder_header_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),
@@ -702,9 +726,18 @@ impl App {
             host_mouse_pixels: None,
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
+            // Fork: folders
+            space_order: Vec::new(),
+            rename_folder_target: None,
+            pending_folder_create: None,
+            collapsed_folder_ids,
+            collapsed_agent_space_ids,
+            folder_presses: HashMap::new(),
         };
 
         state.terminals = restored_terminals;
+        state.install_space_order(restored_space_order);
+        state.prune_dangling_collapsed_agent_space_ids();
 
         for ws_idx in 0..state.workspaces.len() {
             let cwd = state.workspaces[ws_idx]
@@ -865,6 +898,17 @@ impl App {
             app.state.sidebar_section_split = split;
         }
         app.state.collapsed_space_keys = snapshot.collapsed_space_keys.clone();
+        app.state.collapsed_folder_ids = snapshot.collapsed_folder_ids.clone();
+        app.state.collapsed_agent_space_ids = snapshot.collapsed_agent_space_ids.clone();
+        app.state.prune_dangling_collapsed_agent_space_ids();
+        app.state.install_space_order(
+            snapshot
+                .space_order
+                .iter()
+                .cloned()
+                .map(crate::folder::SpaceOrderEntry::from)
+                .collect(),
+        );
         app.state.mode = if app.state.active.is_some() {
             state::Mode::Terminal
         } else {
@@ -1904,7 +1948,7 @@ impl App {
             Mode::Copy => {
                 self.handle_copy_mode_key(key);
             }
-            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
+            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::RenameFolder => {
                 self.handle_rename_key_via_api(key_event);
             }
             Mode::NewLinkedWorktree => {
@@ -2751,6 +2795,17 @@ mod tests {
         let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
 
         assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Priority);
+    }
+
+    #[test]
+    fn startup_uses_configured_folder_view_agent_panel_sort() {
+        let mut config = Config::default();
+        config.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Folders;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+
+        assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Folders);
     }
 
     #[test]
@@ -3618,6 +3673,13 @@ mod tests {
         assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Priority);
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("agent_panel_sort = \"priority\""));
+        assert!(app.state.config_diagnostic.is_none());
+
+        app.save_agent_panel_sort(state::AgentPanelSort::Folders);
+
+        assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Folders);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("agent_panel_sort = \"folders\""));
         assert!(app.state.config_diagnostic.is_none());
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
@@ -6147,12 +6209,27 @@ last_pane = "prefix+tab"
         app.state.selected = 0;
         app.state.confirm_close = false;
         app.state.context_menu = Some(state::ContextMenuState {
-            kind: state::ContextMenuKind::Workspace { ws_idx: 1 },
+            kind: state::ContextMenuKind::Workspace {
+                ws_idx: 1,
+                foldered: false,
+            },
             x: 2,
             y: 2,
             list: state::MenuListState::new(1),
         });
         app.state.mode = Mode::ContextMenu;
+        let close_idx = app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("context menu open")
+            .items()
+            .iter()
+            .position(|item| item == "Close")
+            .expect("close item present");
+        if let Some(menu) = &mut app.state.context_menu {
+            menu.list = state::MenuListState::new(close_idx);
+        }
 
         app.route_client_input(b"\r".to_vec());
 

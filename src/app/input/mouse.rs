@@ -6,8 +6,8 @@ use tracing::warn;
 use crate::{
     app::state::{
         AgentPanelSort, AppState, ContextMenuKind, ContextMenuState, DragState, DragTarget,
-        MenuListState, Mode, RightClickPassthroughGesture, TabPressState, ViewLayout,
-        WorkspacePressState,
+        FolderPressState, MenuListState, Mode, RightClickPassthroughGesture, TabPressState,
+        ViewLayout, WorkspacePressState,
     },
     layout::{PaneInfo, SplitBorder},
     selection::Selection,
@@ -25,6 +25,12 @@ use super::{
     ScrollbarClickTarget, TAB_DRAG_THRESHOLD, WORKSPACE_DRAG_THRESHOLD,
 };
 
+fn toggle_collapse(set: &mut std::collections::HashSet<String>, id: String) {
+    if !set.remove(&id) {
+        set.insert(id);
+    }
+}
+
 pub(super) enum MouseAction {
     NewWorkspace,
     Settings(SettingsAction),
@@ -39,12 +45,11 @@ pub(super) enum MouseAction {
         pane_id: crate::layout::PaneId,
     },
     FocusToastTarget,
-    MoveWorkspace {
-        source_ws_idx: usize,
-        insert_idx: usize,
+    AssignWorkspaceFolder {
+        params: crate::api::schema::FolderAssignParams,
     },
-    MoveWorkspaceBlock {
-        params: crate::api::schema::WorkspaceMoveBlockParams,
+    MoveFolder {
+        params: crate::api::schema::FolderMoveParams,
     },
     MoveTab {
         ws_idx: usize,
@@ -391,7 +396,7 @@ impl AppState {
 
                 if matches!(
                     self.mode,
-                    Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane
+                    Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::RenameFolder
                 ) {
                     let action = self
                         .rename_modal_inner()
@@ -588,6 +593,37 @@ impl AppState {
                         }
                     }
 
+                    // Card emptiness is the cold-view-cache signal here (as in
+                    // `folder_header_at`): empty headers can also mean the
+                    // session simply has no folders.
+                    let headers = if self.view.workspace_card_areas.is_empty() {
+                        crate::ui::compute_workspace_list_areas(self, self.view.sidebar_rect).1
+                    } else {
+                        self.view.folder_header_areas.clone()
+                    };
+                    if let Some(header) = headers.iter().find(|header| {
+                        let chevron = crate::ui::folder_header_chevron_rect(header);
+                        mouse.row == chevron.y && mouse.column == chevron.x && chevron.width > 0
+                    }) {
+                        toggle_collapse(&mut self.collapsed_folder_ids, header.folder_id.clone());
+                        self.mark_session_dirty();
+                        return None;
+                    }
+
+                    if let Some(header) = headers.iter().find(|header| {
+                        mouse.row >= header.rect.y && mouse.row < header.rect.y + header.rect.height
+                    }) {
+                        self.folder_presses.insert(
+                            source_id,
+                            FolderPressState {
+                                folder_id: header.folder_id.clone(),
+                                start_col: mouse.column,
+                                start_row: mouse.row,
+                            },
+                        );
+                        return None;
+                    }
+
                     if let Some(idx) = self.workspace_at_row(mouse.row) {
                         self.workspace_presses.insert(
                             source_id,
@@ -603,7 +639,8 @@ impl AppState {
                     if self.on_agent_panel_sort_toggle(mouse.column, mouse.row) {
                         self.agent_panel_sort = match self.agent_panel_sort {
                             AgentPanelSort::Spaces => AgentPanelSort::Priority,
-                            AgentPanelSort::Priority => AgentPanelSort::Spaces,
+                            AgentPanelSort::Priority => AgentPanelSort::Folders,
+                            AgentPanelSort::Folders => AgentPanelSort::Spaces,
                         };
                         self.agent_panel_scroll = 0;
                         self.mark_session_dirty();
@@ -623,6 +660,23 @@ impl AppState {
                                 self.set_agent_panel_offset_from_bottom(offset_from_bottom);
                             }
                         }
+                        return None;
+                    }
+
+                    if let Some(target) =
+                        self.agent_panel_collapse_target_at(mouse.column, mouse.row)
+                    {
+                        match target {
+                            super::sidebar::AgentPanelCollapseTarget::Folder(folder_id) => {
+                                // Folder collapse is one shared state across
+                                // the spaces panel and the folder view.
+                                toggle_collapse(&mut self.collapsed_folder_ids, folder_id);
+                            }
+                            super::sidebar::AgentPanelCollapseTarget::Space(ws_id) => {
+                                toggle_collapse(&mut self.collapsed_agent_space_ids, ws_id);
+                            }
+                        }
+                        self.mark_session_dirty();
                         return None;
                     }
 
@@ -686,25 +740,54 @@ impl AppState {
                     }
                 }
 
-                let workspace_drop_target = self.workspace_drop_target_at_row(mouse.row);
+                // Slot computation walks the entry list, so only resolve the
+                // target matching the gesture actually in flight.
+                let workspace_gesture = self.workspace_presses.contains_key(&source_id)
+                    || matches!(
+                        self.drag.as_ref().map(|drag| &drag.target),
+                        Some(DragTarget::WorkspaceReorder { .. })
+                    );
+                let folder_gesture = self.folder_presses.contains_key(&source_id)
+                    || matches!(
+                        self.drag.as_ref().map(|drag| &drag.target),
+                        Some(DragTarget::FolderReorder { .. })
+                    );
+                let workspace_drop_target = workspace_gesture
+                    .then(|| self.workspace_drop_target_at_row(mouse.row))
+                    .flatten();
+                let folder_drop_target = folder_gesture
+                    .then(|| self.folder_drop_target_at_row(mouse.row))
+                    .flatten();
                 let tab_drop_index = self.tab_drop_index_at(mouse.column, mouse.row);
                 if self.drag.is_none() {
                     if let Some(press) = self.workspace_presses.get(&source_id) {
                         let delta_col = mouse.column.abs_diff(press.start_col);
                         let delta_row = mouse.row.abs_diff(press.start_row);
-                        let can_reorder = self.workspaces.get(press.ws_idx).is_some_and(|ws| {
-                            ws.worktree_space()
-                                .is_none_or(|space| !space.is_linked_worktree)
-                        });
+                        // Any workspace card can start a drag; grabbing a
+                        // worktree family member drags the whole family (the
+                        // drop resolution moves the family as one block).
                         if workspace_drop_target.is_some()
-                            && can_reorder
                             && delta_col.max(delta_row) >= WORKSPACE_DRAG_THRESHOLD
                         {
                             self.drag = Some(DragState {
                                 target: DragTarget::WorkspaceReorder {
                                     source_id,
                                     source_ws_idx: press.ws_idx,
-                                    drop_target: workspace_drop_target,
+                                    drop_target: workspace_drop_target.clone(),
+                                },
+                            });
+                        }
+                    } else if let Some(press) = self.folder_presses.get(&source_id) {
+                        let delta_col = mouse.column.abs_diff(press.start_col);
+                        let delta_row = mouse.row.abs_diff(press.start_row);
+                        if folder_drop_target.is_some()
+                            && delta_col.max(delta_row) >= WORKSPACE_DRAG_THRESHOLD
+                        {
+                            self.drag = Some(DragState {
+                                target: DragTarget::FolderReorder {
+                                    source_id,
+                                    folder_id: press.folder_id.clone(),
+                                    drop_target: folder_drop_target.clone(),
                                 },
                             });
                         }
@@ -743,6 +826,18 @@ impl AppState {
                     }
                 } else if let Some(DragState {
                     target:
+                        DragTarget::FolderReorder {
+                            source_id: drag_source_id,
+                            drop_target,
+                            ..
+                        },
+                }) = &mut self.drag
+                {
+                    if *drag_source_id == source_id {
+                        *drop_target = folder_drop_target;
+                    }
+                } else if let Some(DragState {
+                    target:
                         DragTarget::TabReorder {
                             source_id: drag_source_id,
                             ws_idx,
@@ -756,7 +851,9 @@ impl AppState {
                     }
                 } else if let Some(drag) = &self.drag {
                     match &drag.target {
-                        DragTarget::WorkspaceReorder { .. } | DragTarget::TabReorder { .. } => {}
+                        DragTarget::WorkspaceReorder { .. }
+                        | DragTarget::FolderReorder { .. }
+                        | DragTarget::TabReorder { .. } => {}
                         DragTarget::WorkspaceListScrollbar { grab_row_offset } => {
                             if let Some(offset_from_bottom) =
                                 self.workspace_list_offset_for_drag_row(mouse.row, *grab_row_offset)
@@ -865,9 +962,12 @@ impl AppState {
                 }
 
                 let workspace_press = self.workspace_presses.remove(&source_id);
+                // A folder press that never became a drag is a click: the
+                // whole header row toggles the folder's collapse.
+                let folder_press = self.folder_presses.remove(&source_id);
                 let tab_press = self.tab_presses.remove(&source_id);
                 if foreign_chrome_drag {
-                    return self.chrome_press_action(workspace_press, tab_press);
+                    return self.chrome_press_action(workspace_press, folder_press, tab_press);
                 }
 
                 match self.drag.take() {
@@ -880,28 +980,22 @@ impl AppState {
                             },
                     }) => {
                         if let Some(params) =
-                            self.workspace_move_block_params(source_ws_idx, drop_target)
+                            self.workspace_drop_assign_params(source_ws_idx, &drop_target)
                         {
-                            if self
-                                .workspaces
-                                .get(source_ws_idx)
-                                .is_some_and(|workspace| workspace.worktree_space().is_some())
-                            {
-                                return Some(MouseAction::MoveWorkspaceBlock { params });
-                            }
-                            let insert_idx = params
-                                .before_workspace_id
-                                .as_ref()
-                                .and_then(|id| {
-                                    self.workspaces
-                                        .iter()
-                                        .position(|workspace| workspace.id == *id)
-                                })
-                                .unwrap_or(self.workspaces.len());
-                            return Some(MouseAction::MoveWorkspace {
-                                source_ws_idx,
-                                insert_idx,
-                            });
+                            return Some(MouseAction::AssignWorkspaceFolder { params });
+                        }
+                    }
+                    Some(DragState {
+                        target:
+                            DragTarget::FolderReorder {
+                                folder_id,
+                                drop_target: Some(drop_target),
+                                ..
+                            },
+                    }) => {
+                        if let Some(params) = self.folder_drop_move_params(&folder_id, &drop_target)
+                        {
+                            return Some(MouseAction::MoveFolder { params });
                         }
                     }
                     Some(DragState {
@@ -923,7 +1017,9 @@ impl AppState {
                         }
                     }
                     Some(_) => {}
-                    None => return self.chrome_press_action(workspace_press, tab_press),
+                    None => {
+                        return self.chrome_press_action(workspace_press, folder_press, tab_press)
+                    }
                 }
             }
 
@@ -1043,8 +1139,22 @@ impl AppState {
                 {
                     return None;
                 }
+                if let Some(folder_id) = self.folder_header_at(mouse.row) {
+                    self.context_menu = Some(ContextMenuState {
+                        kind: ContextMenuKind::Folder { folder_id },
+                        x: mouse.column,
+                        y: mouse.row,
+                        list: MenuListState::new(0),
+                    });
+                    self.mode = Mode::ContextMenu;
+                    return None;
+                }
                 if let Some(idx) = self.workspace_at_row(mouse.row) {
                     self.selected = idx;
+                    let foldered = self
+                        .workspaces
+                        .get(idx)
+                        .is_some_and(|ws| self.workspace_folder_id(&ws.id).is_some());
                     let kind = self
                         .workspaces
                         .get(idx)
@@ -1074,11 +1184,31 @@ impl AppState {
                                 collapsed: group_state
                                     .as_ref()
                                     .is_some_and(|(_, collapsed)| *collapsed),
+                                foldered,
                             })
                         })
-                        .unwrap_or(ContextMenuKind::Workspace { ws_idx: idx });
+                        .unwrap_or(ContextMenuKind::Workspace {
+                            ws_idx: idx,
+                            foldered,
+                        });
                     self.context_menu = Some(ContextMenuState {
                         kind,
+                        x: mouse.column,
+                        y: mouse.row,
+                        list: MenuListState::new(0),
+                    });
+                    self.mode = Mode::ContextMenu;
+                    return None;
+                }
+                // Header/background of the spaces panel: offer folder
+                // creation so an empty folder can be made before any space
+                // moves. The footer row keeps its buttons untouched.
+                let list_area = self.workspace_list_rect();
+                let footer = self.sidebar_footer_rect();
+                let on_footer = footer != Rect::default() && mouse.row == footer.y;
+                if rect_contains(list_area, mouse.column, mouse.row) && !on_footer {
+                    self.context_menu = Some(ContextMenuState {
+                        kind: ContextMenuKind::SpacesPanel,
                         x: mouse.column,
                         y: mouse.row,
                         list: MenuListState::new(0),
@@ -1460,7 +1590,9 @@ impl AppState {
     }
 
     fn chrome_press_pending(&self, source_id: crate::app::InputSourceId) -> bool {
-        self.tab_presses.contains_key(&source_id) || self.workspace_presses.contains_key(&source_id)
+        self.tab_presses.contains_key(&source_id)
+            || self.workspace_presses.contains_key(&source_id)
+            || self.folder_presses.contains_key(&source_id)
     }
 
     fn chrome_drag_owned_by_other(&self, source_id: crate::app::InputSourceId) -> bool {
@@ -1468,6 +1600,9 @@ impl AppState {
             matches!(
                 drag.target,
                 DragTarget::WorkspaceReorder {
+                    source_id: drag_source_id,
+                    ..
+                } | DragTarget::FolderReorder {
                     source_id: drag_source_id,
                     ..
                 } | DragTarget::TabReorder {
@@ -1481,6 +1616,7 @@ impl AppState {
     fn chrome_press_action(
         &mut self,
         workspace_press: Option<WorkspacePressState>,
+        folder_press: Option<FolderPressState>,
         tab_press: Option<TabPressState>,
     ) -> Option<MouseAction> {
         if let Some(press) = workspace_press {
@@ -1488,6 +1624,11 @@ impl AppState {
             return Some(MouseAction::FocusWorkspace {
                 ws_idx: press.ws_idx,
             });
+        }
+        if let Some(press) = folder_press {
+            toggle_collapse(&mut self.collapsed_folder_ids, press.folder_id);
+            self.mark_session_dirty();
+            return None;
         }
         if let Some(press) = tab_press {
             if self.active == Some(press.ws_idx) {
@@ -1507,6 +1648,9 @@ impl AppState {
                 DragTarget::WorkspaceReorder {
                     source_id: drag_source_id,
                     ..
+                } | DragTarget::FolderReorder {
+                    source_id: drag_source_id,
+                    ..
                 } | DragTarget::TabReorder {
                     source_id: drag_source_id,
                     ..
@@ -1521,6 +1665,7 @@ impl AppState {
     fn clear_chrome_press(&mut self, source_id: crate::app::InputSourceId) {
         self.tab_presses.remove(&source_id);
         self.workspace_presses.remove(&source_id);
+        self.folder_presses.remove(&source_id);
     }
 
     fn mouse_pane_focus_action(&self, pane_id: crate::layout::PaneId) -> Option<MouseAction> {
@@ -2006,6 +2151,17 @@ mod tests {
         detect::{Agent, AgentState},
         workspace::Workspace,
     };
+
+    fn close_item_index(state: &AppState) -> usize {
+        state
+            .context_menu
+            .as_ref()
+            .expect("context menu open")
+            .items()
+            .iter()
+            .position(|item| item == "Close")
+            .expect("close item present")
+    }
 
     #[test]
     fn tab_click_survives_stray_drag_report_off_the_tab_bar() {
@@ -3151,7 +3307,10 @@ mod tests {
                 ..
             } if pane_id == target && source_pane_id == source
         ));
-        assert!(menu.items().contains(&"Swap with focused pane"));
+        assert!(menu
+            .items()
+            .iter()
+            .any(|item| item == "Swap with focused pane"));
     }
 
     #[tokio::test]
@@ -3280,7 +3439,10 @@ mod tests {
     fn hovering_context_menu_updates_highlight() {
         let mut app = app_for_mouse_test();
         app.state.context_menu = Some(ContextMenuState {
-            kind: ContextMenuKind::Workspace { ws_idx: 0 },
+            kind: ContextMenuKind::Workspace {
+                ws_idx: 0,
+                foldered: false,
+            },
             x: 2,
             y: 2,
             list: MenuListState::new(0),
@@ -3574,12 +3736,19 @@ mod tests {
         app.state.mode = Mode::Terminal;
 
         app.state.context_menu = Some(ContextMenuState {
-            kind: ContextMenuKind::Workspace { ws_idx: 1 },
+            kind: ContextMenuKind::Workspace {
+                ws_idx: 1,
+                foldered: false,
+            },
             x: 2,
             y: 2,
             list: MenuListState::new(1),
         });
         app.state.mode = Mode::ContextMenu;
+        let close_idx = close_item_index(&app.state);
+        if let Some(menu) = &mut app.state.context_menu {
+            menu.list = MenuListState::new(close_idx);
+        }
         handle_context_menu_key(
             &mut app.state,
             &mut app.terminal_runtimes,
@@ -3614,18 +3783,22 @@ mod tests {
         app.state.selected = 0;
         app.state.confirm_close = false;
         app.state.context_menu = Some(ContextMenuState {
-            kind: ContextMenuKind::Workspace { ws_idx: 1 },
+            kind: ContextMenuKind::Workspace {
+                ws_idx: 1,
+                foldered: false,
+            },
             x: 2,
             y: 2,
             list: MenuListState::new(1),
         });
         app.state.mode = Mode::ContextMenu;
 
+        let close_idx = close_item_index(&app.state) as u16;
         let menu = app.state.context_menu_rect().unwrap();
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             menu.x + 2,
-            menu.y + 2,
+            menu.y + 1 + close_idx,
         ));
 
         assert_eq!(app.state.workspaces.len(), 1);
@@ -4505,6 +4678,165 @@ mod tests {
             viewport.y + 4,
         ));
         assert_eq!(app.state.workspaces[0].active_tab, 2);
+    }
+
+    #[test]
+    fn right_click_folder_header_opens_folder_context_menu() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let member = app.state.workspaces[1].id.clone();
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        app.state
+            .assign_workspace_to_folder(&member, Some(&folder_id), None)
+            .expect("assign");
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let header = app
+            .state
+            .view
+            .folder_header_areas
+            .first()
+            .expect("folder header area")
+            .clone();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            header.rect.x + 1,
+            header.rect.y,
+        ));
+
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        let menu = app.state.context_menu.as_ref().expect("folder menu");
+        assert_eq!(
+            menu.kind,
+            ContextMenuKind::Folder {
+                folder_id: folder_id.clone()
+            }
+        );
+        assert_eq!(menu.items(), vec!["Rename", "Delete"]);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn right_click_foldered_space_captures_membership_for_menu_items() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let member = app.state.workspaces[1].id.clone();
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        app.state
+            .assign_workspace_to_folder(&member, Some(&folder_id), None)
+            .expect("assign");
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let member_idx = app
+            .state
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == member)
+            .expect("member present");
+        let card = *app
+            .state
+            .view
+            .workspace_card_areas
+            .iter()
+            .find(|card| card.ws_idx == member_idx)
+            .expect("member card area");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            card.rect.x + 1,
+            card.rect.y,
+        ));
+
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        let menu = app.state.context_menu.as_ref().expect("space menu");
+        // Depending on the test environment's cwd the card resolves as a
+        // plain or a git space; membership capture must hold for both.
+        match &menu.kind {
+            ContextMenuKind::Workspace { ws_idx, foldered }
+            | ContextMenuKind::GitWorkspace {
+                ws_idx, foldered, ..
+            } => {
+                assert_eq!(*ws_idx, member_idx);
+                assert!(*foldered, "membership must be captured at open time");
+            }
+            other => panic!("expected a space context menu, got {other:?}"),
+        }
+        assert!(menu
+            .items()
+            .iter()
+            .any(|item| item == crate::app::state::MENU_ITEM_REMOVE_FROM_FOLDER));
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn right_click_spaces_panel_background_offers_folder_creation() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let list_area = app.state.workspace_list_rect();
+        let last_card_bottom = app
+            .state
+            .view
+            .workspace_card_areas
+            .iter()
+            .map(|card| card.rect.y + card.rect.height)
+            .max()
+            .expect("card areas");
+        let footer = app.state.sidebar_footer_rect();
+        let empty_row = last_card_bottom + 1;
+        assert!(
+            empty_row < footer.y,
+            "test needs an empty background row between cards and footer"
+        );
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            list_area.x + 1,
+            empty_row,
+        ));
+
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        let menu = app.state.context_menu.as_ref().expect("panel menu");
+        assert_eq!(menu.kind, ContextMenuKind::SpacesPanel);
+        assert_eq!(menu.items(), vec![crate::app::state::MENU_ITEM_NEW_FOLDER]);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn right_click_spaces_panel_footer_keeps_buttons_untouched() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let footer = app.state.sidebar_footer_rect();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            footer.x + 1,
+            footer.y,
+        ));
+
+        assert_ne!(app.state.mode, Mode::ContextMenu);
+        assert!(app.state.context_menu.is_none());
+        app.state.assert_invariants_for_test();
     }
 
     #[test]

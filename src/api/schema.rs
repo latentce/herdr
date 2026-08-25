@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub mod agents;
 pub mod common;
 pub mod events;
+pub mod folders;
 pub mod integrations;
 pub mod panes;
 pub mod plugins;
@@ -16,6 +17,7 @@ pub mod worktrees;
 pub use agents::*;
 pub use common::*;
 pub use events::*;
+pub use folders::*;
 pub use integrations::*;
 pub use panes::*;
 pub use plugins::*;
@@ -81,6 +83,18 @@ pub enum Method {
     WorkspaceReportMetadata(WorkspaceReportMetadataParams),
     #[serde(rename = "workspace.close")]
     WorkspaceClose(WorkspaceTarget),
+    #[serde(rename = "folder.create")]
+    FolderCreate(FolderCreateParams),
+    #[serde(rename = "folder.list")]
+    FolderList(EmptyParams),
+    #[serde(rename = "folder.rename")]
+    FolderRename(FolderRenameParams),
+    #[serde(rename = "folder.delete")]
+    FolderDelete(FolderTarget),
+    #[serde(rename = "folder.assign")]
+    FolderAssign(FolderAssignParams),
+    #[serde(rename = "folder.move")]
+    FolderMove(FolderMoveParams),
     #[serde(rename = "worktree.list")]
     WorktreeList(WorktreeListParams),
     #[serde(rename = "worktree.create")]

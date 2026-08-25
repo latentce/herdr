@@ -38,6 +38,7 @@ fn modified_url_click_modifier_matches_terminal_mouse_reporting() {
 
 mod clipboard;
 mod copy_mode;
+mod folders;
 mod lease;
 mod modal;
 mod mouse;
@@ -100,7 +101,7 @@ impl App {
                 Mode::ReleaseNotes => self.handle_release_notes_key(key_event),
                 Mode::ProductAnnouncement => self.handle_product_announcement_key(key_event),
                 Mode::Prefix | Mode::Navigate | Mode::Copy => unreachable!(),
-                Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
+                Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::RenameFolder => {
                     self.handle_rename_key_via_api(key_event)
                 }
                 Mode::NewLinkedWorktree => self.handle_worktree_create_key(key_event),
@@ -209,7 +210,7 @@ impl App {
 
     pub(crate) fn paste_into_active_text_input(&mut self, text: &str) -> bool {
         match self.state.mode {
-            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
+            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::RenameFolder => {
                 insert_rename_input_text(&mut self.state, text);
                 true
             }
@@ -424,13 +425,10 @@ impl App {
                         self.focus_pane_internal_via_api(ws_idx, pane_id)
                     }
                     MouseAction::FocusToastTarget => self.focus_toast_target_via_api(),
-                    MouseAction::MoveWorkspace {
-                        source_ws_idx,
-                        insert_idx,
-                    } => self.move_workspace_via_api(source_ws_idx, insert_idx),
-                    MouseAction::MoveWorkspaceBlock { params } => {
-                        self.move_workspace_block_via_api(params)
+                    MouseAction::AssignWorkspaceFolder { params } => {
+                        self.assign_workspace_folder_via_api(params)
                     }
+                    MouseAction::MoveFolder { params } => self.move_folder_via_api(params),
                     MouseAction::MoveTab {
                         ws_idx,
                         source_tab_idx,
@@ -726,9 +724,11 @@ pub(crate) fn is_modal_paste_shortcut(key: &KeyEvent) -> bool {
 
 pub(crate) fn modal_paste_target_active(state: &AppState) -> bool {
     match state.mode {
-        Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::NewLinkedWorktree => {
-            true
-        }
+        Mode::RenameWorkspace
+        | Mode::RenameTab
+        | Mode::RenamePane
+        | Mode::RenameFolder
+        | Mode::NewLinkedWorktree => true,
         Mode::OpenExistingWorktree => state
             .worktree_open
             .as_ref()
@@ -875,6 +875,9 @@ fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
         state.sidebar_width,
         state.sidebar_section_split,
         state.collapsed_space_keys.clone(),
+        state.collapsed_folder_ids.clone(),
+        state.collapsed_agent_space_ids.clone(),
+        &state.space_order,
     )
 }
 

@@ -9,6 +9,12 @@ use crate::detect::AgentState;
 use crate::layout::{PaneId, PaneInfo, SplitBorder};
 use crate::selection::Selection;
 
+pub(crate) use super::folders::FolderPressState;
+pub use super::folders::{
+    FolderHeaderArea, PendingFolderCreate, MENU_ITEM_MOVE_TO_FOLDER, MENU_ITEM_NEW_FOLDER,
+    MENU_ITEM_REMOVE_FROM_FOLDER,
+};
+
 pub(crate) type InstalledPluginRegistry =
     std::collections::HashMap<String, crate::api::schema::InstalledPluginInfo>;
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -651,7 +657,10 @@ impl Palette {
 pub struct WorkspaceCardArea {
     pub ws_idx: usize,
     pub rect: Rect,
+    /// Indented as a worktree family child under its parent checkout.
     pub indented: bool,
+    /// Nested under a folder header.
+    pub foldered: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -809,6 +818,7 @@ pub struct ViewState {
     pub layout: ViewLayout,
     pub sidebar_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
+    pub folder_header_areas: Vec<FolderHeaderArea>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
     pub tab_scroll_left_hit_area: Rect,
@@ -834,6 +844,7 @@ pub enum Mode {
     RenameWorkspace,
     RenameTab,
     RenamePane,
+    RenameFolder,
     NewLinkedWorktree,
     OpenExistingWorktree,
     ConfirmRemoveWorktree,
@@ -1012,6 +1023,9 @@ pub enum AgentPanelSort {
     #[default]
     Spaces,
     Priority,
+    /// Folder view: agents nested under their space, spaces under their
+    /// folder, mirroring the spaces panel's organization.
+    Folders,
 }
 
 // ---------------------------------------------------------------------------
@@ -1127,9 +1141,21 @@ pub struct SettingsState {
     pub original_theme: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkspaceDropTarget {
+    /// Top level, before the block anchored at this workspace index.
     Before(usize),
+    /// Top level, before this folder (and its contents).
+    BeforeFolder(String),
+    /// Inside a folder, before the member block anchored at this workspace
+    /// index.
+    InFolderBefore { folder_id: String, ws_idx: usize },
+    /// Inside a folder, after its last member (the gap row directly below
+    /// the folder's last member block).
+    InFolderEnd { folder_id: String },
+    /// Append into this folder (dropped onto its header row).
+    IntoFolder(String),
+    /// Top level, after the last entry.
     End,
 }
 
@@ -1137,6 +1163,11 @@ pub(crate) enum DragTarget {
     WorkspaceReorder {
         source_id: crate::app::InputSourceId,
         source_ws_idx: usize,
+        drop_target: Option<WorkspaceDropTarget>,
+    },
+    FolderReorder {
+        source_id: crate::app::InputSourceId,
+        folder_id: String,
         drop_target: Option<WorkspaceDropTarget>,
     },
     TabReorder {
@@ -1196,13 +1227,30 @@ pub(crate) struct TabPressState {
 pub enum ContextMenuKind {
     Workspace {
         ws_idx: usize,
+        /// Whether the space is inside a folder, captured at menu-open time.
+        foldered: bool,
+    },
+    Folder {
+        folder_id: String,
     },
     GitWorkspace {
         ws_idx: usize,
         is_linked_worktree: bool,
         has_worktree_children: bool,
         collapsed: bool,
+        /// Whether the space is inside a folder, captured at menu-open time.
+        foldered: bool,
     },
+    /// Second-level menu listing folder targets for "Move to folder ▸".
+    MoveToFolder {
+        ws_idx: usize,
+        /// `(folder_id, name)` snapshot in canonical top-level order,
+        /// excluding the folder the space is already in. Items dispatch by
+        /// index because duplicate folder names are allowed.
+        folders: Vec<(String, String)>,
+    },
+    /// Spaces-panel header/background menu.
+    SpacesPanel,
     Tab {
         ws_idx: usize,
         tab_idx: usize,
@@ -1226,31 +1274,63 @@ pub struct ContextMenuState {
 }
 
 impl ContextMenuState {
-    pub fn items(&self) -> Vec<&'static str> {
-        match self.kind {
-            ContextMenuKind::Workspace { .. } => vec!["Rename", "Close"],
+    pub fn items(&self) -> Vec<std::borrow::Cow<'static, str>> {
+        use std::borrow::Cow;
+
+        /// A space menu: Rename, the folder move items, then the
+        /// variant-specific tail.
+        fn space_items(foldered: bool, tail: &[&'static str]) -> Vec<Cow<'static, str>> {
+            let mut items = vec![
+                Cow::Borrowed("Rename"),
+                Cow::Borrowed(MENU_ITEM_MOVE_TO_FOLDER),
+            ];
+            if foldered {
+                items.push(Cow::Borrowed(MENU_ITEM_REMOVE_FROM_FOLDER));
+            }
+            items.extend(tail.iter().copied().map(Cow::Borrowed));
+            items
+        }
+
+        fn fixed(items: &[&'static str]) -> Vec<Cow<'static, str>> {
+            items.iter().copied().map(Cow::Borrowed).collect()
+        }
+
+        match &self.kind {
+            ContextMenuKind::Workspace { foldered, .. } => space_items(*foldered, &["Close"]),
+            ContextMenuKind::Folder { .. } => fixed(&["Rename", "Delete"]),
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: false,
+                foldered,
                 ..
-            } => vec!["Rename", "Close", "New worktree", "Open worktree..."],
+            } => space_items(*foldered, &["Close", "New worktree", "Open worktree..."]),
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: true,
+                foldered,
                 ..
-            } => vec!["Rename", "Close", "Delete worktree checkout..."],
+            } => space_items(*foldered, &["Close", "Delete worktree checkout..."]),
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: true,
                 collapsed,
+                foldered,
                 ..
-            } => vec![
-                "Rename",
-                "Close group",
-                "New worktree",
-                "Open worktree...",
-                if collapsed { "Expand" } else { "Collapse" },
-            ],
-            ContextMenuKind::Tab { .. } => vec!["New tab", "Rename", "Close"],
+            } => space_items(
+                *foldered,
+                &[
+                    "Close group",
+                    "New worktree",
+                    "Open worktree...",
+                    if *collapsed { "Expand" } else { "Collapse" },
+                ],
+            ),
+            ContextMenuKind::MoveToFolder { folders, .. } => folders
+                .iter()
+                .map(|(_, name)| Cow::Owned(name.clone()))
+                .chain(std::iter::once(Cow::Borrowed(MENU_ITEM_NEW_FOLDER)))
+                .collect(),
+            ContextMenuKind::SpacesPanel => fixed(&[MENU_ITEM_NEW_FOLDER]),
+            ContextMenuKind::Tab { .. } => fixed(&["New tab", "Rename", "Close"]),
             ContextMenuKind::Pane {
                 source_pane_id,
                 has_manual_label,
@@ -1258,20 +1338,20 @@ impl ContextMenuState {
                 ..
             } => {
                 let mut items = vec!["Rename pane"];
-                if has_manual_label {
+                if *has_manual_label {
                     items.push("Clear pane name");
                 }
                 if source_pane_id.is_some() {
                     items.push("Swap with focused pane");
                 }
                 items.extend(["Split right", "Split down", "Zoom"]);
-                items.push(if right_click_passthrough {
+                items.push(if *right_click_passthrough {
                     "Use Herdr right-click menu"
                 } else {
                     "Send right-clicks to pane"
                 });
                 items.push("Close pane");
-                items
+                fixed(&items)
             }
         }
     }
@@ -1560,6 +1640,29 @@ pub struct AppState {
     /// Terminal runtimes that should be shut down by the app/runtime layer
     /// after state has detached their terminal metadata.
     pub(crate) terminal_runtime_shutdowns: Vec<crate::terminal::TerminalId>,
+    // Fork: folders
+    /// Space order — the explicit top-level sequence interleaving folders and
+    /// loose spaces. Workspaces absent from it are implicitly loose at the
+    /// end. `workspaces` is kept sorted to the canonical flattening of this
+    /// order (see `canonical_workspace_order`).
+    pub space_order: Vec<crate::folder::SpaceOrderEntry>,
+    /// Folder being renamed while `mode == Mode::RenameFolder`.
+    pub rename_folder_target: Option<String>,
+    /// Folder creation prompt while `mode == Mode::RenameFolder` and no
+    /// `rename_folder_target` is set.
+    pub pending_folder_create: Option<PendingFolderCreate>,
+    /// Folder ids collapsed in the sidebar. One shared state across the
+    /// spaces panel and the agents panel folder view. Per-client presentation
+    /// state: persisted in the session snapshot (like `collapsed_space_keys`)
+    /// but never exposed through the API.
+    pub collapsed_folder_ids: std::collections::HashSet<String>,
+    /// Workspace ids whose agent list is collapsed in the agents panel folder
+    /// view. Independent of folder collapse and of other spaces. Per-client
+    /// presentation state: persisted in the session snapshot but never
+    /// exposed through the API.
+    pub collapsed_agent_space_ids: std::collections::HashSet<String>,
+    pub(crate) folder_presses:
+        std::collections::HashMap<crate::app::InputSourceId, FolderPressState>,
 }
 
 impl AppState {
@@ -1815,6 +1918,7 @@ impl AppState {
                 layout: ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
+                folder_header_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),
@@ -1936,6 +2040,13 @@ impl AppState {
             host_mouse_pixels: None,
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
+            // Fork: folders
+            space_order: Vec::new(),
+            rename_folder_target: None,
+            pending_folder_create: None,
+            collapsed_folder_ids: std::collections::HashSet::new(),
+            collapsed_agent_space_ids: std::collections::HashSet::new(),
+            folder_presses: std::collections::HashMap::new(),
         }
     }
 
@@ -1958,12 +2069,74 @@ impl AppState {
         }
     }
 
+    /// An app state born from adversarial identity and organization data:
+    /// workspace 0 carries adversarial pane/tab identity, and the space order
+    /// was restored from corrupt input — a split worktree family, dangling
+    /// folder refs, duplicate memberships, a missing order entry, and
+    /// dangling collapse state — healed through the restore repair path.
     pub fn test_with_adversarial_identity_state() -> Self {
         let mut state = Self::test_new();
         state.workspaces = vec![crate::workspace::Workspace::test_adversarial_identity_state()];
+
+        let family_member = |name: &str, is_linked: bool| {
+            let mut ws = crate::workspace::Workspace::test_new(name);
+            ws.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+                key: "adversarial-repo".into(),
+                label: "repo".into(),
+                repo_root: "/repo".into(),
+                checkout_path: if is_linked {
+                    format!("/repo/worktree-{name}").into()
+                } else {
+                    "/repo".into()
+                },
+                is_linked_worktree: is_linked,
+            });
+            ws
+        };
+        state
+            .workspaces
+            .push(family_member("adversarial-parent", false));
+        state
+            .workspaces
+            .push(family_member("adversarial-child", true));
+        state
+            .workspaces
+            .push(crate::workspace::Workspace::test_new("adversarial-loose"));
+        let identity = state.workspaces[0].id.clone();
+        let parent = state.workspaces[1].id.clone();
+        let child = state.workspaces[2].id.clone();
+
         state.active = Some(0);
         state.selected = 0;
         state.ensure_test_terminals();
+
+        // Corrupt restored organization, healed by `install_space_order`:
+        // the family is split across folders, a folder id repeats, spaces
+        // appear more than once, refs dangle, "adversarial-loose" is missing
+        // from the order, and collapse state names a missing folder and a
+        // missing workspace.
+        state.collapsed_folder_ids.insert("f1".into());
+        state.collapsed_folder_ids.insert("f-gone".into());
+        state
+            .collapsed_agent_space_ids
+            .insert(state.workspaces[0].id.clone());
+        state.collapsed_agent_space_ids.insert("w-gone".into());
+        state.prune_dangling_collapsed_agent_space_ids();
+        state.install_space_order(vec![
+            crate::folder::SpaceOrderEntry::Workspace(identity),
+            crate::folder::SpaceOrderEntry::Folder(crate::folder::Folder {
+                id: "f1".into(),
+                name: "adversarial".into(),
+                members: vec![parent.clone(), "w-gone".into(), parent],
+            }),
+            crate::folder::SpaceOrderEntry::Workspace(child.clone()),
+            crate::folder::SpaceOrderEntry::Folder(crate::folder::Folder {
+                id: "f1".into(),
+                name: "adversarial-dup".into(),
+                members: vec![child],
+            }),
+            crate::folder::SpaceOrderEntry::Workspace("w-gone".into()),
+        ]);
         state
     }
 
@@ -2044,9 +2217,11 @@ impl AppState {
                 self.host_mouse_pixels.is_none(),
                 "empty app state must not keep host mouse pixel provenance"
             );
+            self.assert_space_order_invariants_for_test();
             return;
         }
 
+        self.assert_space_order_invariants_for_test();
         assert!(
             self.selected < self.workspaces.len(),
             "selected workspace {} out of bounds for {} workspaces",
@@ -2196,6 +2371,30 @@ impl AppState {
             assert_live_pane(gesture.pane_info.id, "right-click passthrough gesture");
         }
         if let Some(drag) = &self.drag {
+            let assert_drop_target =
+                |drop_target: &Option<WorkspaceDropTarget>, what: &str| match drop_target {
+                    Some(WorkspaceDropTarget::Before(ws_idx)) => {
+                        assert_workspace_index(*ws_idx, what);
+                    }
+                    Some(WorkspaceDropTarget::InFolderBefore { folder_id, ws_idx }) => {
+                        assert_workspace_index(*ws_idx, what);
+                        assert!(
+                            self.folder(folder_id).is_some(),
+                            "{what} references unknown folder {folder_id}"
+                        );
+                    }
+                    Some(
+                        WorkspaceDropTarget::BeforeFolder(folder_id)
+                        | WorkspaceDropTarget::InFolderEnd { folder_id }
+                        | WorkspaceDropTarget::IntoFolder(folder_id),
+                    ) => {
+                        assert!(
+                            self.folder(folder_id).is_some(),
+                            "{what} references unknown folder {folder_id}"
+                        );
+                    }
+                    Some(WorkspaceDropTarget::End) | None => {}
+                };
             match &drag.target {
                 DragTarget::WorkspaceReorder {
                     source_ws_idx,
@@ -2203,9 +2402,29 @@ impl AppState {
                     ..
                 } => {
                     assert_workspace_index(*source_ws_idx, "workspace drag source");
-                    if let Some(WorkspaceDropTarget::Before(ws_idx)) = drop_target {
-                        assert_workspace_index(*ws_idx, "workspace drag target");
-                    }
+                    assert_drop_target(drop_target, "workspace drag target");
+                }
+                DragTarget::FolderReorder {
+                    folder_id,
+                    drop_target,
+                    ..
+                } => {
+                    assert!(
+                        self.folder(folder_id).is_some(),
+                        "folder drag references unknown folder {folder_id}"
+                    );
+                    assert_drop_target(drop_target, "folder drag target");
+                    assert!(
+                        !matches!(
+                            drop_target,
+                            Some(
+                                WorkspaceDropTarget::InFolderBefore { .. }
+                                    | WorkspaceDropTarget::InFolderEnd { .. }
+                                    | WorkspaceDropTarget::IntoFolder(_)
+                            )
+                        ),
+                        "folder drag target must stay at the top level"
+                    );
                 }
                 DragTarget::TabReorder {
                     ws_idx,
@@ -2233,17 +2452,36 @@ impl AppState {
         for press in self.workspace_presses.values() {
             assert_workspace_index(press.ws_idx, "workspace press");
         }
+        for press in self.folder_presses.values() {
+            assert!(
+                self.folder(&press.folder_id).is_some(),
+                "folder press references unknown folder {}",
+                press.folder_id
+            );
+        }
         for press in self.tab_presses.values() {
             assert_tab_index(press.ws_idx, press.tab_idx, "tab press");
         }
         if let Some(menu) = &self.context_menu {
-            match menu.kind {
-                ContextMenuKind::Workspace { ws_idx }
+            match &menu.kind {
+                ContextMenuKind::Workspace { ws_idx, .. }
                 | ContextMenuKind::GitWorkspace { ws_idx, .. } => {
-                    assert_workspace_index(ws_idx, "context menu workspace")
+                    assert_workspace_index(*ws_idx, "context menu workspace")
+                }
+                ContextMenuKind::MoveToFolder { ws_idx, .. } => {
+                    // The folder list is a deliberate open-time snapshot, so
+                    // only the workspace reference is asserted.
+                    assert_workspace_index(*ws_idx, "context menu move-to-folder")
+                }
+                ContextMenuKind::SpacesPanel => {}
+                ContextMenuKind::Folder { folder_id } => {
+                    assert!(
+                        self.folder(folder_id).is_some(),
+                        "context menu references unknown folder {folder_id}"
+                    );
                 }
                 ContextMenuKind::Tab { ws_idx, tab_idx } => {
-                    assert_tab_index(ws_idx, tab_idx, "context menu tab")
+                    assert_tab_index(*ws_idx, *tab_idx, "context menu tab")
                 }
                 ContextMenuKind::Pane {
                     ws_idx,
@@ -2252,6 +2490,7 @@ impl AppState {
                     source_pane_id,
                     ..
                 } => {
+                    let (ws_idx, tab_idx, pane_id) = (*ws_idx, *tab_idx, *pane_id);
                     assert_tab_index(ws_idx, tab_idx, "context menu pane tab");
                     assert!(
                         self.workspaces[ws_idx].tabs[tab_idx]
@@ -2262,7 +2501,7 @@ impl AppState {
                         ws_idx,
                         tab_idx
                     );
-                    if let Some(source_pane_id) = source_pane_id {
+                    if let Some(source_pane_id) = *source_pane_id {
                         assert_live_pane(source_pane_id, "context menu source pane");
                     }
                 }
@@ -2333,6 +2572,68 @@ mod tests {
         state.ensure_test_terminals();
 
         state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn adversarial_organization_state_heals_deterministically_on_restore() {
+        let find = |state: &AppState, name: &str| -> String {
+            state
+                .workspaces
+                .iter()
+                .find(|ws| ws.custom_name.as_deref() == Some(name))
+                .unwrap_or_else(|| panic!("workspace {name} present"))
+                .id
+                .clone()
+        };
+
+        let state = AppState::test_with_adversarial_identity_state();
+        state.assert_invariants_for_test();
+
+        // The split worktree family healed into the parent's folder.
+        let parent = find(&state, "adversarial-parent");
+        let child = find(&state, "adversarial-child");
+        assert_eq!(state.workspace_folder_id(&parent), Some("f1"));
+        assert_eq!(state.workspace_folder_id(&child), Some("f1"));
+        // The duplicate folder id merged; the missing order entry was
+        // appended loose at the end.
+        let loose = find(&state, "adversarial-loose");
+        assert_eq!(state.workspace_folder_id(&loose), None);
+        assert!(matches!(
+            state.space_order.last(),
+            Some(crate::folder::SpaceOrderEntry::Workspace(id)) if *id == loose
+        ));
+        // Collapse state survives for live folders and drops dangling ids.
+        assert!(state.collapsed_folder_ids.contains("f1"));
+        assert!(!state.collapsed_folder_ids.contains("f-gone"));
+        // Agent-list collapse survives for live workspaces and drops
+        // dangling ids.
+        let identity = find(&state, "adversarial-identity");
+        assert!(state.collapsed_agent_space_ids.contains(&identity));
+        assert!(!state.collapsed_agent_space_ids.contains("w-gone"));
+
+        // The same corrupt input heals to the same organization every time.
+        let again = AppState::test_with_adversarial_identity_state();
+        let shape = |state: &AppState| -> Vec<String> {
+            state
+                .space_order
+                .iter()
+                .map(|entry| match entry {
+                    crate::folder::SpaceOrderEntry::Workspace(id) => {
+                        let name = state
+                            .workspaces
+                            .iter()
+                            .find(|ws| &ws.id == id)
+                            .and_then(|ws| ws.custom_name.clone())
+                            .unwrap_or_default();
+                        format!("loose:{name}")
+                    }
+                    crate::folder::SpaceOrderEntry::Folder(folder) => {
+                        format!("{}:{}[{}]", folder.id, folder.name, folder.members.len())
+                    }
+                })
+                .collect()
+        };
+        assert_eq!(shape(&state), shape(&again));
     }
 
     fn navigator_row_for_display(is_workspace: bool) -> NavigatorRow {
@@ -2564,6 +2865,7 @@ mod tests {
                 is_linked_worktree: true,
                 has_worktree_children: false,
                 collapsed: false,
+                foldered: false,
             },
             x: 0,
             y: 0,
@@ -2572,7 +2874,12 @@ mod tests {
 
         assert_eq!(
             menu.items(),
-            &["Rename", "Close", "Delete worktree checkout..."]
+            &[
+                "Rename",
+                MENU_ITEM_MOVE_TO_FOLDER,
+                "Close",
+                "Delete worktree checkout..."
+            ]
         );
     }
 
@@ -2584,6 +2891,7 @@ mod tests {
                 is_linked_worktree: false,
                 has_worktree_children: false,
                 collapsed: false,
+                foldered: false,
             },
             x: 0,
             y: 0,
@@ -2592,7 +2900,13 @@ mod tests {
 
         assert_eq!(
             menu.items(),
-            &["Rename", "Close", "New worktree", "Open worktree..."]
+            &[
+                "Rename",
+                MENU_ITEM_MOVE_TO_FOLDER,
+                "Close",
+                "New worktree",
+                "Open worktree..."
+            ]
         );
     }
 
@@ -2604,6 +2918,7 @@ mod tests {
                 is_linked_worktree: false,
                 has_worktree_children: true,
                 collapsed: false,
+                foldered: false,
             },
             x: 0,
             y: 0,
@@ -2614,11 +2929,75 @@ mod tests {
             menu.items(),
             &[
                 "Rename",
+                MENU_ITEM_MOVE_TO_FOLDER,
                 "Close group",
                 "New worktree",
                 "Open worktree...",
                 "Collapse"
             ]
         );
+    }
+
+    #[test]
+    fn space_context_menu_shows_remove_from_folder_only_when_foldered() {
+        let loose = ContextMenuState {
+            kind: ContextMenuKind::Workspace {
+                ws_idx: 0,
+                foldered: false,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        assert_eq!(
+            loose.items(),
+            &["Rename", MENU_ITEM_MOVE_TO_FOLDER, "Close"]
+        );
+
+        let foldered = ContextMenuState {
+            kind: ContextMenuKind::Workspace {
+                ws_idx: 0,
+                foldered: true,
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        assert_eq!(
+            foldered.items(),
+            &[
+                "Rename",
+                MENU_ITEM_MOVE_TO_FOLDER,
+                MENU_ITEM_REMOVE_FROM_FOLDER,
+                "Close"
+            ]
+        );
+    }
+
+    #[test]
+    fn move_to_folder_menu_lists_folder_names_then_new_folder() {
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::MoveToFolder {
+                ws_idx: 0,
+                folders: vec![("f_1".into(), "work".into()), ("f_2".into(), "work".into())],
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+
+        assert_eq!(menu.items(), &["work", "work", MENU_ITEM_NEW_FOLDER]);
+    }
+
+    #[test]
+    fn spaces_panel_menu_offers_folder_creation() {
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::SpacesPanel,
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+
+        assert_eq!(menu.items(), &[MENU_ITEM_NEW_FOLDER]);
     }
 }

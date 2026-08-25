@@ -7,6 +7,8 @@ use crate::{
     app::{
         state::{
             AppState, ContextMenuKind, ContextMenuState, MenuListState, Mode, NavigatorStateFilter,
+            PendingFolderCreate, MENU_ITEM_MOVE_TO_FOLDER, MENU_ITEM_NEW_FOLDER,
+            MENU_ITEM_REMOVE_FROM_FOLDER,
         },
         App,
     },
@@ -375,10 +377,42 @@ pub(super) fn open_rename_workspace(
     state.pending_workspace_create_cwd = None;
     state.selected = ws_idx;
     state.rename_pane_target = None;
+    state.rename_folder_target = None;
+    state.pending_folder_create = None;
     state.name_input =
         state.workspaces[ws_idx].display_name_from(&state.terminals, terminal_runtimes);
     state.name_input_replace_on_type = false;
     state.mode = Mode::RenameWorkspace;
+}
+
+pub(super) fn open_rename_folder(state: &mut AppState, folder_id: &str) {
+    let Some(name) = state.folder(folder_id).map(|folder| folder.name.clone()) else {
+        return;
+    };
+    state.creating_new_tab = false;
+    state.requested_new_tab_name = None;
+    state.pending_workspace_create_cwd = None;
+    state.rename_pane_target = None;
+    state.pending_folder_create = None;
+    state.name_input = name;
+    state.rename_folder_target = Some(folder_id.to_string());
+    state.name_input_replace_on_type = false;
+    state.mode = Mode::RenameFolder;
+}
+
+/// Opens the shared rename modal to name a new folder. When
+/// `move_workspace_id` is set, saving also moves that space into the created
+/// folder (the "Move to folder ▸ New folder..." create-and-move flow).
+pub(super) fn open_new_folder_dialog(state: &mut AppState, move_workspace_id: Option<String>) {
+    state.creating_new_tab = false;
+    state.requested_new_tab_name = None;
+    state.pending_workspace_create_cwd = None;
+    state.rename_pane_target = None;
+    state.rename_folder_target = None;
+    state.pending_folder_create = Some(PendingFolderCreate { move_workspace_id });
+    state.name_input = String::new();
+    state.name_input_replace_on_type = false;
+    state.mode = Mode::RenameFolder;
 }
 
 pub(crate) fn open_new_workspace_dialog(state: &mut AppState, cwd: std::path::PathBuf) {
@@ -387,6 +421,8 @@ pub(crate) fn open_new_workspace_dialog(state: &mut AppState, cwd: std::path::Pa
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = Some(cwd);
     state.rename_pane_target = None;
+    state.rename_folder_target = None;
+    state.pending_folder_create = None;
     state.name_input = suggested_name;
     state.name_input_replace_on_type = true;
     state.mode = Mode::RenameWorkspace;
@@ -397,6 +433,8 @@ pub(super) fn open_rename_active_tab(state: &mut AppState, replace_on_type: bool
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.rename_pane_target = None;
+    state.rename_folder_target = None;
+    state.pending_folder_create = None;
     if let Some(ws) = state.active.and_then(|i| state.workspaces.get(i)) {
         if let Some(name) = ws.active_tab_display_name() {
             state.name_input = name;
@@ -418,6 +456,8 @@ pub(super) fn open_rename_pane(state: &mut AppState, pane_id: crate::layout::Pan
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.rename_pane_target = Some(pane_id);
+    state.rename_folder_target = None;
+    state.pending_folder_create = None;
     state.name_input = terminal
         .and_then(|t| t.manual_label.clone())
         .unwrap_or_default();
@@ -443,6 +483,8 @@ pub(super) fn open_new_tab_dialog(state: &mut AppState) {
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.rename_pane_target = None;
+    state.rename_folder_target = None;
+    state.pending_folder_create = None;
     state.name_input = next_new_tab_default_name(state);
     state.name_input_replace_on_type = true;
     state.mode = Mode::RenameTab;
@@ -454,6 +496,23 @@ pub(super) fn leave_modal(state: &mut AppState) {
     } else {
         state.mode = Mode::Navigate;
     }
+}
+
+/// Replaces the open space context menu with the "Move to folder ▸" submenu
+/// for the given workspace, keeping the menu position for continuity.
+fn open_move_to_folder_submenu(state: &mut AppState, ws_idx: usize, x: u16, y: u16) {
+    let Some(workspace_id) = state.workspaces.get(ws_idx).map(|ws| ws.id.clone()) else {
+        leave_modal(state);
+        return;
+    };
+    let folders = state.folder_move_targets(&workspace_id);
+    state.context_menu = Some(ContextMenuState {
+        kind: ContextMenuKind::MoveToFolder { ws_idx, folders },
+        x,
+        y,
+        list: MenuListState::new(0),
+    });
+    state.mode = Mode::ContextMenu;
 }
 
 pub(super) const ONBOARDING_WELCOME_ACTIONS: &[ModalActionSpec<ModalAction>] = &[ModalActionSpec {
@@ -578,11 +637,32 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                         }
                     }
                 }
+                Mode::RenameFolder if state.pending_folder_create.is_some() => {
+                    let pending = state.pending_folder_create.take();
+                    if let Ok(folder_id) = state.create_folder(&new_name) {
+                        if let Some(workspace_id) =
+                            pending.and_then(|pending| pending.move_workspace_id)
+                        {
+                            let _ = state.assign_workspace_to_folder(
+                                &workspace_id,
+                                Some(&folder_id),
+                                None,
+                            );
+                        }
+                    }
+                }
+                Mode::RenameFolder if !new_name.is_empty() => {
+                    if let Some(folder_id) = state.rename_folder_target.clone() {
+                        let _ = state.rename_folder(&folder_id, &new_name);
+                    }
+                }
                 _ => {}
             }
             state.creating_new_tab = false;
             state.pending_workspace_create_cwd = None;
             state.rename_pane_target = None;
+            state.rename_folder_target = None;
+            state.pending_folder_create = None;
             state.name_input.clear();
             state.name_input_replace_on_type = false;
             leave_modal(state);
@@ -596,6 +676,8 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
             state.requested_new_tab_name = None;
             state.pending_workspace_create_cwd = None;
             state.rename_pane_target = None;
+            state.rename_folder_target = None;
+            state.pending_folder_create = None;
             state.name_input.clear();
             state.name_input_replace_on_type = false;
             leave_modal(state);
@@ -766,7 +848,8 @@ pub(super) fn apply_context_menu_action(
     menu: ContextMenuState,
     idx: usize,
 ) {
-    let item = menu.items().get(idx).copied();
+    let items = menu.items();
+    let item = items.get(idx).map(|item| item.as_ref());
     match (menu.kind, item) {
         (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("New worktree")) => {
             state.request_new_linked_worktree = Some(ws_idx);
@@ -802,13 +885,57 @@ pub(super) fn apply_context_menu_action(
             leave_modal(state);
         }
         (
-            ContextMenuKind::Workspace { ws_idx } | ContextMenuKind::GitWorkspace { ws_idx, .. },
+            ContextMenuKind::Workspace { ws_idx, .. }
+            | ContextMenuKind::GitWorkspace { ws_idx, .. },
             Some("Rename"),
         ) => {
             open_rename_workspace(state, terminal_runtimes, ws_idx);
         }
         (
-            ContextMenuKind::Workspace { ws_idx } | ContextMenuKind::GitWorkspace { ws_idx, .. },
+            ContextMenuKind::Workspace { ws_idx, .. }
+            | ContextMenuKind::GitWorkspace { ws_idx, .. },
+            Some(MENU_ITEM_MOVE_TO_FOLDER),
+        ) => {
+            open_move_to_folder_submenu(state, ws_idx, menu.x, menu.y);
+        }
+        (
+            ContextMenuKind::Workspace { ws_idx, .. }
+            | ContextMenuKind::GitWorkspace { ws_idx, .. },
+            Some(MENU_ITEM_REMOVE_FROM_FOLDER),
+        ) => {
+            if let Some(workspace_id) = state.workspaces.get(ws_idx).map(|ws| ws.id.clone()) {
+                let _ = state.assign_workspace_to_folder(&workspace_id, None, None);
+            }
+            leave_modal(state);
+        }
+        (ContextMenuKind::MoveToFolder { ws_idx, folders }, item) => {
+            if let Some((folder_id, _)) = folders.get(idx) {
+                if let Some(workspace_id) = state.workspaces.get(ws_idx).map(|ws| ws.id.clone()) {
+                    let _ = state.assign_workspace_to_folder(&workspace_id, Some(folder_id), None);
+                }
+                leave_modal(state);
+            } else if item == Some(MENU_ITEM_NEW_FOLDER) {
+                let move_workspace_id = state.workspaces.get(ws_idx).map(|ws| ws.id.clone());
+                open_new_folder_dialog(state, move_workspace_id);
+            } else {
+                leave_modal(state);
+            }
+        }
+        (ContextMenuKind::SpacesPanel, Some(MENU_ITEM_NEW_FOLDER)) => {
+            open_new_folder_dialog(state, None);
+        }
+        (ContextMenuKind::Folder { folder_id }, Some("Rename")) => {
+            open_rename_folder(state, &folder_id);
+        }
+        (ContextMenuKind::Folder { folder_id }, Some("Delete")) => {
+            // Deleting never closes spaces: members return to the top level,
+            // so no confirmation is needed.
+            let _ = state.delete_folder(&folder_id);
+            leave_modal(state);
+        }
+        (
+            ContextMenuKind::Workspace { ws_idx, .. }
+            | ContextMenuKind::GitWorkspace { ws_idx, .. },
             Some("Close" | "Close group"),
         ) => {
             state.selected = ws_idx;
@@ -1094,6 +1221,41 @@ impl App {
                     }
                 }
             }
+            Mode::RenameFolder if self.state.pending_folder_create.is_some() => {
+                let pending = self.state.pending_folder_create.take();
+                if !new_name.trim().is_empty() {
+                    let response = self.runtime_folder_create(
+                        "tui.folder.create",
+                        crate::api::schema::FolderCreateParams { name: new_name },
+                    );
+                    // The loopback response carries the new folder's id, which
+                    // the create-and-move flow needs for the follow-up assign.
+                    if let (Some(folder_id), Some(workspace_id)) = (
+                        folder_id_from_create_response(&response),
+                        pending.and_then(|pending| pending.move_workspace_id),
+                    ) {
+                        self.runtime_folder_assign(
+                            "tui.folder.assign",
+                            crate::api::schema::FolderAssignParams {
+                                workspace_id,
+                                folder_id: Some(folder_id),
+                                position: None,
+                            },
+                        );
+                    }
+                }
+            }
+            Mode::RenameFolder if !new_name.is_empty() => {
+                if let Some(folder_id) = self.state.rename_folder_target.clone() {
+                    self.runtime_folder_rename(
+                        "tui.folder.rename",
+                        crate::api::schema::FolderRenameParams {
+                            folder_id,
+                            name: new_name,
+                        },
+                    );
+                }
+            }
             _ => {}
         }
 
@@ -1195,7 +1357,8 @@ impl App {
     }
 
     pub(crate) fn apply_context_menu_action_via_api(&mut self, menu: ContextMenuState, idx: usize) {
-        let item = menu.items().get(idx).copied();
+        let items = menu.items();
+        let item = items.get(idx).map(|item| item.as_ref());
         match (menu.kind, item) {
             (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("New worktree")) => {
                 self.state.request_new_linked_worktree = Some(ws_idx);
@@ -1232,12 +1395,76 @@ impl App {
                 leave_modal(&mut self.state);
             }
             (
-                ContextMenuKind::Workspace { ws_idx }
+                ContextMenuKind::Workspace { ws_idx, .. }
                 | ContextMenuKind::GitWorkspace { ws_idx, .. },
                 Some("Rename"),
             ) => open_rename_workspace(&mut self.state, &self.terminal_runtimes, ws_idx),
+            (ContextMenuKind::Folder { folder_id }, Some("Rename")) => {
+                open_rename_folder(&mut self.state, &folder_id);
+            }
+            (ContextMenuKind::Folder { folder_id }, Some("Delete")) => {
+                // Deleting never closes spaces: members return to the top
+                // level, so no confirmation is needed.
+                self.runtime_folder_delete("tui.folder.delete", folder_id);
+                leave_modal(&mut self.state);
+            }
             (
-                ContextMenuKind::Workspace { ws_idx }
+                ContextMenuKind::Workspace { ws_idx, .. }
+                | ContextMenuKind::GitWorkspace { ws_idx, .. },
+                Some(MENU_ITEM_MOVE_TO_FOLDER),
+            ) => {
+                open_move_to_folder_submenu(&mut self.state, ws_idx, menu.x, menu.y);
+            }
+            (
+                ContextMenuKind::Workspace { ws_idx, .. }
+                | ContextMenuKind::GitWorkspace { ws_idx, .. },
+                Some(MENU_ITEM_REMOVE_FROM_FOLDER),
+            ) => {
+                // Family atomicity is enforced by the assign mutation, so
+                // removing any worktree family member pulls the whole family
+                // back to the top level.
+                if let Some(workspace_id) =
+                    self.state.workspaces.get(ws_idx).map(|ws| ws.id.clone())
+                {
+                    self.runtime_folder_assign(
+                        "tui.folder.assign",
+                        crate::api::schema::FolderAssignParams {
+                            workspace_id,
+                            folder_id: None,
+                            position: None,
+                        },
+                    );
+                }
+                leave_modal(&mut self.state);
+            }
+            (ContextMenuKind::MoveToFolder { ws_idx, folders }, item) => {
+                if let Some((folder_id, _)) = folders.get(idx) {
+                    if let Some(workspace_id) =
+                        self.state.workspaces.get(ws_idx).map(|ws| ws.id.clone())
+                    {
+                        self.runtime_folder_assign(
+                            "tui.folder.assign",
+                            crate::api::schema::FolderAssignParams {
+                                workspace_id,
+                                folder_id: Some(folder_id.clone()),
+                                position: None,
+                            },
+                        );
+                    }
+                    leave_modal(&mut self.state);
+                } else if item == Some(MENU_ITEM_NEW_FOLDER) {
+                    let move_workspace_id =
+                        self.state.workspaces.get(ws_idx).map(|ws| ws.id.clone());
+                    open_new_folder_dialog(&mut self.state, move_workspace_id);
+                } else {
+                    leave_modal(&mut self.state);
+                }
+            }
+            (ContextMenuKind::SpacesPanel, Some(MENU_ITEM_NEW_FOLDER)) => {
+                open_new_folder_dialog(&mut self.state, None);
+            }
+            (
+                ContextMenuKind::Workspace { ws_idx, .. }
                 | ContextMenuKind::GitWorkspace { ws_idx, .. },
                 Some("Close" | "Close group"),
             ) => {
@@ -1384,11 +1611,21 @@ impl App {
     }
 }
 
+fn folder_id_from_create_response(response: &str) -> Option<String> {
+    let success: crate::api::schema::SuccessResponse = serde_json::from_str(response).ok()?;
+    match success.result {
+        crate::api::schema::ResponseResult::FolderCreated { folder_id } => Some(folder_id),
+        _ => None,
+    }
+}
+
 fn cancel_rename_modal(state: &mut AppState) {
     state.creating_new_tab = false;
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.rename_pane_target = None;
+    state.rename_folder_target = None;
+    state.pending_folder_create = None;
     state.name_input.clear();
     state.name_input_replace_on_type = false;
     leave_modal(state);
@@ -2181,6 +2418,572 @@ mod tests {
         assert_eq!(state.mode, Mode::Terminal);
     }
 
+    fn folder_menu(folder_id: &str) -> ContextMenuState {
+        ContextMenuState {
+            kind: ContextMenuKind::Folder {
+                folder_id: folder_id.to_string(),
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        }
+    }
+
+    #[test]
+    fn folder_context_menu_offers_rename_and_delete() {
+        let menu = folder_menu("f1");
+        assert_eq!(menu.items(), vec!["Rename", "Delete"]);
+    }
+
+    #[test]
+    fn folder_context_menu_rename_opens_prefilled_rename_folder_modal() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        app.state.mode = Mode::ContextMenu;
+
+        let menu = folder_menu(&folder_id);
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Rename")
+            .expect("rename item");
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        assert_eq!(app.state.mode, Mode::RenameFolder);
+        assert_eq!(app.state.name_input, "work");
+        assert_eq!(app.state.rename_folder_target.as_deref(), Some(&*folder_id));
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn rename_folder_modal_enter_saves_new_label() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        open_rename_folder(&mut app.state, &folder_id);
+        app.state.name_input = "  personal  ".into();
+
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert_eq!(
+            app.state.folder(&folder_id).expect("folder").name,
+            "personal"
+        );
+        assert_eq!(app.state.rename_folder_target, None);
+        assert_eq!(app.state.mode, Mode::Terminal);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn rename_folder_modal_ignores_empty_name_on_save() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        open_rename_folder(&mut app.state, &folder_id);
+        app.state.name_input = "   ".into();
+
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert_eq!(app.state.folder(&folder_id).expect("folder").name, "work");
+        assert_eq!(app.state.rename_folder_target, None);
+        assert_eq!(app.state.mode, Mode::Terminal);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn rename_folder_modal_esc_cancels_without_renaming() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        open_rename_folder(&mut app.state, &folder_id);
+        app.state.name_input = "personal".into();
+
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+
+        assert_eq!(app.state.folder(&folder_id).expect("folder").name, "work");
+        assert_eq!(app.state.rename_folder_target, None);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn folder_context_menu_delete_releases_members_without_confirmation() {
+        let mut app = app_with_test_workspaces(&["one", "two"]);
+        let w2 = app.state.workspaces[1].id.clone();
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        app.state
+            .assign_workspace_to_folder(&w2, Some(&folder_id), None)
+            .expect("assign");
+        app.state.mode = Mode::ContextMenu;
+
+        let menu = folder_menu(&folder_id);
+        let idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Delete")
+            .expect("delete item");
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        assert!(app.state.folder(&folder_id).is_none(), "folder deleted");
+        assert_eq!(app.state.workspace_folder_id(&w2), None);
+        assert_eq!(app.state.workspaces.len(), 2, "delete closes nothing");
+        assert_ne!(
+            app.state.mode,
+            Mode::ConfirmClose,
+            "delete must not ask for confirmation"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn pure_state_folder_context_menu_delete_releases_members() {
+        let mut state = state_with_workspaces(&["one", "two"]);
+        state.ensure_test_terminals();
+        let w2 = state.workspaces[1].id.clone();
+        let folder_id = state.create_folder("work").expect("create folder");
+        state
+            .assign_workspace_to_folder(&w2, Some(&folder_id), None)
+            .expect("assign");
+        state.mode = Mode::ContextMenu;
+        let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+
+        let menu = folder_menu(&folder_id);
+        apply_context_menu_action(&mut state, &mut terminal_runtimes, menu, 1);
+
+        assert!(state.folder(&folder_id).is_none());
+        assert_eq!(state.workspace_folder_id(&w2), None);
+        assert_eq!(state.workspaces.len(), 2);
+        state.assert_invariants_for_test();
+    }
+
+    fn workspace_menu(ws_idx: usize, foldered: bool) -> ContextMenuState {
+        ContextMenuState {
+            kind: ContextMenuKind::Workspace { ws_idx, foldered },
+            x: 3,
+            y: 4,
+            list: MenuListState::new(0),
+        }
+    }
+
+    fn item_index(menu: &ContextMenuState, label: &str) -> usize {
+        menu.items()
+            .iter()
+            .position(|item| item == label)
+            .unwrap_or_else(|| panic!("menu item {label:?} missing from {:?}", menu.items()))
+    }
+
+    fn mark_family(app: &mut App, ws_idx: usize, is_linked: bool) {
+        app.state.workspaces[ws_idx].worktree_space =
+            Some(crate::workspace::WorktreeSpaceMembership {
+                key: "repo-key".into(),
+                label: "herdr".into(),
+                repo_root: "/repo/herdr".into(),
+                checkout_path: if is_linked {
+                    "/repo/herdr-issue".into()
+                } else {
+                    "/repo/herdr".into()
+                },
+                is_linked_worktree: is_linked,
+            });
+    }
+
+    fn folder_events(app: &App) -> Vec<crate::api::schema::EventData> {
+        app.event_hub
+            .events_after(0)
+            .into_iter()
+            .map(|(_, envelope)| envelope.data)
+            .collect()
+    }
+
+    #[test]
+    fn move_to_folder_opens_submenu_excluding_current_folder() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        let w1 = app.state.workspaces[0].id.clone();
+        let home = app.state.create_folder("home").expect("create folder");
+        let work = app.state.create_folder("work").expect("create folder");
+        app.state
+            .assign_workspace_to_folder(&w1, Some(&home), None)
+            .expect("assign");
+        app.state.mode = Mode::ContextMenu;
+
+        let menu = workspace_menu(0, true);
+        let idx = item_index(&menu, MENU_ITEM_MOVE_TO_FOLDER);
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        let submenu = app.state.context_menu.as_ref().expect("submenu open");
+        assert_eq!(
+            submenu.kind,
+            ContextMenuKind::MoveToFolder {
+                ws_idx: 0,
+                folders: vec![(work.clone(), "work".into())],
+            },
+            "the current folder must be excluded from move targets"
+        );
+        assert_eq!(submenu.items(), vec!["work", MENU_ITEM_NEW_FOLDER]);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn move_to_folder_submenu_choice_moves_space_into_folder() {
+        let mut app = app_with_test_workspaces(&["one", "two"]);
+        let w2 = app.state.workspaces[1].id.clone();
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        app.state.mode = Mode::ContextMenu;
+
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::MoveToFolder {
+                ws_idx: 1,
+                folders: vec![(folder_id.clone(), "work".into())],
+            },
+            x: 3,
+            y: 4,
+            list: MenuListState::new(0),
+        };
+        app.apply_context_menu_action_via_api(menu, 0);
+
+        assert_eq!(app.state.workspace_folder_id(&w2), Some(folder_id.as_str()));
+        assert_ne!(app.state.mode, Mode::ContextMenu);
+        assert!(
+            folder_events(&app).iter().any(|data| matches!(
+                data,
+                crate::api::schema::EventData::FolderAssigned { folder_id: assigned, workspace_ids }
+                    if assigned.as_deref() == Some(folder_id.as_str())
+                        && *workspace_ids == vec![w2.clone()]
+            )),
+            "assign must emit folder.assigned"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn move_to_folder_submenu_choice_moves_whole_worktree_family() {
+        let mut app = app_with_test_workspaces(&["parent", "child", "other"]);
+        mark_family(&mut app, 0, false);
+        mark_family(&mut app, 1, true);
+        let parent = app.state.workspaces[0].id.clone();
+        let child = app.state.workspaces[1].id.clone();
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        app.state.mode = Mode::ContextMenu;
+
+        // Acting on the child must move the parent too.
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::MoveToFolder {
+                ws_idx: 1,
+                folders: vec![(folder_id.clone(), "work".into())],
+            },
+            x: 3,
+            y: 4,
+            list: MenuListState::new(0),
+        };
+        app.apply_context_menu_action_via_api(menu, 0);
+
+        assert_eq!(
+            app.state.workspace_folder_id(&parent),
+            Some(folder_id.as_str())
+        );
+        assert_eq!(
+            app.state.workspace_folder_id(&child),
+            Some(folder_id.as_str())
+        );
+        assert!(
+            folder_events(&app).iter().any(|data| matches!(
+                data,
+                crate::api::schema::EventData::FolderAssigned { workspace_ids, .. }
+                    if *workspace_ids == vec![parent.clone(), child.clone()]
+            )),
+            "the event must report all affected family members"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn remove_from_folder_returns_space_to_top_level() {
+        let mut app = app_with_test_workspaces(&["one", "two"]);
+        let w2 = app.state.workspaces[1].id.clone();
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        app.state
+            .assign_workspace_to_folder(&w2, Some(&folder_id), None)
+            .expect("assign");
+        app.state.mode = Mode::ContextMenu;
+
+        let menu = workspace_menu(1, true);
+        let idx = item_index(&menu, MENU_ITEM_REMOVE_FROM_FOLDER);
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        assert_eq!(app.state.workspace_folder_id(&w2), None);
+        assert!(
+            app.state.folder(&folder_id).is_some(),
+            "removing a member never deletes the folder"
+        );
+        assert!(
+            folder_events(&app).iter().any(|data| matches!(
+                data,
+                crate::api::schema::EventData::FolderAssigned { folder_id: None, workspace_ids }
+                    if *workspace_ids == vec![w2.clone()]
+            )),
+            "removal must emit folder.assigned with a null folder"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn remove_from_folder_pulls_whole_worktree_family_out() {
+        let mut app = app_with_test_workspaces(&["parent", "child"]);
+        mark_family(&mut app, 0, false);
+        mark_family(&mut app, 1, true);
+        let parent = app.state.workspaces[0].id.clone();
+        let child = app.state.workspaces[1].id.clone();
+        let folder_id = app.state.create_folder("work").expect("create folder");
+        app.state
+            .assign_workspace_to_folder(&parent, Some(&folder_id), None)
+            .expect("assign family");
+        app.state.mode = Mode::ContextMenu;
+
+        let menu = workspace_menu(1, true);
+        let idx = item_index(&menu, MENU_ITEM_REMOVE_FROM_FOLDER);
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        assert_eq!(app.state.workspace_folder_id(&parent), None);
+        assert_eq!(app.state.workspace_folder_id(&child), None);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn loose_space_context_menu_has_no_remove_from_folder() {
+        let menu = workspace_menu(0, false);
+        assert!(
+            !menu
+                .items()
+                .iter()
+                .any(|item| item == MENU_ITEM_REMOVE_FROM_FOLDER),
+            "remove-from-folder must only appear on foldered spaces"
+        );
+    }
+
+    #[test]
+    fn move_to_folder_new_folder_creates_and_moves_in_one_flow() {
+        let mut app = app_with_test_workspaces(&["one", "two"]);
+        let w2 = app.state.workspaces[1].id.clone();
+        app.state.mode = Mode::ContextMenu;
+
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::MoveToFolder {
+                ws_idx: 1,
+                folders: Vec::new(),
+            },
+            x: 3,
+            y: 4,
+            list: MenuListState::new(0),
+        };
+        let idx = item_index(&menu, MENU_ITEM_NEW_FOLDER);
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        assert_eq!(app.state.mode, Mode::RenameFolder);
+        assert_eq!(
+            app.state.pending_folder_create,
+            Some(PendingFolderCreate {
+                move_workspace_id: Some(w2.clone()),
+            })
+        );
+        assert_eq!(app.state.rename_folder_target, None);
+        assert_eq!(app.state.name_input, "");
+
+        app.state.name_input = "  work  ".into();
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        let folder_id = app
+            .state
+            .workspace_folder_id(&w2)
+            .expect("space moved into the new folder")
+            .to_string();
+        assert_eq!(app.state.folder(&folder_id).expect("folder").name, "work");
+        assert_eq!(app.state.pending_folder_create, None);
+        assert_ne!(app.state.mode, Mode::RenameFolder);
+        let events = folder_events(&app);
+        assert!(events.iter().any(|data| matches!(
+            data,
+            crate::api::schema::EventData::FolderCreated { folder }
+                if folder.folder_id == folder_id
+        )));
+        assert!(events.iter().any(|data| matches!(
+            data,
+            crate::api::schema::EventData::FolderAssigned { folder_id: assigned, workspace_ids }
+                if assigned.as_deref() == Some(folder_id.as_str())
+                    && *workspace_ids == vec![w2.clone()]
+        )));
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn move_to_folder_family_member_new_folder_moves_whole_family() {
+        let mut app = app_with_test_workspaces(&["parent", "child"]);
+        mark_family(&mut app, 0, false);
+        mark_family(&mut app, 1, true);
+        let parent = app.state.workspaces[0].id.clone();
+        let child = app.state.workspaces[1].id.clone();
+        app.state.mode = Mode::ContextMenu;
+
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::MoveToFolder {
+                ws_idx: 1,
+                folders: Vec::new(),
+            },
+            x: 3,
+            y: 4,
+            list: MenuListState::new(0),
+        };
+        let idx = item_index(&menu, MENU_ITEM_NEW_FOLDER);
+        app.apply_context_menu_action_via_api(menu, idx);
+        app.state.name_input = "work".into();
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        let folder_id = app
+            .state
+            .workspace_folder_id(&child)
+            .expect("child moved into new folder")
+            .to_string();
+        assert_eq!(
+            app.state.workspace_folder_id(&parent),
+            Some(folder_id.as_str()),
+            "the whole family must join the created folder"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn spaces_panel_menu_new_folder_creates_empty_folder() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        app.state.mode = Mode::ContextMenu;
+
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::SpacesPanel,
+            x: 3,
+            y: 4,
+            list: MenuListState::new(0),
+        };
+        let idx = item_index(&menu, MENU_ITEM_NEW_FOLDER);
+        app.apply_context_menu_action_via_api(menu, idx);
+
+        assert_eq!(app.state.mode, Mode::RenameFolder);
+        assert_eq!(
+            app.state.pending_folder_create,
+            Some(PendingFolderCreate {
+                move_workspace_id: None,
+            })
+        );
+
+        app.state.name_input = "later".into();
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        let folder = app
+            .state
+            .space_order
+            .iter()
+            .find_map(|entry| match entry {
+                crate::folder::SpaceOrderEntry::Folder(folder) => Some(folder),
+                _ => None,
+            })
+            .expect("folder created");
+        assert_eq!(folder.name, "later");
+        assert!(folder.members.is_empty(), "the new folder starts empty");
+        assert_eq!(app.state.pending_folder_create, None);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn new_folder_modal_esc_cancels_without_creating() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        open_new_folder_dialog(&mut app.state, None);
+        app.state.name_input = "work".into();
+
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+
+        assert!(
+            !app.state
+                .space_order
+                .iter()
+                .any(|entry| matches!(entry, crate::folder::SpaceOrderEntry::Folder(_))),
+            "cancel must not create a folder"
+        );
+        assert_eq!(app.state.pending_folder_create, None);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn new_folder_modal_whitespace_name_creates_nothing() {
+        let mut app = app_with_test_workspaces(&["one"]);
+        let w1 = app.state.workspaces[0].id.clone();
+        open_new_folder_dialog(&mut app.state, Some(w1));
+        app.state.name_input = "   ".into();
+
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert!(
+            !app.state
+                .space_order
+                .iter()
+                .any(|entry| matches!(entry, crate::folder::SpaceOrderEntry::Folder(_))),
+            "whitespace-only names are rejected"
+        );
+        assert_eq!(app.state.pending_folder_create, None);
+        assert_ne!(app.state.mode, Mode::RenameFolder);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn pure_state_move_to_folder_submenu_assigns_and_new_folder_prompts() {
+        let mut state = state_with_workspaces(&["one", "two"]);
+        state.ensure_test_terminals();
+        let w2 = state.workspaces[1].id.clone();
+        let folder_id = state.create_folder("work").expect("create folder");
+        state.mode = Mode::ContextMenu;
+        let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+
+        let menu = workspace_menu(1, false);
+        let idx = item_index(&menu, MENU_ITEM_MOVE_TO_FOLDER);
+        apply_context_menu_action(&mut state, &mut terminal_runtimes, menu, idx);
+
+        let submenu_kind = state
+            .context_menu
+            .as_ref()
+            .expect("submenu open")
+            .kind
+            .clone();
+        assert_eq!(
+            submenu_kind,
+            ContextMenuKind::MoveToFolder {
+                ws_idx: 1,
+                folders: vec![(folder_id.clone(), "work".into())],
+            }
+        );
+
+        let submenu = state.context_menu.take().expect("submenu open");
+        apply_context_menu_action(&mut state, &mut terminal_runtimes, submenu, 0);
+        assert_eq!(state.workspace_folder_id(&w2), Some(folder_id.as_str()));
+
+        // The pure-state save path also covers the create-and-move flow.
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::MoveToFolder {
+                ws_idx: 1,
+                folders: Vec::new(),
+            },
+            x: 0,
+            y: 0,
+            list: MenuListState::new(0),
+        };
+        apply_context_menu_action(&mut state, &mut terminal_runtimes, menu, 0);
+        assert_eq!(state.mode, Mode::RenameFolder);
+        state.name_input = "new home".into();
+        apply_rename_action(&mut state, ModalAction::Save);
+        let new_folder_id = state
+            .workspace_folder_id(&w2)
+            .expect("space moved into created folder")
+            .to_string();
+        assert_ne!(new_folder_id, folder_id);
+        assert_eq!(
+            state.folder(&new_folder_id).expect("folder").name,
+            "new home"
+        );
+        state.assert_invariants_for_test();
+    }
+
     #[test]
     fn context_menu_close_group_opens_group_close_confirmation() {
         let mut state = state_with_workspaces(&["main", "issue"]);
@@ -2206,14 +3009,20 @@ mod tests {
                 is_linked_worktree: false,
                 has_worktree_children: true,
                 collapsed: false,
+                foldered: false,
             },
             x: 0,
             y: 0,
             list: MenuListState::new(0),
         };
         let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let close_idx = menu
+            .items()
+            .iter()
+            .position(|item| item == "Close group")
+            .expect("close group item");
 
-        apply_context_menu_action(&mut state, &mut terminal_runtimes, menu, 1);
+        apply_context_menu_action(&mut state, &mut terminal_runtimes, menu, close_idx);
 
         assert_eq!(state.selected, 0);
         assert_eq!(state.mode, Mode::ConfirmClose);

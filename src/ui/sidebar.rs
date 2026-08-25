@@ -1,4 +1,6 @@
+mod folders;
 mod tokens;
+pub(crate) use folders::*;
 
 use ratatui::{
     layout::{Alignment, Rect},
@@ -82,6 +84,7 @@ fn agent_panel_sort_label(sort: AgentPanelSort) -> &'static str {
     match sort {
         AgentPanelSort::Spaces => "grouped",
         AgentPanelSort::Priority => "priority",
+        AgentPanelSort::Folders => "folders",
     }
 }
 
@@ -231,11 +234,20 @@ fn workspace_row_height_in_body(
 }
 
 fn workspace_entry_gap(app: &AppState, entries: &[WorkspaceListEntry], entry_idx: usize) -> u16 {
-    if entry_idx + 1 < entries.len() && !next_entry_is_indented_workspace(entries, entry_idx) {
-        app.sidebar_spaces.row_gap
-    } else {
-        0
+    if entry_idx + 1 >= entries.len() || next_entry_is_indented_workspace(entries, entry_idx) {
+        return 0;
     }
+    // A folder header hugs its first member.
+    if matches!(
+        entries.get(entry_idx),
+        Some(WorkspaceListEntry::FolderHeader { .. })
+    ) && matches!(
+        entries.get(entry_idx + 1),
+        Some(WorkspaceListEntry::Workspace { foldered: true, .. })
+    ) {
+        return 0;
+    }
+    app.sidebar_spaces.row_gap
 }
 
 fn workspace_attention_priority(state: AgentState, seen: bool) -> u8 {
@@ -300,7 +312,16 @@ pub(crate) fn grouped_child_display_label(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkspaceListEntry {
-    Workspace { ws_idx: usize, indented: bool },
+    /// A folder header row. `order_idx` indexes into `AppState::space_order`
+    /// (always a `SpaceOrderEntry::Folder` entry).
+    FolderHeader { order_idx: usize },
+    Workspace {
+        ws_idx: usize,
+        /// Indented as a worktree family child under its parent checkout.
+        indented: bool,
+        /// Nested under a folder header.
+        foldered: bool,
+    },
 }
 
 pub(crate) fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], idx: usize) -> bool {
@@ -371,9 +392,29 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
             .map(|space| space.key.clone())
     });
 
+    let idx_by_id: std::collections::HashMap<&str, usize> = if app.space_order.is_empty() {
+        // Fast path: sessions without folders never look up ids by name.
+        std::collections::HashMap::new()
+    } else {
+        app.workspaces
+            .iter()
+            .enumerate()
+            .map(|(ws_idx, ws)| (ws.id.as_str(), ws_idx))
+            .collect()
+    };
+    let mut listed = vec![false; app.workspaces.len()];
     let mut emitted_groups = std::collections::HashSet::<String>::new();
     let mut entries = Vec::new();
-    for (ws_idx, ws) in app.workspaces.iter().enumerate() {
+
+    // Emit one workspace at this position — hoisting its whole worktree
+    // family (parent first, children indented) when it belongs to one.
+    let emit_workspace = |ws_idx: usize,
+                          foldered: bool,
+                          emitted_groups: &mut std::collections::HashSet<String>,
+                          entries: &mut Vec<WorkspaceListEntry>| {
+        let Some(ws) = app.workspaces.get(ws_idx) else {
+            return;
+        };
         let Some(space) = ws
             .worktree_space()
             .filter(|space| grouped_keys.contains(&space.key))
@@ -381,16 +422,17 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
             entries.push(WorkspaceListEntry::Workspace {
                 ws_idx,
                 indented: false,
+                foldered,
             });
-            continue;
+            return;
         };
 
         if !emitted_groups.insert(space.key.clone()) {
-            continue;
+            return;
         }
 
         let Some(members) = members_by_key.get(&space.key) else {
-            continue;
+            return;
         };
         let Some(parent_idx) = members.iter().copied().find(|idx| {
             app.workspaces
@@ -401,13 +443,15 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
             entries.push(WorkspaceListEntry::Workspace {
                 ws_idx,
                 indented: false,
+                foldered,
             });
-            continue;
+            return;
         };
         let collapsed = !force_expanded && app.collapsed_space_keys.contains(&space.key);
         entries.push(WorkspaceListEntry::Workspace {
             ws_idx: parent_idx,
             indented: false,
+            foldered,
         });
 
         if collapsed {
@@ -418,6 +462,7 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
                 entries.push(WorkspaceListEntry::Workspace {
                     ws_idx: active_idx,
                     indented: true,
+                    foldered,
                 });
             }
         } else {
@@ -428,8 +473,52 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
                 entries.push(WorkspaceListEntry::Workspace {
                     ws_idx: *member_idx,
                     indented: true,
+                    foldered,
                 });
             }
+        }
+    };
+
+    // Walk the explicit space order: loose spaces flat, folder members under
+    // their header. Stale/duplicate references are skipped; workspaces missing
+    // from the order are implicitly loose at the end.
+    for (order_idx, order_entry) in app.space_order.iter().enumerate() {
+        match order_entry {
+            crate::folder::SpaceOrderEntry::Workspace(id) => {
+                let Some(&ws_idx) = idx_by_id.get(id.as_str()) else {
+                    continue;
+                };
+                if std::mem::replace(&mut listed[ws_idx], true) {
+                    continue;
+                }
+                emit_workspace(ws_idx, false, &mut emitted_groups, &mut entries);
+            }
+            crate::folder::SpaceOrderEntry::Folder(folder) => {
+                entries.push(WorkspaceListEntry::FolderHeader { order_idx });
+                let folder_collapsed =
+                    !force_expanded && app.collapsed_folder_ids.contains(&folder.id);
+                for member in &folder.members {
+                    let Some(&ws_idx) = idx_by_id.get(member.as_str()) else {
+                        continue;
+                    };
+                    if std::mem::replace(&mut listed[ws_idx], true) {
+                        continue;
+                    }
+                    if folder_collapsed {
+                        // Unlike worktree-group collapse, a collapsed folder
+                        // hides all members unconditionally; the folder
+                        // header carries the active/selected highlight
+                        // instead (see `collapsed_folder_header_highlight`).
+                        continue;
+                    }
+                    emit_workspace(ws_idx, true, &mut emitted_groups, &mut entries);
+                }
+            }
+        }
+    }
+    for (ws_idx, ws_listed) in listed.iter().enumerate() {
+        if !ws_listed {
+            emit_workspace(ws_idx, false, &mut emitted_groups, &mut entries);
         }
     }
     entries
@@ -463,7 +552,13 @@ fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> us
     let entries = workspace_list_entries(app);
     for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
         let (row_height, gap) = match entry {
-            WorkspaceListEntry::Workspace { ws_idx, indented } => {
+            WorkspaceListEntry::FolderHeader { .. } => (
+                FOLDER_HEADER_ROWS.min(body.height),
+                workspace_entry_gap(app, &entries, entry_idx),
+            ),
+            WorkspaceListEntry::Workspace {
+                ws_idx, indented, ..
+            } => {
                 let Some(ws) = app.workspaces.get(*ws_idx) else {
                     continue;
                 };
@@ -489,13 +584,19 @@ fn workspace_list_bottom_start(app: &AppState, area: Rect) -> usize {
     let mut used_rows = 0u16;
     let mut start = entries.len();
     for (entry_idx, entry) in entries.iter().enumerate().rev() {
-        let WorkspaceListEntry::Workspace { ws_idx, indented } = entry;
-        let Some(workspace) = app.workspaces.get(*ws_idx) else {
-            continue;
+        let row_height = match entry {
+            WorkspaceListEntry::FolderHeader { .. } => FOLDER_HEADER_ROWS.min(body.height),
+            WorkspaceListEntry::Workspace {
+                ws_idx, indented, ..
+            } => {
+                let Some(workspace) = app.workspaces.get(*ws_idx) else {
+                    continue;
+                };
+                workspace_row_height_in_body(app, workspace, *indented, body.height)
+            }
         };
         let gap = workspace_entry_gap(app, &entries, entry_idx);
-        let needed = workspace_row_height_in_body(app, workspace, *indented, body.height)
-            .saturating_add(gap);
+        let needed = row_height.saturating_add(gap);
         if used_rows.saturating_add(needed) > body.height {
             break;
         }
@@ -563,14 +664,6 @@ pub(crate) fn agent_entry_height_in_body(
         .min(body_height)
 }
 
-pub(crate) fn agent_entry_gap(app: &AppState, entry_idx: usize, entry_count: usize) -> u16 {
-    if entry_idx + 1 < entry_count {
-        app.sidebar_agents.row_gap
-    } else {
-        0
-    }
-}
-
 fn agent_panel_visible_count_from(app: &AppState, area: Rect, scroll: usize) -> usize {
     let body = agent_panel_body_rect(area, false);
     if body.width == 0 || body.height == 0 {
@@ -580,15 +673,16 @@ fn agent_panel_visible_count_from(app: &AppState, area: Rect, scroll: usize) -> 
     let mut used_rows = 0u16;
     let mut visible = 0usize;
     let entries = agent_panel_entries(app);
-    for (index, entry) in entries.iter().enumerate().skip(scroll) {
-        let height = agent_entry_height_in_body(app, entry, body.height);
+    let rows = agent_panel_list_entries(app, &entries);
+    for (index, row) in rows.iter().enumerate().skip(scroll) {
+        let height = agent_row_height_in_body(app, &entries, row, body.height);
         if used_rows.saturating_add(height) > body.height {
             break;
         }
         used_rows = used_rows.saturating_add(height);
         visible += 1;
         used_rows = used_rows
-            .saturating_add(agent_entry_gap(app, index, entries.len()))
+            .saturating_add(agent_row_gap(app, &rows, index))
             .min(body.height);
     }
     visible
@@ -597,18 +691,19 @@ fn agent_panel_visible_count_from(app: &AppState, area: Rect, scroll: usize) -> 
 fn agent_panel_bottom_start(app: &AppState, area: Rect) -> usize {
     let body = agent_panel_body_rect(area, false);
     let entries = agent_panel_entries(app);
+    let rows = agent_panel_list_entries(app, &entries);
     let mut used_rows = 0u16;
-    let mut start = entries.len();
-    for (index, entry) in entries.iter().enumerate().rev() {
-        let gap = agent_entry_gap(app, index, entries.len());
-        let needed = agent_entry_height_in_body(app, entry, body.height).saturating_add(gap);
+    let mut start = rows.len();
+    for (index, row) in rows.iter().enumerate().rev() {
+        let gap = agent_row_gap(app, &rows, index);
+        let needed = agent_row_height_in_body(app, &entries, row, body.height).saturating_add(gap);
         if used_rows.saturating_add(needed) > body.height {
             break;
         }
         used_rows = used_rows.saturating_add(needed);
         start = index;
     }
-    start.min(entries.len().saturating_sub(1))
+    start.min(rows.len().saturating_sub(1))
 }
 
 pub(crate) fn agent_panel_scroll_for_target(
@@ -658,7 +753,10 @@ pub(crate) fn agent_panel_scrollbar_rect(app: &AppState, area: Rect) -> Option<R
 pub(crate) fn compute_workspace_list_areas(
     app: &AppState,
     area: Rect,
-) -> (Vec<crate::app::state::WorkspaceCardArea>, Vec<()>) {
+) -> (
+    Vec<crate::app::state::WorkspaceCardArea>,
+    Vec<crate::app::state::FolderHeaderArea>,
+) {
     let ws_area = workspace_list_rect(area, app.sidebar_section_split);
     if ws_area == Rect::default() {
         return (Vec::new(), Vec::new());
@@ -674,12 +772,36 @@ pub(crate) fn compute_workspace_list_areas(
     let mut row_y = body.y;
     let body_bottom = body.y + body.height;
     let mut cards = Vec::new();
-    let headers = Vec::new();
+    let mut headers = Vec::new();
 
     let entries = workspace_list_entries(app);
     for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
         match entry {
-            WorkspaceListEntry::Workspace { ws_idx, indented } => {
+            WorkspaceListEntry::FolderHeader { order_idx } => {
+                let Some(crate::folder::SpaceOrderEntry::Folder(folder)) =
+                    app.space_order.get(*order_idx)
+                else {
+                    continue;
+                };
+                let row_height = FOLDER_HEADER_ROWS.min(body.height);
+                let gap = workspace_entry_gap(app, &entries, entry_idx);
+                if row_y.saturating_add(row_height) > body_bottom {
+                    break;
+                }
+                headers.push(crate::app::state::FolderHeaderArea {
+                    folder_id: folder.id.clone(),
+                    rect: Rect::new(body.x, row_y, body.width, row_height),
+                });
+                row_y = row_y
+                    .saturating_add(row_height)
+                    .saturating_add(gap)
+                    .min(body_bottom);
+            }
+            WorkspaceListEntry::Workspace {
+                ws_idx,
+                indented,
+                foldered,
+            } => {
                 let Some(ws) = app.workspaces.get(*ws_idx) else {
                     continue;
                 };
@@ -692,6 +814,7 @@ pub(crate) fn compute_workspace_list_areas(
                     ws_idx: *ws_idx,
                     rect: Rect::new(body.x, row_y, body.width, row_height),
                     indented: *indented,
+                    foldered: *foldered,
                 });
                 row_y = row_y
                     .saturating_add(row_height)
@@ -882,87 +1005,203 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
     render_sidebar_toggle(app, frame, area, true, p);
 }
 
+/// Legal insertion points for a spaces-panel drag, in visual order. Each slot
+/// pairs a drop target with its indicator row. Slots exist before every
+/// top-level block (loose space, worktree family, or folder) and before every
+/// member block inside an expanded folder. The gap directly below a folder's
+/// last member is an end-of-folder slot (append), with the following
+/// top-level slot pushed one row further — except when a folder header
+/// follows: the single gap keeps its top-level meaning there because the
+/// header row itself already appends (`IntoFolder`), which is also how
+/// appending into a folder works in general.
 pub(crate) fn workspace_drop_slots(
     app: &AppState,
     cards: &[crate::app::state::WorkspaceCardArea],
+    headers: &[crate::app::state::FolderHeaderArea],
     area: Rect,
 ) -> Vec<(crate::app::state::WorkspaceDropTarget, u16)> {
-    if area.height == 0 || cards.is_empty() {
+    use crate::app::state::WorkspaceDropTarget;
+
+    if area.height == 0 || (cards.is_empty() && headers.is_empty()) {
         return Vec::new();
     }
     let list_bottom = area.y + area.height.saturating_sub(1);
     let entries = workspace_list_entries(app);
-    let entry_position = |ws_idx| {
-        entries.iter().position(|entry| {
-            matches!(
-                entry,
-                WorkspaceListEntry::Workspace {
-                    ws_idx: entry_ws_idx,
-                    ..
-                } if *entry_ws_idx == ws_idx
-            )
-        })
+    let folder_id_at = |order_idx: usize| match app.space_order.get(order_idx) {
+        Some(crate::folder::SpaceOrderEntry::Folder(folder)) => Some(folder.id.clone()),
+        _ => None,
     };
-    let block_root_at = |entry_idx: usize| {
-        entries[..=entry_idx]
+    // The folder containing the entry at `idx`: the nearest preceding header,
+    // unless a non-foldered workspace closes the folder run first.
+    let containing_folder = |idx: usize| -> Option<String> {
+        entries[..=idx].iter().rev().find_map(|entry| match entry {
+            WorkspaceListEntry::FolderHeader { order_idx } => Some(folder_id_at(*order_idx)),
+            WorkspaceListEntry::Workspace {
+                foldered: false, ..
+            } => Some(None),
+            WorkspaceListEntry::Workspace { .. } => None,
+        })?
+    };
+    let card_rect = |ws_idx: usize| {
+        cards
             .iter()
-            .rev()
-            .find_map(|entry| match entry {
-                WorkspaceListEntry::Workspace {
-                    ws_idx,
-                    indented: false,
-                } => Some(*ws_idx),
-                WorkspaceListEntry::Workspace { .. } => None,
-            })
+            .find(|card| card.ws_idx == ws_idx)
+            .map(|card| card.rect)
+    };
+    let header_rect = |folder_id: &str| {
+        headers
+            .iter()
+            .find(|header| header.folder_id == folder_id)
+            .map(|header| header.rect)
     };
 
-    let mut slots = Vec::new();
-    let mut previous_root = None;
-    for card in cards {
-        let Some(entry_idx) = entry_position(card.ws_idx) else {
-            continue;
-        };
-        let Some(root_idx) = block_root_at(entry_idx) else {
-            continue;
-        };
-        if previous_root == Some(root_idx) {
-            continue;
-        }
-        previous_root = Some(root_idx);
-        if let Some(row) = card.rect.y.checked_sub(1).filter(|row| *row < list_bottom) {
-            slots.push((
-                crate::app::state::WorkspaceDropTarget::Before(root_idx),
-                row,
-            ));
+    let mut slots: Vec<(WorkspaceDropTarget, u16)> = Vec::new();
+    // Entry index and bottom row of the lowest visible element, for the
+    // trailing slot after the last card or header.
+    let mut last_visible: Option<(usize, u16)> = None;
+    let mut previous_was_header = false;
+    // Folder id and bottom row of the folder member block ending at the
+    // previous visible entry, for the end-of-folder slot below it.
+    let mut previous_folder_member: Option<(String, u16)> = None;
+    for (entry_idx, entry) in entries.iter().enumerate() {
+        let was_header = std::mem::replace(&mut previous_was_header, false);
+        match entry {
+            WorkspaceListEntry::FolderHeader { order_idx } => {
+                previous_was_header = true;
+                // No end-of-folder slot before a header: the single gap row
+                // must keep its top-level meaning (the header row itself is
+                // claimed by the append-into-folder drop).
+                previous_folder_member = None;
+                let Some(folder_id) = folder_id_at(*order_idx) else {
+                    continue;
+                };
+                let Some(rect) = header_rect(&folder_id) else {
+                    continue;
+                };
+                last_visible = Some((entry_idx, rect.y.saturating_add(rect.height)));
+                if let Some(row) = rect.y.checked_sub(1).filter(|row| *row < list_bottom) {
+                    slots.push((WorkspaceDropTarget::BeforeFolder(folder_id), row));
+                }
+            }
+            WorkspaceListEntry::Workspace {
+                ws_idx,
+                indented,
+                foldered,
+            } => {
+                let Some(rect) = card_rect(*ws_idx) else {
+                    continue;
+                };
+                let bottom = rect.y.saturating_add(rect.height);
+                last_visible = Some((entry_idx, bottom));
+                let ended_folder = previous_folder_member.take();
+                if *foldered {
+                    let Some(folder_id) = containing_folder(entry_idx) else {
+                        continue;
+                    };
+                    if *indented {
+                        // Never split a worktree family: no slots inside a
+                        // block, but the block still extends the folder run.
+                        previous_folder_member = Some((folder_id, bottom));
+                        continue;
+                    }
+                    // A folder header hugs its first member, so the slot for
+                    // position 0 sits on the member's own top row; later
+                    // member slots use the gap row above, like top level.
+                    let row = if was_header {
+                        Some(rect.y)
+                    } else {
+                        rect.y.checked_sub(1)
+                    };
+                    if let Some(row) = row.filter(|row| *row < list_bottom) {
+                        slots.push((
+                            WorkspaceDropTarget::InFolderBefore {
+                                folder_id: folder_id.clone(),
+                                ws_idx: *ws_idx,
+                            },
+                            row,
+                        ));
+                    }
+                    previous_folder_member = Some((folder_id, bottom));
+                } else {
+                    if *indented {
+                        // Never split a worktree family: no slots inside a block.
+                        continue;
+                    }
+                    // A folder run ends right above this top-level entry: the
+                    // gap directly below the folder's last member appends at
+                    // the folder end, and this entry's own slot moves one row
+                    // further when the two would otherwise collide.
+                    let mut before_row = rect.y.checked_sub(1);
+                    if let Some((folder_id, member_bottom)) = ended_folder {
+                        let end_row = rect
+                            .y
+                            .checked_sub(1)
+                            .map(|row| row.min(member_bottom))
+                            .filter(|row| *row < list_bottom);
+                        if let Some(end_row) = end_row {
+                            slots.push((WorkspaceDropTarget::InFolderEnd { folder_id }, end_row));
+                            if before_row == Some(end_row) {
+                                before_row = Some(rect.y);
+                            }
+                        }
+                    }
+                    if let Some(row) = before_row.filter(|row| *row < list_bottom) {
+                        slots.push((WorkspaceDropTarget::Before(*ws_idx), row));
+                    }
+                }
+            }
         }
     }
 
-    let Some(last) = cards.last() else {
-        return slots;
-    };
-    let Some(last_entry_idx) = entry_position(last.ws_idx) else {
+    let Some((last_entry_idx, last_bottom)) = last_visible else {
         return slots;
     };
     let next_entry = entries.get(last_entry_idx.saturating_add(1));
-    if matches!(
-        next_entry,
-        Some(WorkspaceListEntry::Workspace { indented: true, .. })
-    ) {
-        return slots;
-    }
     let target = match next_entry {
-        Some(WorkspaceListEntry::Workspace { ws_idx, .. }) => {
-            crate::app::state::WorkspaceDropTarget::Before(*ws_idx)
-        }
-        None => crate::app::state::WorkspaceDropTarget::End,
+        // Mid-family clip: never split a worktree family.
+        Some(WorkspaceListEntry::Workspace { indented: true, .. }) => return slots,
+        Some(WorkspaceListEntry::FolderHeader { order_idx }) => match folder_id_at(*order_idx) {
+            Some(folder_id) => WorkspaceDropTarget::BeforeFolder(folder_id),
+            None => return slots,
+        },
+        Some(WorkspaceListEntry::Workspace {
+            ws_idx,
+            foldered: true,
+            ..
+        }) => match containing_folder(last_entry_idx.saturating_add(1)) {
+            Some(folder_id) => WorkspaceDropTarget::InFolderBefore {
+                folder_id,
+                ws_idx: *ws_idx,
+            },
+            None => return slots,
+        },
+        Some(WorkspaceListEntry::Workspace { ws_idx, .. }) => WorkspaceDropTarget::Before(*ws_idx),
+        None => WorkspaceDropTarget::End,
     };
-    let row = last.rect.y.saturating_add(last.rect.height);
-    if row < list_bottom
+    if last_bottom < list_bottom
         && slots
             .last()
             .is_none_or(|(last_target, _)| *last_target != target)
     {
-        slots.push((target, row));
+        // When the list ends with a folder member, the row directly below it
+        // appends at the folder end and the trailing top-level slot moves one
+        // row further — but only when that row still fits, so the top-level
+        // slot always stays reachable.
+        let end_of_folder = match (&target, previous_folder_member) {
+            (WorkspaceDropTarget::Before(_) | WorkspaceDropTarget::End, Some((folder_id, _)))
+                if last_bottom.saturating_add(1) < list_bottom =>
+            {
+                Some(folder_id)
+            }
+            _ => None,
+        };
+        match end_of_folder {
+            Some(folder_id) => {
+                slots.push((WorkspaceDropTarget::InFolderEnd { folder_id }, last_bottom));
+                slots.push((target, last_bottom.saturating_add(1)));
+            }
+            None => slots.push((target, last_bottom)),
+        }
     }
     slots
 }
@@ -970,12 +1209,13 @@ pub(crate) fn workspace_drop_slots(
 pub(crate) fn workspace_drop_indicator_row(
     app: &AppState,
     cards: &[crate::app::state::WorkspaceCardArea],
+    headers: &[crate::app::state::FolderHeaderArea],
     area: Rect,
-    target: crate::app::state::WorkspaceDropTarget,
+    target: &crate::app::state::WorkspaceDropTarget,
 ) -> Option<u16> {
-    workspace_drop_slots(app, cards, area)
+    workspace_drop_slots(app, cards, headers, area)
         .into_iter()
-        .find_map(|(candidate, row)| (candidate == target).then_some(row))
+        .find_map(|(candidate, row)| (candidate == *target).then_some(row))
 }
 
 pub(super) fn render_sidebar(
@@ -1220,12 +1460,42 @@ fn render_workspace_list(
         }
         _ => None,
     };
-    let insertion_row = match app.drag.as_ref().map(|drag| &drag.target) {
-        Some(crate::app::state::DragTarget::WorkspaceReorder {
-            drop_target: Some(drop_target),
-            ..
-        }) => workspace_drop_indicator_row(app, &app.view.workspace_card_areas, area, *drop_target),
+    let dragged_folder_id = match app.drag.as_ref().map(|drag| &drag.target) {
+        Some(crate::app::state::DragTarget::FolderReorder { folder_id, .. }) => {
+            Some(folder_id.as_str())
+        }
         _ => None,
+    };
+    let drag_drop_target = match app.drag.as_ref().map(|drag| &drag.target) {
+        Some(
+            crate::app::state::DragTarget::WorkspaceReorder {
+                drop_target: Some(drop_target),
+                ..
+            }
+            | crate::app::state::DragTarget::FolderReorder {
+                drop_target: Some(drop_target),
+                ..
+            },
+        ) => Some(drop_target),
+        _ => None,
+    };
+    // Dropping onto a folder header highlights the header instead of drawing
+    // an insertion line.
+    let drop_into_folder_id = match drag_drop_target {
+        Some(crate::app::state::WorkspaceDropTarget::IntoFolder(folder_id)) => {
+            Some(folder_id.as_str())
+        }
+        _ => None,
+    };
+    let insertion_row = match drag_drop_target {
+        Some(crate::app::state::WorkspaceDropTarget::IntoFolder(_)) | None => None,
+        Some(drop_target) => workspace_drop_indicator_row(
+            app,
+            &app.view.workspace_card_areas,
+            &app.view.folder_header_areas,
+            area,
+            drop_target,
+        ),
     };
 
     let list_bottom = area.y + area.height.saturating_sub(1);
@@ -1243,6 +1513,55 @@ fn render_workspace_list(
     let scrollbar_rect = workspace_list_scrollbar_rect(app, area);
     let cards = &app.view.workspace_card_areas;
     let entries = workspace_list_entries(app);
+
+    for header in &app.view.folder_header_areas {
+        if header.rect.y >= list_bottom || header.rect.width == 0 {
+            continue;
+        }
+        let Some(folder) = app.folder(&header.folder_id) else {
+            continue;
+        };
+        let is_dragged = dragged_folder_id == Some(header.folder_id.as_str());
+        let is_drop_target = drop_into_folder_id == Some(header.folder_id.as_str());
+        let highlight = collapsed_folder_header_highlight(app, folder);
+        if highlight.selected || highlight.active || is_dragged {
+            let bg = if highlight.selected {
+                workspace_selection_background(p, highlight.active)
+            } else if is_dragged {
+                p.surface1
+            } else {
+                p.active_row_bg
+            };
+            let buf = frame.buffer_mut();
+            for x in header.rect.x..header.rect.x + header.rect.width {
+                buf[(x, header.rect.y)].set_style(Style::default().bg(bg));
+            }
+        }
+        let name_style = if is_drop_target {
+            Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+        } else if highlight.selected || highlight.active {
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
+        };
+        // Reserve the gutter, chevron, and gap cells so the name never runs
+        // into the collapse affordance and aligns with loose space names.
+        let name = truncate_end(&folder.name, header.rect.width.saturating_sub(3) as usize);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(name, name_style),
+            ])),
+            header.rect,
+        );
+        let collapsed = app.collapsed_folder_ids.contains(&header.folder_id);
+        render_collapse_chevron(
+            frame,
+            collapsed,
+            folder_header_chevron_rect(header),
+            p.accent,
+        );
+    }
 
     for card in cards {
         let i = card.ws_idx;
@@ -1331,29 +1650,38 @@ fn render_workspace_list(
                 break;
             }
             let mut spans = Vec::new();
-            let prefix_width = if card.indented {
-                spans.push(Span::raw("   "));
-                if row_index == 0 {
-                    spans.push(Span::styled(
-                        if is_last_child { "└─ " } else { "├─ " },
-                        Style::default().fg(p.overlay0),
-                    ));
-                    6
-                } else if is_last_child {
-                    spans.push(Span::raw("     "));
-                    8
-                } else {
-                    spans.push(Span::styled("│", Style::default().fg(p.overlay0)));
-                    spans.push(Span::raw("    "));
-                    8
-                }
-            } else if row_index == 0 {
-                spans.push(Span::raw(" "));
-                1
+            // Foldered cards are nested under their folder header with a
+            // fixed margin; card content is otherwise identical.
+            let folder_margin: u16 = if card.foldered {
+                spans.push(Span::raw("  "));
+                2
             } else {
-                spans.push(Span::raw("   "));
-                3
+                0
             };
+            let prefix_width = folder_margin
+                + if card.indented {
+                    spans.push(Span::raw("   "));
+                    if row_index == 0 {
+                        spans.push(Span::styled(
+                            if is_last_child { "└─ " } else { "├─ " },
+                            Style::default().fg(p.overlay0),
+                        ));
+                        6
+                    } else if is_last_child {
+                        spans.push(Span::raw("     "));
+                        8
+                    } else {
+                        spans.push(Span::styled("│", Style::default().fg(p.overlay0)));
+                        spans.push(Span::raw("    "));
+                        8
+                    }
+                } else if row_index == 0 {
+                    spans.push(Span::raw(" "));
+                    1
+                } else {
+                    spans.push(Span::raw("   "));
+                    3
+                };
             let trailing_width = if row_index == 0 && parent_group.is_some() {
                 2
             } else {
@@ -1389,11 +1717,22 @@ fn render_workspace_list(
     }
 
     if let Some(y) = insertion_row.filter(|y| *y < list_bottom) {
+        // In-folder insertion lines start at the folder name's column so
+        // they read as inside the folder, distinct from full-width
+        // top-level slots.
+        let indent: u16 = match drag_drop_target {
+            Some(
+                crate::app::state::WorkspaceDropTarget::InFolderBefore { .. }
+                | crate::app::state::WorkspaceDropTarget::InFolderEnd { .. },
+            ) => 3,
+            _ => 0,
+        };
+        let indicator_left = (area.x + indent).min(area.x + area.width);
         let indicator_right = scrollbar_rect
             .map(|rect| rect.x)
             .unwrap_or(area.x + area.width);
         let buf = frame.buffer_mut();
-        for x in area.x..indicator_right {
+        for x in indicator_left..indicator_right {
             buf[(x, y)].set_symbol("─");
             buf[(x, y)].set_style(Style::default().fg(p.accent));
         }
@@ -1490,56 +1829,194 @@ fn render_agent_detail(
     }
 
     let scroll = app.agent_panel_scroll.min(metrics.max_offset_from_bottom);
+    let list_rows = agent_panel_list_entries(app, &details);
     let mut row_y = body.y;
     let body_bottom = body.y + body.height;
-    for (index, detail) in details.iter().enumerate().skip(scroll) {
-        let label_color = state_label_color(detail.state, detail.seen, p);
-        let rows = resolved_agent_rows(app, detail);
-        let height = (rows.len().max(1) as u16).min(body.height);
+    // Indent applied to agent rows nested under the folder view's space
+    // headers; zero outside the folder view. When scrolled past a space
+    // header, its agents keep the indent it established.
+    let mut agent_indent: u16 = list_rows[..scroll.min(list_rows.len())]
+        .iter()
+        .rev()
+        .find_map(|row| match row {
+            AgentPanelListEntry::SpaceHeader {
+                indented, foldered, ..
+            } => Some(space_header_agent_indent(*indented, *foldered)),
+            _ => None,
+        })
+        .unwrap_or(0);
+    for (index, list_row) in list_rows.iter().enumerate().skip(scroll) {
+        let height = agent_row_height_in_body(app, &details, list_row, body.height);
         if row_y.saturating_add(height) > body_bottom {
             break;
         }
 
-        let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
-        let row_style = if is_active {
-            Style::default().bg(p.active_row_bg)
-        } else {
-            Style::default()
-        };
-        let name_style = if is_active {
-            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
-        };
-        let status_style = if is_active {
-            Style::default().fg(label_color)
-        } else {
-            Style::default().fg(label_color).add_modifier(Modifier::DIM)
-        };
-        let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
-        let state_icon = state_icon(detail.state, detail.seen, app.status_indicators, p);
+        match list_row {
+            AgentPanelListEntry::FolderHeader { order_idx } => {
+                if let Some(crate::folder::SpaceOrderEntry::Folder(folder)) =
+                    app.space_order.get(*order_idx)
+                {
+                    // A collapsed folder hides all member rows; its header
+                    // indicates a hidden active space, like the spaces panel.
+                    let highlight = collapsed_folder_header_highlight(app, folder);
+                    let row_style = if highlight.active {
+                        Style::default().bg(p.active_row_bg)
+                    } else {
+                        Style::default()
+                    };
+                    let name_style = if highlight.active {
+                        Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
+                    };
+                    // Reserve the gutter, chevron, and gap cells so the name
+                    // never runs into the collapse affordance.
+                    let name = truncate_end(&folder.name, body.width.saturating_sub(3) as usize);
+                    frame.render_widget(
+                        Paragraph::new(Line::from(vec![
+                            Span::raw("   "),
+                            Span::styled(name, name_style),
+                        ]))
+                        .style(row_style),
+                        Rect::new(body.x, row_y, body.width, 1),
+                    );
+                    let collapsed = app.collapsed_folder_ids.contains(&folder.id);
+                    render_collapse_chevron(
+                        frame,
+                        collapsed,
+                        agent_panel_header_chevron_rect(body, row_y, AGENT_PANEL_HEADER_GUTTER),
+                        p.accent,
+                    );
+                }
+            }
+            AgentPanelListEntry::SpaceHeader {
+                ws_idx,
+                indented,
+                foldered,
+                thin,
+            } => {
+                agent_indent = space_header_agent_indent(*indented, *foldered);
+                if let Some(ws) = app.workspaces.get(*ws_idx) {
+                    let label = ws.display_name_from(&app.terminals, terminal_runtimes);
+                    let label = if *indented {
+                        grouped_child_display_label(
+                            &label,
+                            ws.branch().as_deref(),
+                            ws.custom_name.is_some(),
+                        )
+                    } else {
+                        label
+                    };
+                    let mut spans = Vec::new();
+                    spans.push(Span::raw(" ".repeat(AGENT_PANEL_HEADER_GUTTER as usize)));
+                    if *foldered {
+                        spans.push(Span::raw("  "));
+                    }
+                    if *indented {
+                        spans.push(Span::raw("   "));
+                        let is_last_child = !next_agent_header_is_indented_space(&list_rows, index);
+                        spans.push(Span::styled(
+                            if is_last_child { "└─ " } else { "├─ " },
+                            Style::default().fg(p.overlay0),
+                        ));
+                    }
+                    // Leading chevron cell plus one gap cell; the chevron is
+                    // drawn over the first cell below (thin headers keep the
+                    // blank cells so sibling names stay aligned).
+                    spans.push(Span::raw("  "));
+                    let prefix_width = space_header_prefix_width(*indented, *foldered);
+                    let collapsed = !*thin && app.collapsed_agent_space_ids.contains(&ws.id);
+                    // A collapsed agent list hides all rows; the header
+                    // indicates the hidden active agent, like a collapsed
+                    // folder header.
+                    let indicates_active = collapsed && app.active == Some(*ws_idx);
+                    let row_style = if indicates_active {
+                        Style::default().bg(p.active_row_bg)
+                    } else {
+                        Style::default()
+                    };
+                    let name_style = if *thin {
+                        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)
+                    } else if indicates_active {
+                        Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+                    } else {
+                        // Space header names carry the same weight as folder
+                        // headers, foldered or not; only their agent rows
+                        // below stay regular.
+                        Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
+                    };
+                    spans.push(Span::styled(
+                        truncate_end(&label, body.width.saturating_sub(prefix_width) as usize),
+                        name_style,
+                    ));
+                    frame.render_widget(
+                        Paragraph::new(Line::from(spans)).style(row_style),
+                        Rect::new(body.x, row_y, body.width, 1),
+                    );
+                    // Thin ancestor headers have no agent list to collapse.
+                    if !*thin {
+                        render_collapse_chevron(
+                            frame,
+                            collapsed,
+                            agent_panel_header_chevron_rect(
+                                body,
+                                row_y,
+                                space_header_chevron_indent(*indented, *foldered),
+                            ),
+                            p.accent,
+                        );
+                    }
+                }
+            }
+            AgentPanelListEntry::Agent { entry_idx } => {
+                let Some(detail) = details.get(*entry_idx) else {
+                    continue;
+                };
+                let label_color = state_label_color(detail.state, detail.seen, p);
+                let rows = resolved_agent_rows(app, detail);
 
-        for (row_index, resolved) in rows.iter().take(height as usize).enumerate() {
-            let mut spans = vec![Span::raw(if row_index == 0 { " " } else { "   " })];
-            spans.extend(resolved_token_spans(
-                resolved,
-                state_icon,
-                status_style,
-                name_style,
-                agent_style,
-                agent_style,
-                p,
-                body.width
-                    .saturating_sub(if row_index == 0 { 1 } else { 3 }) as usize,
-            ));
-            frame.render_widget(
-                Paragraph::new(Line::from(spans)).style(row_style),
-                Rect::new(body.x, row_y + row_index as u16, body.width, 1),
-            );
+                let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
+                let row_style = if is_active {
+                    Style::default().bg(p.active_row_bg)
+                } else {
+                    Style::default()
+                };
+                let name_style = if is_active {
+                    Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
+                };
+                let status_style = if is_active {
+                    Style::default().fg(label_color)
+                } else {
+                    Style::default().fg(label_color).add_modifier(Modifier::DIM)
+                };
+                let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
+                let state_icon = state_icon(detail.state, detail.seen, app.status_indicators, p);
+
+                for (row_index, resolved) in rows.iter().take(height as usize).enumerate() {
+                    let prefix = agent_indent + if row_index == 0 { 1 } else { 3 };
+                    let mut spans = vec![Span::raw(" ".repeat(prefix as usize))];
+                    spans.extend(resolved_token_spans(
+                        resolved,
+                        state_icon,
+                        status_style,
+                        name_style,
+                        agent_style,
+                        agent_style,
+                        p,
+                        body.width.saturating_sub(prefix) as usize,
+                    ));
+                    frame.render_widget(
+                        Paragraph::new(Line::from(spans)).style(row_style),
+                        Rect::new(body.x, row_y + row_index as u16, body.width, 1),
+                    );
+                }
+            }
         }
         row_y = row_y
             .saturating_add(height)
-            .saturating_add(agent_entry_gap(app, index, details.len()))
+            .saturating_add(agent_row_gap(app, &list_rows, index))
             .min(body_bottom);
     }
 
@@ -1600,7 +2077,7 @@ mod tests {
     use crate::{detect::Agent, layout::PaneId, workspace::Workspace};
     use ratatui::{backend::TestBackend, layout::Direction, Terminal};
 
-    fn row_text(buffer: &ratatui::buffer::Buffer, row: u16, width: u16) -> String {
+    pub(crate) fn row_text(buffer: &ratatui::buffer::Buffer, row: u16, width: u16) -> String {
         (0..width)
             .map(|x| buffer[(x, row)].symbol())
             .collect::<String>()
@@ -1608,7 +2085,12 @@ mod tests {
             .to_string()
     }
 
-    fn find_symbol_x(buffer: &ratatui::buffer::Buffer, row: u16, width: u16, symbol: &str) -> u16 {
+    pub(crate) fn find_symbol_x(
+        buffer: &ratatui::buffer::Buffer,
+        row: u16,
+        width: u16,
+        symbol: &str,
+    ) -> u16 {
         (0..width)
             .find(|x| buffer[(*x, row)].symbol() == symbol)
             .unwrap_or_else(|| {
@@ -2674,6 +3156,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             ws_idx: 0,
             rect: Rect::new(0, 1, 15, 2),
             indented: false,
+            foldered: false,
         }];
 
         let mut terminal = Terminal::new(TestBackend::new(15, 6)).expect("test terminal");
@@ -2686,7 +3169,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .expect("workspace list should render");
     }
 
-    fn workspace_with_worktree_space(
+    pub(crate) fn workspace_with_worktree_space(
         name: &str,
         key: Option<&str>,
         checkout_key: &str,
@@ -2704,7 +3187,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         ws
     }
 
-    fn workspace_with_git_space(name: &str, key: &str) -> crate::workspace::Workspace {
+    pub(crate) fn workspace_with_git_space(name: &str, key: &str) -> crate::workspace::Workspace {
         let mut ws = crate::workspace::Workspace::test_new(name);
         ws.cached_git_space = Some(crate::workspace::GitSpaceMetadata {
             key: key.into(),
@@ -2754,6 +3237,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(parent_name_x, plain_name_x);
         assert_eq!(buffer[(cards[1].rect.x + 3, cards[1].rect.y)].symbol(), "├");
         assert_eq!(buffer[(cards[2].rect.x + 3, cards[2].rect.y)].symbol(), "└");
+        // The group chevron stays at the parent card's right edge.
         assert_eq!(
             buffer[(cards[0].rect.x + cards[0].rect.width - 1, cards[0].rect.y)].symbol(),
             "▾"
@@ -2869,8 +3353,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let indicator_row = workspace_drop_indicator_row(
             &app,
             &app.view.workspace_card_areas,
+            &app.view.folder_header_areas,
             list_area,
-            crate::app::state::WorkspaceDropTarget::Before(2),
+            &crate::app::state::WorkspaceDropTarget::Before(2),
         )
         .unwrap();
         assert_eq!(indicator_row, app.view.workspace_card_areas[1].rect.y);
@@ -2916,11 +3401,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             vec![
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
-                    indented: false
+                    indented: false,
+                    foldered: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
-                    indented: false
+                    indented: false,
+                    foldered: false,
                 },
             ]
         );
@@ -3002,10 +3489,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
                     indented: false,
+                    foldered: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
                     indented: true,
+                    foldered: false,
                 },
             ]
         );
@@ -3026,14 +3515,17 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
                     indented: false,
+                    foldered: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 2,
                     indented: true,
+                    foldered: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
                     indented: false,
+                    foldered: false,
                 },
             ]
         );
@@ -3053,10 +3545,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
                     indented: false,
+                    foldered: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
                     indented: false,
+                    foldered: false,
                 },
             ]
         );
@@ -3077,14 +3571,17 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
                     indented: false,
+                    foldered: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 2,
                     indented: true,
+                    foldered: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
                     indented: false,
+                    foldered: false,
                 },
             ]
         );
@@ -3104,10 +3601,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
                     indented: false,
+                    foldered: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
                     indented: false,
+                    foldered: false,
                 },
             ]
         );
@@ -3130,10 +3629,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
                     indented: false,
+                    foldered: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
                     indented: true,
+                    foldered: false,
                 },
             ]
         );
@@ -3145,6 +3646,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             vec![WorkspaceListEntry::Workspace {
                 ws_idx: 0,
                 indented: false,
+                foldered: false,
             }]
         );
     }
@@ -3167,10 +3669,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::Workspace {
                     ws_idx: 0,
                     indented: false,
+                    foldered: false,
                 },
                 WorkspaceListEntry::Workspace {
                     ws_idx: 1,
                     indented: true,
+                    foldered: false,
                 },
             ]
         );

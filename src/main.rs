@@ -64,6 +64,7 @@ mod client;
 mod config;
 mod detect;
 mod events;
+mod folder;
 mod ghostty;
 mod handoff_runtime;
 mod input;
@@ -356,7 +357,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Set to "" to leave the outer terminal title alone.
 # window_title = "{hostname}: {workspace}"
 
-# Agent panel ordering: "spaces" (grouped by space) or "priority" (attention queue).
+# Agent panel ordering: "spaces" (grouped by space), "priority" (attention queue),
+# or "folders" (agents nested under their space and folder, mirroring the spaces panel).
 # "workspaces" is accepted as an alias for "spaces".
 # agent_panel_sort = "spaces"
 
@@ -631,6 +633,7 @@ fn main() -> io::Result<()> {
         println!("       herdr config <subcommand> ...");
         println!("       herdr channel <subcommand> ...");
         println!("       herdr workspace <subcommand> ...");
+        println!("       herdr folder <subcommand> ...");
         println!("       herdr worktree <subcommand> ...");
         println!("       herdr tab <subcommand> ...");
         println!("       herdr notification <subcommand> ...");
@@ -675,6 +678,10 @@ fn main() -> io::Result<()> {
             (
                 "herdr workspace <subcommand>",
                 "Workspace helpers over the socket API",
+            ),
+            (
+                "herdr folder <subcommand>",
+                "Folder helpers over the socket API",
             ),
             (
                 "herdr worktree <subcommand>",

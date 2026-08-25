@@ -144,6 +144,26 @@ impl ActiveSubscription {
                 event_kind: crate::api::schema::EventKind::WorkspaceFocused,
                 last_sequence: 0,
             })),
+            Subscription::FolderCreated {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::FolderCreated,
+                last_sequence: 0,
+            })),
+            Subscription::FolderUpdated {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::FolderUpdated,
+                last_sequence: 0,
+            })),
+            Subscription::FolderDeleted {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::FolderDeleted,
+                last_sequence: 0,
+            })),
+            Subscription::FolderAssigned {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::FolderAssigned,
+                last_sequence: 0,
+            })),
+            Subscription::FolderMoved {} => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::FolderMoved,
+                last_sequence: 0,
+            })),
             Subscription::WorktreeCreated {} => Ok(Self::Event(ActiveEventSubscription {
                 event_kind: crate::api::schema::EventKind::WorktreeCreated,
                 last_sequence: 0,

@@ -5,7 +5,7 @@ description: "Control Herdr, a terminal multiplexer for coding agents. Use only 
 
 # Herdr
 
-Herdr organizes terminals into workspaces, tabs, and panes, recognizes coding agents running inside panes, and exposes the current session through the `herdr` CLI.
+Herdr organizes terminals into workspaces, tabs, and panes, groups workspaces into folders, recognizes coding agents running inside panes, and exposes the current session through the `herdr` CLI.
 
 Before issuing any control command, verify that this agent is running inside a Herdr-managed pane:
 
@@ -31,6 +31,7 @@ Then print the relevant command group by running the group without a subcommand:
 herdr agent
 herdr pane
 herdr workspace
+herdr folder
 herdr tab
 herdr worktree
 herdr terminal
@@ -64,6 +65,7 @@ Public IDs are opaque stable handles:
 - workspace: `w1`
 - tab: `w1:t1`
 - pane: `w1:p1`
+- folder: `f1` (folder names are display labels and may repeat; target folders by ID from `herdr folder list`)
 
 Closed tab and pane IDs are not reused. A pane moved into another workspace receives a new workspace-qualified pane ID. After `pane move`, continue with `.result.move_result.pane.pane_id` or the live agent name. The old value is reported as `.result.move_result.previous_pane_id`; only the moved process's inherited caller context keeps resolving that old ID, so do not use it as a general agent target.
 
