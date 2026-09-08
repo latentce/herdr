@@ -48,6 +48,8 @@ impl ClientShellState {
                 && self.endpoint_status(&self.active_endpoint_id)
                     == Some(ClientEndpointStatus::Online)
         });
+        let folder_collapse =
+            folders::FolderCollapseState::of(&self.folder_collapse, &self.active_endpoint_id);
         let mut render_state = render::ShellRenderState {
             endpoints: &self.endpoints,
             active_endpoint_id: &self.active_endpoint_id,
@@ -69,6 +71,15 @@ impl ClientShellState {
             reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
             dragged_workspace_id: None,
             workspace_drop_indicator_row: None,
+            folders: folders::FolderRenderState {
+                endpoint_id: &self.active_endpoint_id,
+                collapsed_folders: &folder_collapse.folders,
+                collapsed_agent_spaces: &folder_collapse.agent_spaces,
+                collapse_by_endpoint: &self.folder_collapse,
+                dragged_folder_id: None,
+                drop_into_folder_id: None,
+                drop_indicator_indent: 0,
+            },
         };
         if let Some(snapshot) = local_snapshot {
             render::render_sidebar(
@@ -175,8 +186,41 @@ impl ClientShellState {
                 Some(source_workspace_id.as_str()),
                 target.as_ref().map(|(_, row)| *row),
             ),
+            Some(ClientChromeDrag::SpaceOrder {
+                source: folders::SpaceDragSource::Workspace(source_workspace_id),
+                target,
+            }) => (
+                Some(source_workspace_id.as_str()),
+                target.as_ref().and_then(|slot| slot.row),
+            ),
+            Some(ClientChromeDrag::SpaceOrder {
+                source: folders::SpaceDragSource::Folder(_),
+                target,
+            }) => (None, target.as_ref().and_then(|slot| slot.row)),
             _ => (None, None),
         };
+        let (dragged_folder_id, drop_into_folder_id, drop_indicator_indent) =
+            match &self.chrome_drag {
+                Some(ClientChromeDrag::SpaceOrder { source, target }) => (
+                    match source {
+                        folders::SpaceDragSource::Folder(folder_id) => Some(folder_id.as_str()),
+                        folders::SpaceDragSource::Workspace(_) => None,
+                    },
+                    match target.as_ref().map(|slot| &slot.target) {
+                        Some(folders::SpaceDropTarget::IntoFolder(folder_id)) => {
+                            Some(folder_id.as_str())
+                        }
+                        _ => None,
+                    },
+                    target
+                        .as_ref()
+                        .map(|slot| slot.target.indent())
+                        .unwrap_or(0),
+                ),
+                _ => (None, None, 0),
+            };
+        let folder_collapse =
+            folders::FolderCollapseState::of(&self.folder_collapse, &self.active_endpoint_id);
         let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));
         self.hits = render::render_shell(
             &mut buffer,
@@ -204,6 +248,15 @@ impl ClientShellState {
                 reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
                 dragged_workspace_id,
                 workspace_drop_indicator_row,
+                folders: folders::FolderRenderState {
+                    endpoint_id: &self.active_endpoint_id,
+                    collapsed_folders: &folder_collapse.folders,
+                    collapsed_agent_spaces: &folder_collapse.agent_spaces,
+                    collapse_by_endpoint: &self.folder_collapse,
+                    dragged_folder_id,
+                    drop_into_folder_id,
+                    drop_indicator_indent,
+                },
             },
         );
         self.hits.panes = surface

@@ -83,14 +83,25 @@ impl ClientShellState {
                         last_child: false,
                     })
                     .collect()
+            } else if mobile && surface_available {
+                render::workspace_entries(snapshot, &empty_collapsed_groups)
             } else {
-                let collapsed_groups = if mobile && surface_available {
-                    &empty_collapsed_groups
+                let collapsed_groups = self
+                    .collapsed_groups_for_endpoint(&endpoint.endpoint_id)
+                    .unwrap_or(&empty_collapsed_groups);
+                if folders::has_folders(snapshot) {
+                    let collapse = folders::FolderCollapseState::of(
+                        &self.folder_collapse,
+                        &endpoint.endpoint_id,
+                    );
+                    folders::visible_workspace_entries(
+                        snapshot,
+                        collapsed_groups,
+                        &collapse.folders,
+                    )
                 } else {
-                    self.collapsed_groups_for_endpoint(&endpoint.endpoint_id)
-                        .unwrap_or(&empty_collapsed_groups)
-                };
-                render::workspace_entries(snapshot, collapsed_groups)
+                    render::workspace_entries(snapshot, collapsed_groups)
+                }
             };
             for entry in entries {
                 targets.push(WorkspaceNavigationTarget {
@@ -107,12 +118,14 @@ impl ClientShellState {
         let current = self
             .navigate_workspace_id
             .as_ref()
-            .and_then(|selected| targets.iter().position(|target| target == selected));
+            .and_then(|selected| targets.iter().position(|target| target == selected))
+            .map(|current| current as isize)
+            .or_else(|| self.hidden_folder_navigation_anchor(&targets, delta));
         let next = match current {
             Some(current) if mobile => {
-                (current as isize + delta).clamp(0, targets.len() as isize - 1) as usize
+                (current + delta).clamp(0, targets.len() as isize - 1) as usize
             }
-            Some(current) => (current as isize + delta).rem_euclid(targets.len() as isize) as usize,
+            Some(current) => (current + delta).rem_euclid(targets.len() as isize) as usize,
             None if delta < 0 => targets.len() - 1,
             None => 0,
         };

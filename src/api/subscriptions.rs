@@ -140,6 +140,11 @@ impl ActiveSubscription {
             Subscription::WorkspaceFocused {} => {
                 Ok(event_subscription(EventKind::WorkspaceFocused))
             }
+            Subscription::FolderCreated {} => Ok(event_subscription(EventKind::FolderCreated)),
+            Subscription::FolderUpdated {} => Ok(event_subscription(EventKind::FolderUpdated)),
+            Subscription::FolderDeleted {} => Ok(event_subscription(EventKind::FolderDeleted)),
+            Subscription::FolderAssigned {} => Ok(event_subscription(EventKind::FolderAssigned)),
+            Subscription::FolderMoved {} => Ok(event_subscription(EventKind::FolderMoved)),
             Subscription::WorktreeCreated {} => Ok(event_subscription(EventKind::WorktreeCreated)),
             Subscription::WorktreeOpened {} => Ok(event_subscription(EventKind::WorktreeOpened)),
             Subscription::WorktreeRemoved {} => Ok(event_subscription(EventKind::WorktreeRemoved)),

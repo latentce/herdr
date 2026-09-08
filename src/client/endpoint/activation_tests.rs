@@ -66,6 +66,8 @@ fn test_snapshot(boot_id: &str, revision: u64) -> crate::protocol::ClientShellSn
         tabs: Vec::new(),
         panes: Vec::new(),
         agents: Vec::new(),
+        space_order: Vec::new(),
+        folders: Vec::new(),
         commands: Vec::new(),
     }
 }
@@ -148,6 +150,7 @@ fn workspace_focus_success(id: &str, workspace_id: &str) -> Vec<u8> {
                 agent_status: crate::api::schema::AgentStatus::Unknown,
                 tokens: Default::default(),
                 worktree: None,
+                folder_id: None,
             },
         },
     })
@@ -432,6 +435,8 @@ fn activation_requires_an_exact_snapshot_surface_revision_pair() {
         tabs: Vec::new(),
         panes: Vec::new(),
         agents: Vec::new(),
+        space_order: Vec::new(),
+        folders: Vec::new(),
         commands: Vec::new(),
     };
     assert_eq!(

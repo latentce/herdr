@@ -172,6 +172,7 @@ pub(super) fn render_collapsed(
                 workspace_id: workspace.workspace_id.clone(),
                 indented: false,
                 group_toggle: None,
+                foldered: false,
             });
             y = y.saturating_add(1);
         }
@@ -251,6 +252,11 @@ pub(super) fn render_expanded(
         Workspace {
             endpoint: usize,
             entry: WorkspaceEntry,
+            foldered: bool,
+        },
+        Folder {
+            endpoint: usize,
+            folder_index: usize,
         },
     }
     let mut rows = Vec::new();
@@ -262,13 +268,29 @@ pub(super) fn render_expanded(
         if let Some(snapshot) = endpoint.snapshot.as_deref() {
             let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
                 .unwrap_or(&empty_collapsed_groups);
+            let collapse = super::folders::FolderCollapseState::of(
+                state.folders.collapse_by_endpoint,
+                &endpoint.endpoint_id,
+            );
             rows.extend(
-                super::sidebar::workspace_entries(snapshot, collapsed_groups)
-                    .into_iter()
-                    .map(|entry| Row::Workspace {
+                super::folders::sidebar_entries(
+                    snapshot,
+                    collapsed_groups,
+                    &collapse.folders,
+                    false,
+                )
+                .into_iter()
+                .map(|entry| match entry {
+                    super::folders::SidebarEntry::Workspace { entry, foldered } => Row::Workspace {
                         endpoint: endpoint_index,
                         entry,
-                    }),
+                        foldered,
+                    },
+                    super::folders::SidebarEntry::Folder { folder_index } => Row::Folder {
+                        endpoint: endpoint_index,
+                        folder_index,
+                    },
+                }),
             );
         }
     }
@@ -285,7 +307,10 @@ pub(super) fn render_expanded(
         .iter()
         .map(|row| match row {
             Row::Endpoint(_) => 1,
-            Row::Workspace { endpoint, entry } => {
+            Row::Folder { .. } => super::folders::FOLDER_HEADER_ROWS,
+            Row::Workspace {
+                endpoint, entry, ..
+            } => {
                 let endpoint = &state.endpoints[*endpoint];
                 let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
                     .unwrap_or(&empty_collapsed_groups);
@@ -314,6 +339,8 @@ pub(super) fn render_expanded(
             }
         })
         .collect::<Vec<_>>();
+    // Mirrors `folders::sidebar_entry_gap`: no gap before an indented child or
+    // between a folder header and its first member, and none across machines.
     let gaps = rows
         .iter()
         .enumerate()
@@ -323,33 +350,82 @@ pub(super) fn render_expanded(
                 Some(Row::Workspace {
                     endpoint: next_endpoint,
                     entry,
+                    ..
                 }),
             ) if endpoint == next_endpoint => u16::from(!entry.indented) * config.spaces.row_gap,
+            (
+                Row::Workspace { endpoint, .. },
+                Some(Row::Folder {
+                    endpoint: next_endpoint,
+                    ..
+                }),
+            ) if endpoint == next_endpoint => config.spaces.row_gap,
+            (
+                Row::Folder { endpoint, .. },
+                Some(Row::Workspace {
+                    endpoint: next_endpoint,
+                    entry,
+                    foldered,
+                }),
+            ) if endpoint == next_endpoint => {
+                u16::from(!entry.indented && !*foldered) * config.spaces.row_gap
+            }
+            (
+                Row::Folder { endpoint, .. },
+                Some(Row::Folder {
+                    endpoint: next_endpoint,
+                    ..
+                }),
+            ) if endpoint == next_endpoint => config.spaces.row_gap,
             _ => 0,
         })
         .collect::<Vec<_>>();
     let reveal_navigation = !body.is_empty() && std::mem::take(state.reveal_navigation_workspace);
     let reveal_focus = !body.is_empty() && std::mem::take(state.reveal_focused_workspace);
     if reveal_navigation || reveal_focus {
+        // A workspace hidden inside a collapsed folder reveals its folder header.
+        let target_matches = |endpoint: &ClientShellEndpoint, workspace_id: &str| {
+            if reveal_navigation {
+                state
+                    .selected_workspace_id
+                    .is_some_and(|target| target.matches(&endpoint.endpoint_id, workspace_id))
+            } else {
+                &endpoint.endpoint_id == state.active_endpoint_id
+                    && active_snapshot.is_some_and(|snapshot| {
+                        snapshot.focused_workspace_id.as_deref() == Some(workspace_id)
+                    })
+            }
+        };
         let selected_row = rows.iter().position(|row| match row {
-            Row::Workspace { endpoint, entry } => {
+            Row::Workspace {
+                endpoint, entry, ..
+            } => {
                 let endpoint = &state.endpoints[*endpoint];
                 endpoint
                     .snapshot
                     .as_deref()
                     .and_then(|snapshot| snapshot.workspaces.get(entry.index))
-                    .is_some_and(|workspace| {
-                        if reveal_navigation {
-                            state.selected_workspace_id.is_some_and(|target| {
-                                target.matches(&endpoint.endpoint_id, &workspace.workspace_id)
-                            })
-                        } else {
-                            &endpoint.endpoint_id == state.active_endpoint_id
-                                && active_snapshot.is_some_and(|snapshot| {
-                                    snapshot.focused_workspace_id.as_deref()
-                                        == Some(workspace.workspace_id.as_str())
-                                })
-                        }
+                    .is_some_and(|workspace| target_matches(endpoint, &workspace.workspace_id))
+            }
+            Row::Folder {
+                endpoint,
+                folder_index,
+            } => {
+                let endpoint = &state.endpoints[*endpoint];
+                let collapse = super::folders::FolderCollapseState::of(
+                    state.folders.collapse_by_endpoint,
+                    &endpoint.endpoint_id,
+                );
+                endpoint
+                    .snapshot
+                    .as_deref()
+                    .and_then(|snapshot| snapshot.folders.get(*folder_index))
+                    .is_some_and(|folder| {
+                        collapse.folders.contains(&folder.folder_id)
+                            && folder
+                                .members
+                                .iter()
+                                .any(|member| target_matches(endpoint, member))
                     })
             }
             Row::Endpoint(_) => false,
@@ -410,7 +486,70 @@ pub(super) fn render_expanded(
                     .saturating_add(1)
                     .saturating_add(gaps.get(row_index).copied().unwrap_or(0));
             }
-            Row::Workspace { endpoint, entry } => {
+            Row::Folder {
+                endpoint,
+                folder_index,
+            } => {
+                let endpoint = &state.endpoints[*endpoint];
+                let Some(snapshot) = endpoint.snapshot.as_deref() else {
+                    continue;
+                };
+                let Some(folder) = snapshot.folders.get(*folder_index) else {
+                    continue;
+                };
+                let height = super::folders::FOLDER_HEADER_ROWS.min(body.height);
+                if y.saturating_add(height) > body.bottom() {
+                    break;
+                }
+                let rect = Rect::new(body.x, y, content_width, height);
+                let nested = Rect::new(
+                    rect.x.saturating_add(2),
+                    rect.y,
+                    rect.width.saturating_sub(2),
+                    rect.height,
+                );
+                let endpoint_active = &endpoint.endpoint_id == state.active_endpoint_id;
+                let collapse = super::folders::FolderCollapseState::of(
+                    state.folders.collapse_by_endpoint,
+                    &endpoint.endpoint_id,
+                );
+                let folders = super::folders::FolderRenderState {
+                    endpoint_id: &endpoint.endpoint_id,
+                    collapsed_folders: &collapse.folders,
+                    collapsed_agent_spaces: &collapse.agent_spaces,
+                    collapse_by_endpoint: state.folders.collapse_by_endpoint,
+                    dragged_folder_id: state.folders.dragged_folder_id.filter(|_| endpoint_active),
+                    drop_into_folder_id: state
+                        .folders
+                        .drop_into_folder_id
+                        .filter(|_| endpoint_active),
+                    drop_indicator_indent: state.folders.drop_indicator_indent,
+                };
+                super::folders::render_folder_header(
+                    buffer,
+                    nested,
+                    snapshot,
+                    folder,
+                    &folders,
+                    state.selected_workspace_id,
+                    palette,
+                    hits,
+                );
+                if endpoint.status != ClientEndpointStatus::Online {
+                    buffer.set_style(
+                        rect,
+                        Style::default()
+                            .fg(palette.overlay0)
+                            .add_modifier(Modifier::DIM),
+                    );
+                }
+                y = y.saturating_add(height);
+            }
+            Row::Workspace {
+                endpoint,
+                entry,
+                foldered,
+            } => {
                 let endpoint = &state.endpoints[*endpoint];
                 let Some(snapshot) = endpoint.snapshot.as_deref() else {
                     continue;
@@ -436,10 +575,15 @@ pub(super) fn render_expanded(
                     break;
                 }
                 let rect = Rect::new(body.x, y, content_width, height);
+                let indent = 2u16.saturating_add(if *foldered {
+                    super::folders::FOLDER_MEMBER_INDENT
+                } else {
+                    0
+                });
                 let nested = Rect::new(
-                    rect.x.saturating_add(2),
+                    rect.x.saturating_add(indent),
                     rect.y,
-                    rect.width.saturating_sub(2),
+                    rect.width.saturating_sub(indent),
                     rect.height,
                 );
                 let endpoint_active = &endpoint.endpoint_id == state.active_endpoint_id;
@@ -484,6 +628,7 @@ pub(super) fn render_expanded(
                     workspace_id: workspace.workspace_id.clone(),
                     indented: entry.indented,
                     group_toggle,
+                    foldered: *foldered,
                 });
                 y = y
                     .saturating_add(height)

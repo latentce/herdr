@@ -62,6 +62,33 @@ pub enum ResponseResult {
     WorkspaceList {
         workspaces: Vec<WorkspaceInfo>,
     },
+    FolderCreated {
+        folder_id: String,
+    },
+    FolderList {
+        folders: Vec<super::folders::FolderInfo>,
+        /// Canonical top-level order interleaving folders and loose spaces.
+        order: Vec<super::folders::SpaceOrderEntryInfo>,
+    },
+    FolderUpdated {
+        folder: super::folders::FolderInfo,
+    },
+    FolderDeleted {
+        folder_id: String,
+        /// Members released to the top level, in order.
+        workspace_ids: Vec<String>,
+    },
+    FolderAssigned {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        folder_id: Option<String>,
+        /// Every workspace moved, including worktree family members.
+        workspace_ids: Vec<String>,
+    },
+    FolderMoved {
+        folder_id: String,
+        /// The folder's index among top-level entries after clamping.
+        position: usize,
+    },
     WorktreeList {
         source: WorktreeSourceInfo,
         worktrees: Vec<WorktreeInfo>,

@@ -4,8 +4,14 @@ impl ClientContextMenuOverlay {
     pub(super) fn items(&self) -> Vec<ClientContextMenuItem> {
         use ClientContextMenuAction as Action;
 
-        let item = |label, action| ClientContextMenuItem { label, action };
-        match &self.target {
+        if let Some(items) = super::folders::folder_menu_items(&self.target) {
+            return items;
+        }
+        let item = |label: &'static str, action| ClientContextMenuItem {
+            label: std::borrow::Cow::Borrowed(label),
+            action,
+        };
+        let mut items = match &self.target {
             ClientContextMenuTarget::Workspace { is_git: false, .. } => {
                 vec![item("Rename", Action::Rename), item("Close", Action::Close)]
             }
@@ -75,7 +81,23 @@ impl ClientContextMenuOverlay {
                 ]);
                 items
             }
+            ClientContextMenuTarget::Folder { .. }
+            | ClientContextMenuTarget::MoveToFolder { .. }
+            | ClientContextMenuTarget::SpacesPanel => Vec::new(),
+        };
+        if let ClientContextMenuTarget::Workspace { foldered, .. } = &self.target {
+            let insert_at = items
+                .iter()
+                .position(|item| item.action == Action::Rename)
+                .map_or(0, |index| index + 1);
+            for (offset, folder_item) in super::folders::space_menu_folder_items(*foldered)
+                .into_iter()
+                .enumerate()
+            {
+                items.insert(insert_at + offset, folder_item);
+            }
         }
+        items
     }
 }
 
@@ -109,6 +131,7 @@ impl ClientShellState {
         let collapsed = worktree.is_some_and(|worktree| {
             self.group_is_collapsed(&self.active_endpoint_id, &worktree.key)
         });
+        let foldered = super::folders::folder_of_workspace(snapshot, &workspace_id).is_some();
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target: ClientContextMenuTarget::Workspace {
                 workspace_id,
@@ -116,6 +139,7 @@ impl ClientShellState {
                 is_linked_worktree: worktree.is_some_and(|worktree| worktree.is_linked_worktree),
                 has_worktree_children,
                 collapsed,
+                foldered,
             },
             x,
             y,
@@ -191,6 +215,10 @@ impl ClientShellState {
             outcome.repaint = true;
             return;
         };
+        if self.activate_folder_context_action(&menu.target, action, menu.x, menu.y, outcome) {
+            outcome.repaint = true;
+            return;
+        }
         match menu.target {
             ClientContextMenuTarget::Workspace { workspace_id, .. } => {
                 self.activate_workspace_context_action(workspace_id, action, outcome)
@@ -213,6 +241,9 @@ impl ClientShellState {
                 action,
                 outcome,
             ),
+            ClientContextMenuTarget::Folder { .. }
+            | ClientContextMenuTarget::MoveToFolder { .. }
+            | ClientContextMenuTarget::SpacesPanel => {}
         }
         outcome.repaint = true;
     }

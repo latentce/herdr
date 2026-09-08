@@ -692,6 +692,9 @@ pub enum AgentPanelSort {
     #[default]
     Spaces,
     Priority,
+    /// Folder view: agents nested under their space, spaces under their
+    /// folder, mirroring the spaces panel's organization.
+    Folders,
 }
 
 #[derive(Debug, Clone)]
@@ -889,6 +892,8 @@ pub struct AppState {
     /// Terminal runtimes that should be shut down by the app/runtime layer
     /// after state has detached their terminal metadata.
     pub(crate) terminal_runtime_shutdowns: Vec<crate::terminal::TerminalId>,
+    /// Top-level order of folders and loose spaces; `workspaces` stays sorted to its flattening.
+    pub space_order: Vec<crate::folder::SpaceOrderEntry>,
 }
 
 impl AppState {
@@ -1106,6 +1111,7 @@ impl AppState {
             host_cell_size: crate::kitty_graphics::HostCellSize::default(),
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
+            space_order: Vec::new(),
         }
     }
 
@@ -1134,6 +1140,58 @@ impl AppState {
         state.active = Some(0);
         state.selected = 0;
         state.ensure_test_terminals();
+        state
+    }
+
+    /// Adversarial identity state plus a space order restored from corrupt input.
+    pub fn test_with_adversarial_organization_state() -> Self {
+        let mut state = Self::test_with_adversarial_identity_state();
+
+        let family_member = |name: &str, is_linked: bool| {
+            let mut ws = crate::workspace::Workspace::test_new(name);
+            ws.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+                key: "adversarial-repo".into(),
+                label: "repo".into(),
+                repo_root: "/repo".into(),
+                checkout_path: if is_linked {
+                    format!("/repo/worktree-{name}").into()
+                } else {
+                    "/repo".into()
+                },
+                is_linked_worktree: is_linked,
+            });
+            ws
+        };
+        state
+            .workspaces
+            .push(family_member("adversarial-parent", false));
+        state
+            .workspaces
+            .push(family_member("adversarial-child", true));
+        state
+            .workspaces
+            .push(crate::workspace::Workspace::test_new("adversarial-loose"));
+        let identity = state.workspaces[0].id.clone();
+        let parent = state.workspaces[1].id.clone();
+        let child = state.workspaces[2].id.clone();
+        state.ensure_test_terminals();
+
+        // Split family, duplicate folder id, repeated and dangling refs, one workspace missing.
+        state.install_space_order(vec![
+            crate::folder::SpaceOrderEntry::Workspace(identity),
+            crate::folder::SpaceOrderEntry::Folder(crate::folder::Folder {
+                id: "f1".into(),
+                name: "adversarial".into(),
+                members: vec![parent.clone(), "w-gone".into(), parent],
+            }),
+            crate::folder::SpaceOrderEntry::Workspace(child.clone()),
+            crate::folder::SpaceOrderEntry::Folder(crate::folder::Folder {
+                id: "f1".into(),
+                name: "adversarial-dup".into(),
+                members: vec![child],
+            }),
+            crate::folder::SpaceOrderEntry::Workspace("w-gone".into()),
+        ]);
         state
     }
 
@@ -1174,9 +1232,11 @@ impl AppState {
                     "empty app state must not keep pane-targeted toast"
                 );
             }
+            self.assert_space_order_invariants_for_test();
             return;
         }
 
+        self.assert_space_order_invariants_for_test();
         assert!(
             self.selected < self.workspaces.len(),
             "selected workspace {} out of bounds for {} workspaces",
@@ -1354,6 +1414,56 @@ mod tests {
         state.ensure_test_terminals();
 
         state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn adversarial_organization_state_heals_deterministically_on_restore() {
+        let find = |state: &AppState, name: &str| -> String {
+            state
+                .workspaces
+                .iter()
+                .find(|ws| ws.custom_name.as_deref() == Some(name))
+                .unwrap_or_else(|| panic!("workspace {name} present"))
+                .id
+                .clone()
+        };
+
+        let state = AppState::test_with_adversarial_organization_state();
+        state.assert_invariants_for_test();
+
+        let parent = find(&state, "adversarial-parent");
+        let child = find(&state, "adversarial-child");
+        assert_eq!(state.workspace_folder_id(&parent), Some("f1"));
+        assert_eq!(state.workspace_folder_id(&child), Some("f1"));
+        let loose = find(&state, "adversarial-loose");
+        assert_eq!(state.workspace_folder_id(&loose), None);
+        assert!(matches!(
+            state.space_order.last(),
+            Some(crate::folder::SpaceOrderEntry::Workspace(id)) if *id == loose
+        ));
+
+        let again = AppState::test_with_adversarial_organization_state();
+        let shape = |state: &AppState| -> Vec<String> {
+            state
+                .space_order
+                .iter()
+                .map(|entry| match entry {
+                    crate::folder::SpaceOrderEntry::Workspace(id) => {
+                        let name = state
+                            .workspaces
+                            .iter()
+                            .find(|ws| &ws.id == id)
+                            .and_then(|ws| ws.custom_name.clone())
+                            .unwrap_or_default();
+                        format!("loose:{name}")
+                    }
+                    crate::folder::SpaceOrderEntry::Folder(folder) => {
+                        format!("{}:{}[{}]", folder.id, folder.name, folder.members.len())
+                    }
+                })
+                .collect()
+        };
+        assert_eq!(shape(&state), shape(&again));
     }
 
     fn rgb_luminance(color: Color) -> f64 {

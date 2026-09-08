@@ -28,7 +28,7 @@ This is the strongest persistence path because the original processes never stop
 
 ## Snapshot restore
 
-If the Herdr server stops and starts again, the original pane processes are gone. Herdr restores the saved session shape: workspaces, tabs, panes, cwd, layout, and focus.
+If the Herdr server stops and starts again, the original pane processes are gone. Herdr restores the saved session shape: workspaces, tabs, panes, cwd, layout, and focus. Sidebar organization is part of that shape: folders, folder membership, and the space order come back the way you left them, and stale or corrupted organization data is repaired silently on restore. Folder collapse is remembered per client alongside the other sidebar preferences.
 
 Snapshot restore does not preserve running shells, servers, tests, or arbitrary processes. Panes that cannot use a stronger restore path come back as new shells in their saved directories.
 

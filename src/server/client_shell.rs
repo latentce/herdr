@@ -72,7 +72,34 @@ pub(super) fn snapshot(
                         is_linked_worktree: worktree.is_linked_worktree,
                     }),
                 agent_status: workspace.agent_status,
+                folder_id: workspace.folder_id,
             }
+        })
+        .collect();
+    let space_order = app
+        .state
+        .space_order
+        .iter()
+        .map(|entry| match entry {
+            crate::folder::SpaceOrderEntry::Folder(folder) => {
+                protocol::ClientShellSpaceOrderEntry::Folder(folder.id.clone())
+            }
+            crate::folder::SpaceOrderEntry::Workspace(id) => {
+                protocol::ClientShellSpaceOrderEntry::Workspace(id.clone())
+            }
+        })
+        .collect();
+    let folders = app
+        .state
+        .space_order
+        .iter()
+        .filter_map(|entry| match entry {
+            crate::folder::SpaceOrderEntry::Folder(folder) => Some(protocol::ClientShellFolder {
+                folder_id: folder.id.clone(),
+                name: folder.name.clone(),
+                members: folder.members.clone(),
+            }),
+            crate::folder::SpaceOrderEntry::Workspace(_) => None,
         })
         .collect();
     let tabs = snapshot
@@ -240,6 +267,8 @@ pub(super) fn snapshot(
         panes,
         agents,
         commands: app.client_shell_command_manifest(),
+        space_order,
+        folders,
     }
 }
 

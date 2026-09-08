@@ -48,6 +48,7 @@ impl ClientShellState {
             })
             .collect::<Vec<_>>();
         remote_collapsed_groups.sort_by(|left, right| left.profile_id.cmp(&right.profile_id));
+        let folder_collapse = folders::FolderCollapseState::to_preferences(&self.folder_collapse);
         let preferences = preferences::ClientChromePreferences {
             sidebar_width: self.sidebar_width_manual.then_some(self.sidebar_width),
             sidebar_section_split: self
@@ -61,6 +62,9 @@ impl ClientShellState {
                 .then_some(self.config.agent_panel_sort),
             collapsed_groups,
             remote_collapsed_groups,
+            collapsed_folders: Vec::new(),
+            collapsed_agent_spaces: Vec::new(),
+            folder_collapse,
         };
         if let Err(error) = preferences::store(path, preferences) {
             self.set_endpoint_error(error);
