@@ -1,10 +1,7 @@
-//! Folders and the space order — shared session facts.
+//! Folders and the top-level space order.
 //!
-//! A folder is a user-created, named, stable-identity container of spaces
-//! (workspaces), one level deep. The space order is the explicit top-level
-//! sequence interleaving folders and loose spaces, plus the ordered member
-//! list inside each folder. Both are server-owned session facts; presentation
-//! state such as collapse lives client-side.
+//! A folder is a named, stable-identity container of workspaces, one level
+//! deep. Both folders and the order are server-owned session facts.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -12,23 +9,17 @@ use crate::workspace::{decode_public_number, encode_public_number};
 
 static NEXT_FOLDER_ID: AtomicU64 = AtomicU64::new(1);
 
-/// A user-created, named container of spaces. Identity is the stable `id`;
-/// `name` is a mutable label and duplicates are allowed.
+/// A named container of workspaces. Identity is the stable `id`; names may repeat.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Folder {
-    /// Stable public folder identity, independent of display order.
     pub id: String,
-    /// Mutable display label. Never empty or whitespace-only.
+    /// Never empty or whitespace-only.
     pub name: String,
-    /// Ordered workspace ids belonging to this folder.
     pub members: Vec<String>,
 }
 
-/// One entry in the top-level space order: a folder or a loose space.
-///
-/// Workspaces absent from the space order are implicitly loose at the end of
-/// the top level, in their `AppState::workspaces` order. [`normalized_space_order`]
-/// makes that explicit.
+/// One entry in the top-level space order. Workspaces absent from the order
+/// are implicitly loose at the end.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpaceOrderEntry {
     Folder(Folder),
@@ -44,8 +35,7 @@ pub(crate) fn public_folder_number(id: &str) -> Option<usize> {
     id.strip_prefix('f').and_then(decode_public_number)
 }
 
-/// Re-seed the folder id counter after restore so newly generated ids cannot
-/// collide with restored ones. Mirrors `reserve_workspace_ids`.
+/// Re-seed the folder id counter after restore. Mirrors `reserve_workspace_ids`.
 pub(crate) fn reserve_folder_ids(entries: &[SpaceOrderEntry]) {
     let Some(next) = entries
         .iter()
@@ -73,24 +63,16 @@ pub(crate) fn reserve_folder_ids(entries: &[SpaceOrderEntry]) {
     }
 }
 
-/// Repairs applied while normalizing a space order against the live
-/// workspaces. The restore path logs each non-empty category so hand-edited
-/// or stale snapshots heal silently but observably.
+/// Repairs applied while normalizing a restored space order.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct SpaceOrderRepairs {
-    /// References to workspaces that no longer exist, dropped from the order.
     pub dangling_workspace_refs: Vec<String>,
-    /// Duplicate appearances of a workspace, dropped (first occurrence wins).
     pub duplicate_workspace_refs: Vec<String>,
-    /// Duplicate folder ids whose members merged into the first occurrence.
     pub merged_duplicate_folder_ids: Vec<String>,
-    /// Workspaces missing from the order, appended loose at the end.
     pub appended_missing_workspaces: Vec<String>,
 }
 
 impl SpaceOrderRepairs {
-    /// Whether normalization changed nothing. Test-only: the restore path
-    /// logs each category individually via [`Self::log_restore_warnings`].
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.dangling_workspace_refs.is_empty()
@@ -99,8 +81,6 @@ impl SpaceOrderRepairs {
             && self.appended_missing_workspaces.is_empty()
     }
 
-    /// Log every repair applied while restoring a space order. Repairs are
-    /// silent to the user; tracing warnings are their only surface.
     pub fn log_restore_warnings(&self) {
         if !self.dangling_workspace_refs.is_empty() {
             tracing::warn!(
@@ -129,15 +109,9 @@ impl SpaceOrderRepairs {
     }
 }
 
-/// Normalize a space order against the live workspace ids:
-/// - folders are kept (even when empty); duplicate folder ids merge into the
-///   first occurrence,
-/// - stale (unknown) and duplicate workspace references are dropped
-///   (first occurrence wins),
-/// - workspaces missing from the order are appended as loose entries at the
-///   end, in `workspace_ids` order.
-///
-/// The result references every live workspace exactly once.
+/// Normalize a space order against the live workspace ids: duplicate folder
+/// ids merge, stale and duplicate workspace references drop (first wins), and
+/// missing workspaces append loose at the end.
 pub(crate) fn normalized_space_order(
     entries: &[SpaceOrderEntry],
     workspace_ids: &[&str],
@@ -145,8 +119,7 @@ pub(crate) fn normalized_space_order(
     normalized_space_order_with_repairs(entries, workspace_ids).0
 }
 
-/// [`normalized_space_order`] plus a deterministic report of every repair
-/// applied, in input order.
+/// [`normalized_space_order`] plus a report of every repair applied.
 pub(crate) fn normalized_space_order_with_repairs(
     entries: &[SpaceOrderEntry],
     workspace_ids: &[&str],
@@ -217,9 +190,7 @@ pub(crate) fn normalized_space_order_with_repairs(
     (normalized, repairs)
 }
 
-/// Canonical workspace-id order: the space order flattened (folder members in
-/// place of their folder), with stale/duplicate references skipped and
-/// unlisted workspaces appended at the end in `workspace_ids` order.
+/// The space order flattened, with unlisted workspaces appended at the end.
 pub(crate) fn canonical_workspace_ids(
     entries: &[SpaceOrderEntry],
     workspace_ids: &[&str],
@@ -233,8 +204,7 @@ pub(crate) fn canonical_workspace_ids(
         .collect()
 }
 
-/// The folder containing `workspace_id`, if any (first occurrence wins,
-/// consistent with [`normalized_space_order`]).
+/// The folder containing `workspace_id`, if any.
 pub(crate) fn folder_id_of_workspace<'a>(
     entries: &'a [SpaceOrderEntry],
     workspace_id: &str,

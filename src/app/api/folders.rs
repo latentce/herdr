@@ -37,8 +37,6 @@ impl App {
     }
 
     pub(super) fn handle_folder_list(&mut self, id: String) -> String {
-        // Normalizing makes implicitly loose workspaces explicit and drops
-        // stale references, so clients see the full organizational picture.
         let workspace_ids: Vec<&str> = self
             .state
             .workspaces
@@ -79,8 +77,6 @@ impl App {
             Ok(()) => {
                 self.schedule_session_save();
                 let Some(folder) = self.state.folder(&params.folder_id) else {
-                    // Unreachable in practice (rename validated existence),
-                    // but degrade gracefully.
                     return folder_mutation_error(id, &FolderMutationError::FolderNotFound);
                 };
                 let folder = folder_info(folder);
@@ -124,7 +120,6 @@ impl App {
         id: String,
         params: FolderAssignParams,
     ) -> String {
-        // Accept the same workspace-id forms as other workspace methods.
         let Some(index) = self.parse_workspace_id(&params.workspace_id) else {
             return folder_mutation_error(id, &FolderMutationError::WorkspaceNotFound);
         };
@@ -143,10 +138,7 @@ impl App {
         ) {
             Ok(workspace_ids) => {
                 self.schedule_session_save();
-                // Assigning a space to the folder it is already in reorders
-                // the folder's members rather than changing membership, so
-                // it is a member-order change: `folder.updated`, not
-                // `folder.assigned`.
+                // Reordering within the current folder is a member-order change, not an assignment.
                 let same_folder =
                     params.folder_id.is_some() && params.folder_id == previous_folder_id;
                 if same_folder {
@@ -243,7 +235,7 @@ mod tests {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &Config::default(),
-            true,
+            crate::app::AppPolicy::TEST,
             None,
             api_rx,
             crate::api::EventHub::default(),
@@ -274,48 +266,6 @@ mod tests {
 
         let error: ErrorResponse = serde_json::from_str(&response).expect("error response");
         assert_eq!(error.error.code, "invalid_folder_name");
-    }
-
-    #[test]
-    fn collapse_state_is_absent_from_api_payloads() {
-        // Per the folder-organization ADR, collapse is per-client visual
-        // state: persisted in the session snapshot, but never API-exposed.
-        // Do not "fix" this asymmetry.
-        let mut app = test_app(&["one", "two"]);
-        let member = app.state.workspaces[1].id.clone();
-        let response = app.handle_folder_create(
-            "create".into(),
-            FolderCreateParams {
-                name: "work".into(),
-            },
-        );
-        let folder_id = created_folder_id(&response);
-        app.handle_folder_assign(
-            "assign".into(),
-            FolderAssignParams {
-                workspace_id: member,
-                folder_id: Some(folder_id.clone()),
-                position: None,
-            },
-        );
-        app.state.collapsed_folder_ids.insert(folder_id);
-        app.state.collapsed_space_keys.insert("repo-key".into());
-        let ws_id = app.state.workspaces[0].id.clone();
-        app.state.collapsed_agent_space_ids.insert(ws_id);
-
-        let folder_list = app.handle_folder_list("list".into());
-        let session_snapshot = app.handle_session_snapshot("snapshot".into());
-
-        for (payload, name) in [
-            (&folder_list, "folder.list"),
-            (&session_snapshot, "session.snapshot"),
-        ] {
-            serde_json::from_str::<SuccessResponse>(payload).expect("success response");
-            assert!(
-                !payload.contains("collaps"),
-                "{name} response must not expose collapse state: {payload}"
-            );
-        }
     }
 
     #[test]

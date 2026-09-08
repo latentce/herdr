@@ -7,7 +7,7 @@ on:
   push:
     branches: [fork]
     paths:
-      - website/install.sh
+      - distribution/install.sh
       - .github/workflows/fork-pages.yml
   workflow_dispatch: {}
 
@@ -34,7 +34,7 @@ jobs:
       - name: Stage site
         run: |
           mkdir -p _site
-          cp website/install.sh _site/install.sh
+          cp distribution/install.sh _site/install.sh
 
       - uses: actions/upload-pages-artifact@v4
         with:

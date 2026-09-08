@@ -9,8 +9,7 @@ use crate::terminal::TerminalRuntimeRegistry;
 use crate::workspace::Workspace;
 
 /// Current snapshot format version.
-/// v4 added folders and the top-level space order.
-pub(super) const SNAPSHOT_VERSION: u32 = 4;
+pub(super) const SNAPSHOT_VERSION: u32 = 3;
 
 /// Serializable snapshot of the entire herdr session.
 #[derive(Serialize, Deserialize)]
@@ -27,20 +26,7 @@ pub struct SessionSnapshot {
     pub sidebar_section_split: Option<f32>,
     #[serde(default)]
     pub collapsed_space_keys: std::collections::HashSet<String>,
-    /// Folder ids collapsed in the spaces panel. Per-client presentation
-    /// state, persisted like `collapsed_space_keys` but never API-exposed.
-    /// Purely additive optional field: no version bump required.
-    #[serde(default)]
-    pub collapsed_folder_ids: std::collections::HashSet<String>,
-    /// Workspace ids whose agent list is collapsed in the agents panel folder
-    /// view. Per-client presentation state, persisted like
-    /// `collapsed_folder_ids` but never API-exposed. Purely additive optional
-    /// field: no version bump required.
-    #[serde(default)]
-    pub collapsed_agent_space_ids: std::collections::HashSet<String>,
-    /// Space order: folders and loose spaces in top-level order. Snapshots
-    /// from before v4 have no folders; the empty default restores every
-    /// workspace loose in its prior order.
+    /// Folders and loose spaces in top-level order; empty when the session predates folders.
     #[serde(default)]
     pub space_order: Vec<SpaceOrderEntrySnapshot>,
 }
@@ -244,10 +230,6 @@ struct RawSessionSnapshot {
     #[serde(default)]
     collapsed_space_keys: std::collections::HashSet<String>,
     #[serde(default)]
-    collapsed_folder_ids: std::collections::HashSet<String>,
-    #[serde(default)]
-    collapsed_agent_space_ids: std::collections::HashSet<String>,
-    #[serde(default)]
     space_order: Vec<SpaceOrderEntrySnapshot>,
 }
 
@@ -264,8 +246,6 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         sidebar_width: raw.sidebar_width,
         sidebar_section_split: raw.sidebar_section_split,
         collapsed_space_keys: raw.collapsed_space_keys,
-        collapsed_folder_ids: raw.collapsed_folder_ids,
-        collapsed_agent_space_ids: raw.collapsed_agent_space_ids,
         space_order: raw.space_order,
     })
 }
@@ -317,9 +297,7 @@ fn first_pane_id_in_layout(layout: &LayoutSnapshot) -> Option<u32> {
 }
 
 /// Capture the current app state into a serializable snapshot.
-// Capture mirrors the persisted session fields one-to-one; bundling them into
-// a struct would just duplicate SessionSnapshot's shape at every call site.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // mirrors the persisted session fields one-to-one
 pub fn capture(
     workspaces: &[Workspace],
     terminals: &std::collections::HashMap<
@@ -329,11 +307,6 @@ pub fn capture(
     terminal_runtimes: &TerminalRuntimeRegistry,
     active: Option<usize>,
     selected: usize,
-    sidebar_width: u16,
-    sidebar_section_split: f32,
-    collapsed_space_keys: std::collections::HashSet<String>,
-    collapsed_folder_ids: std::collections::HashSet<String>,
-    collapsed_agent_space_ids: std::collections::HashSet<String>,
     space_order: &[crate::folder::SpaceOrderEntry],
 ) -> SessionSnapshot {
     let workspace_ids: Vec<&str> = workspaces.iter().map(|ws| ws.id.as_str()).collect();
@@ -345,13 +318,9 @@ pub fn capture(
             .collect(),
         active,
         selected,
-        sidebar_width: Some(sidebar_width),
-        sidebar_section_split: Some(sidebar_section_split),
-        collapsed_space_keys,
-        collapsed_folder_ids,
-        collapsed_agent_space_ids,
-        // Persist the normalized order: stale references dropped and every
-        // workspace explicit, so restore sees the full organizational picture.
+        sidebar_width: None,
+        sidebar_section_split: None,
+        collapsed_space_keys: std::collections::HashSet::new(),
         space_order: crate::folder::normalized_space_order(space_order, &workspace_ids)
             .iter()
             .map(SpaceOrderEntrySnapshot::from)
@@ -621,11 +590,6 @@ mod tests {
             terminal_runtimes,
             state.active,
             state.selected,
-            state.sidebar_width,
-            state.sidebar_section_split,
-            state.collapsed_space_keys.clone(),
-            state.collapsed_folder_ids.clone(),
-            state.collapsed_agent_space_ids.clone(),
             &state.space_order,
         )
     }
@@ -691,8 +655,6 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
-            collapsed_folder_ids: std::collections::HashSet::new(),
-            collapsed_agent_space_ids: std::collections::HashSet::new(),
             space_order: Vec::new(),
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -756,9 +718,7 @@ mod tests {
             .expect("assign");
         state.rename_folder(&kept, "personal").expect("rename");
         state.delete_folder(&dropped).expect("delete");
-        // Canonical order after delete: two, three, one (released at the
-        // dropped folder's former position), with the renamed empty folder
-        // kept in place.
+        // Canonical order after delete: two, three, one
 
         let snap = capture_from_state(&state);
         let json = serde_json::to_string(&snap).unwrap();
@@ -790,8 +750,6 @@ mod tests {
         state
             .assign_workspace_to_folder(&w1, Some(&folder_id), None)
             .expect("assign first");
-        // Positional assign inside the folder and a folder reposition are
-        // both explicit ordering facts that must survive restart.
         state
             .assign_workspace_to_folder(&w2, Some(&folder_id), Some(0))
             .expect("positional assign");
@@ -814,8 +772,6 @@ mod tests {
             "positional member order and folder position must survive restart"
         );
 
-        // Installing the restored order into a session with the same
-        // workspaces reproduces the arrangement exactly.
         let mut reopened = state;
         reopened.space_order = Vec::new();
         reopened.install_space_order(
@@ -844,7 +800,6 @@ mod tests {
     fn capture_lists_unlisted_workspaces_loose_at_the_end_of_space_order() {
         let mut state = state_with_workspaces(&["one"]);
         state.create_folder("work").expect("create folder");
-        // A workspace added outside the folder mutations is implicitly loose.
         state.workspaces.push(Workspace::test_new("late"));
         state.ensure_test_terminals();
 
@@ -868,24 +823,16 @@ mod tests {
     }
 
     #[test]
-    fn pre_v4_snapshot_loads_with_empty_space_order() {
+    fn snapshot_without_space_order_loads_with_empty_space_order() {
         let snap = parse_snapshot(session_fixture("current-herdr")).unwrap();
 
-        assert_eq!(snap.version, 3);
+        assert_eq!(snap.version, SNAPSHOT_VERSION);
         assert!(
             snap.space_order.is_empty(),
-            "v3 snapshots migrate to no folders with the prior workspace order"
+            "older snapshots migrate to no folders with the prior workspace order"
         );
     }
 
-    /// Table-driven corruption-to-healed-state suite: each corrupt persisted
-    /// space order round-trips through serialization and `parse_snapshot`,
-    /// installs into a session with known workspaces, and heals to the
-    /// expected organization — deterministically, with invariants intact.
-    ///
-    /// The session holds four workspaces with fixed ids: `w1` (worktree
-    /// family parent, key `repo`), `w2` (linked family child, key `repo`),
-    /// and plain `w3`, `w4`.
     #[test]
     fn corrupt_space_orders_heal_deterministically_on_restore() {
         use crate::folder::{Folder, SpaceOrderEntry};
@@ -1003,8 +950,7 @@ mod tests {
                     snap_loose("w4"),
                 ],
                 healed: vec![
-                    // Healing reassigns the family as a block, which appends
-                    // it at the end of the parent's folder.
+                    // Healing appends the family at the end of the parent's folder.
                     folder("f1", "work", &["w3", "w1", "w2"]),
                     folder("f2", "play", &[]),
                     loose("w4"),
@@ -1047,16 +993,11 @@ mod tests {
 
         fn heal(corrupt: &[SpaceOrderEntrySnapshot]) -> AppState {
             let mut state = build_state();
-            // Simulate a stale or hand-edited session file: the persisted
-            // space order is corrupt and the collapse state names a folder
-            // that does not exist.
             let mut snap = capture_from_state(&state);
             snap.space_order = corrupt.to_vec();
-            snap.collapsed_folder_ids.insert("f-gone".into());
             let json = serde_json::to_string(&snap).expect("serialize snapshot");
             let restored = parse_snapshot(&json).expect("parse corrupt snapshot");
 
-            state.collapsed_folder_ids = restored.collapsed_folder_ids;
             state.install_space_order(
                 restored
                     .space_order
@@ -1072,11 +1013,6 @@ mod tests {
             assert_eq!(
                 state.space_order, case.healed,
                 "case `{}` must heal to the expected organization",
-                case.name
-            );
-            assert!(
-                !state.collapsed_folder_ids.contains("f-gone"),
-                "case `{}` must prune dangling collapsed folder ids",
                 case.name
             );
             state.assert_invariants_for_test();
@@ -1168,8 +1104,6 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
-            collapsed_folder_ids: std::collections::HashSet::new(),
-            collapsed_agent_space_ids: std::collections::HashSet::new(),
             version: SNAPSHOT_VERSION,
             space_order: Vec::new(),
         };
@@ -1346,111 +1280,13 @@ mod tests {
     }
 
     #[test]
-    fn capture_contract_tracks_sidebar_state() {
-        let mut state = state_with_workspaces(&["one"]);
-        state.sidebar_width = 31;
-        state.sidebar_section_split = 0.4;
-        state.collapsed_space_keys.insert("repo-key".into());
-        state.collapsed_folder_ids.insert("f5".into());
-        state.collapsed_agent_space_ids.insert("w7".into());
+    fn capture_contract_omits_legacy_server_chrome_state() {
+        let state = state_with_workspaces(&["one"]);
 
         let snapshot = capture_from_state(&state);
-        assert_eq!(snapshot.sidebar_width, Some(31));
-        assert_eq!(snapshot.sidebar_section_split, Some(0.4));
-        assert!(snapshot.collapsed_space_keys.contains("repo-key"));
-        assert!(snapshot.collapsed_folder_ids.contains("f5"));
-        assert!(snapshot.collapsed_agent_space_ids.contains("w7"));
-    }
-
-    #[test]
-    fn collapsed_folder_ids_round_trip_through_capture_and_parse() {
-        let mut state = state_with_workspaces(&["one", "two"]);
-        let member = state.workspaces[1].id.clone();
-        let folder_id = state.create_folder("work").expect("create folder");
-        state
-            .assign_workspace_to_folder(&member, Some(&folder_id), None)
-            .expect("assign");
-        state.collapsed_folder_ids.insert(folder_id.clone());
-
-        let snapshot = capture_from_state(&state);
-        let json = serde_json::to_string(&snapshot).unwrap();
-        let restored = parse_snapshot(&json).unwrap();
-
-        assert!(restored.collapsed_folder_ids.contains(&folder_id));
-        // Membership and order are untouched by collapse.
-        assert!(restored.space_order.iter().any(|entry| matches!(
-            entry,
-            SpaceOrderEntrySnapshot::Folder(folder)
-                if folder.id == folder_id && folder.members == vec![member.clone()]
-        )));
-    }
-
-    #[test]
-    fn snapshot_without_collapsed_folder_ids_defaults_to_none_collapsed() {
-        let snap = SessionSnapshot {
-            version: SNAPSHOT_VERSION,
-            workspaces: vec![],
-            active: None,
-            selected: 0,
-            sidebar_width: None,
-            sidebar_section_split: None,
-            collapsed_space_keys: std::collections::HashSet::new(),
-            collapsed_folder_ids: std::collections::HashSet::new(),
-            collapsed_agent_space_ids: std::collections::HashSet::new(),
-            space_order: Vec::new(),
-        };
-        let mut value = serde_json::to_value(&snap).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .remove("collapsed_folder_ids")
-            .expect("field must be serialized");
-
-        let restored = parse_snapshot(&value.to_string()).unwrap();
-
-        assert!(restored.collapsed_folder_ids.is_empty());
-    }
-
-    #[test]
-    fn collapsed_agent_space_ids_round_trip_through_capture_and_parse() {
-        let mut state = state_with_workspaces(&["one", "two"]);
-        let ws_id = state.workspaces[1].id.clone();
-        state.collapsed_agent_space_ids.insert(ws_id.clone());
-
-        let snapshot = capture_from_state(&state);
-        let json = serde_json::to_string(&snapshot).unwrap();
-        let restored = parse_snapshot(&json).unwrap();
-
-        assert!(restored.collapsed_agent_space_ids.contains(&ws_id));
-        // The agent sequence source is untouched by collapse: every
-        // workspace is still captured.
-        assert_eq!(restored.workspaces.len(), 2);
-    }
-
-    #[test]
-    fn snapshot_without_collapsed_agent_space_ids_defaults_to_none_collapsed() {
-        let snap = SessionSnapshot {
-            version: SNAPSHOT_VERSION,
-            workspaces: vec![],
-            active: None,
-            selected: 0,
-            sidebar_width: None,
-            sidebar_section_split: None,
-            collapsed_space_keys: std::collections::HashSet::new(),
-            collapsed_folder_ids: std::collections::HashSet::new(),
-            collapsed_agent_space_ids: std::collections::HashSet::new(),
-            space_order: Vec::new(),
-        };
-        let mut value = serde_json::to_value(&snap).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .remove("collapsed_agent_space_ids")
-            .expect("field must be serialized");
-
-        let restored = parse_snapshot(&value.to_string()).unwrap();
-
-        assert!(restored.collapsed_agent_space_ids.is_empty());
+        assert_eq!(snapshot.sidebar_width, None);
+        assert_eq!(snapshot.sidebar_section_split, None);
+        assert!(snapshot.collapsed_space_keys.is_empty());
     }
 
     #[test]
@@ -1494,7 +1330,11 @@ mod tests {
         let mut state = state_with_workspaces(&["one"]);
         let root = state.workspaces[0].tabs[0].root_pane;
         let second = state.workspaces[0].test_split(Direction::Horizontal);
-        crate::ui::compute_view(&mut state, Rect::new(0, 0, 106, 20));
+        crate::ui::compute_view_with_runtime_registry(
+            &mut state,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, 106, 20),
+        );
 
         state.navigate_pane(NavDirection::Right);
 
@@ -1509,7 +1349,11 @@ mod tests {
         let root = state.workspaces[0].tabs[0].root_pane;
         state.workspaces[0].test_split(Direction::Horizontal);
         state.workspaces[0].layout.focus_pane(root);
-        crate::ui::compute_view(&mut state, Rect::new(0, 0, 106, 20));
+        crate::ui::compute_view_with_runtime_registry(
+            &mut state,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, 106, 20),
+        );
         let before = capture_from_state(&state);
 
         state.resize_pane(NavDirection::Right);
@@ -1828,8 +1672,6 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
-            collapsed_folder_ids: std::collections::HashSet::new(),
-            collapsed_agent_space_ids: std::collections::HashSet::new(),
             space_order: Vec::new(),
         };
 

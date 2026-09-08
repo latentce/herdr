@@ -28,7 +28,7 @@ This is the strongest persistence path because the original processes never stop
 
 ## Snapshot restore
 
-If the Herdr server stops and starts again, the original pane processes are gone. Herdr restores the saved session shape: workspaces, tabs, panes, cwd, layout, and focus. Sidebar organization is part of that shape: folders, folder membership, the space order, and collapse states come back the way you left them, and stale or corrupted organization data is repaired silently on restore.
+If the Herdr server stops and starts again, the original pane processes are gone. Herdr restores the saved session shape: workspaces, tabs, panes, cwd, layout, and focus. Sidebar organization is part of that shape: folders, folder membership, and the space order come back the way you left them, and stale or corrupted organization data is repaired silently on restore. Folder collapse is remembered per client alongside the other sidebar preferences.
 
 Snapshot restore does not preserve running shells, servers, tests, or arbitrary processes. Panes that cannot use a stronger restore path come back as new shells in their saved directories.
 
@@ -103,6 +103,6 @@ herdr update --handoff
 herdr --remote workbox --handoff
 ```
 
-Plain `herdr update` and plain `herdr --remote workbox` use the normal restart/stop flow by default.
+Plain `herdr update` installs the new client and keeps endpoint-generation-1 servers running. Plain `herdr --remote workbox` also keeps a compatible remote server running across version differences. A stop is required only for the one-time upgrade from a pre-generation-1 server; use `--handoff` when you explicitly want to replace a supported running server without losing its pane processes.
 
 `herdr update --handoff` only applies to installs managed by Herdr's own updater. Homebrew, mise, and Nix installs are updated through their package managers, so `herdr update` is disabled there and cannot perform live handoff.
