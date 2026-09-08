@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -19,6 +20,22 @@ pub(super) struct ClientChromePreferences {
     pub(super) agent_panel_sort: Option<crate::config::AgentPanelSortConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) collapsed_groups: Vec<String>,
+    /// Pre-per-endpoint collapse state; read as Local's, never written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) collapsed_folders: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) collapsed_agent_spaces: Vec<String>,
+    /// Collapse state keyed by `ClientEndpointId::storage_key()`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) folder_collapse: BTreeMap<String, FolderCollapsePreferences>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub(super) struct FolderCollapsePreferences {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) collapsed_folders: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) collapsed_agent_spaces: Vec<String>,
 }
 
 pub(super) fn path_for_local_endpoint(socket_path: &Path) -> PathBuf {

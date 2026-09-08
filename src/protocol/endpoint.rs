@@ -183,6 +183,8 @@ mod tests {
             tabs: Vec::new(),
             panes: Vec::new(),
             agents: Vec::new(),
+            space_order: Vec::new(),
+            folders: Vec::new(),
             commands: Vec::new(),
         }
     }
@@ -264,6 +266,42 @@ mod tests {
         assert_eq!(
             decoded.commands[0].action,
             crate::protocol::ClientShellCommandAction::Unknown
+        );
+    }
+
+    #[test]
+    fn snapshot_json_tolerates_future_space_order_entry_kinds() {
+        use crate::protocol::ClientShellSpaceOrderEntry;
+
+        assert_eq!(
+            serde_json::to_value(ClientShellSpaceOrderEntry::Folder("f1".into())).unwrap(),
+            serde_json::json!({"kind": "folder", "id": "f1"})
+        );
+        assert_eq!(
+            serde_json::to_value(ClientShellSpaceOrderEntry::Workspace("w1".into())).unwrap(),
+            serde_json::json!({"kind": "workspace", "id": "w1"})
+        );
+
+        let mut snapshot = match snapshot_message(&snapshot()).unwrap() {
+            ServerMessage::EndpointControl { data, .. } => {
+                serde_json::from_str::<serde_json::Value>(&data).unwrap()
+            }
+            _ => unreachable!(),
+        };
+        snapshot["space_order"] = serde_json::json!([
+            {"kind": "workspace", "id": "w1"},
+            {"kind": "future_group", "id": "g1"},
+            {"kind": "folder", "id": "f1"}
+        ]);
+
+        let decoded: ClientShellSnapshot = serde_json::from_value(snapshot).unwrap();
+        assert_eq!(
+            decoded.space_order,
+            vec![
+                ClientShellSpaceOrderEntry::Workspace("w1".into()),
+                ClientShellSpaceOrderEntry::Unknown,
+                ClientShellSpaceOrderEntry::Folder("f1".into()),
+            ]
         );
     }
 

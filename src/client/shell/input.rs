@@ -871,19 +871,16 @@ impl ClientShellState {
         if entries.is_empty() {
             return;
         }
-        let current = self
-            .navigate_workspace_id
-            .as_deref()
-            .and_then(|selected| {
-                entries
-                    .iter()
-                    .position(|entry| snapshot.workspaces[entry.index].workspace_id == selected)
-            })
-            .unwrap_or(0);
+        let current = self.navigation_anchor(
+            snapshot,
+            &entries,
+            self.navigate_workspace_id.as_deref(),
+            delta,
+        );
         let next = if mobile {
-            (current as isize + delta).clamp(0, entries.len().saturating_sub(1) as isize) as usize
+            (current + delta).clamp(0, entries.len().saturating_sub(1) as isize) as usize
         } else {
-            (current as isize + delta).rem_euclid(entries.len() as isize) as usize
+            (current + delta).rem_euclid(entries.len() as isize) as usize
         };
         let workspace_id = snapshot.workspaces[entries[next].index]
             .workspace_id

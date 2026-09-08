@@ -15,6 +15,7 @@ mod api_helpers;
 pub(crate) use api_helpers::limit_snapshot_lines;
 mod creation;
 mod custom_commands;
+pub(crate) mod folders;
 mod git_refresh;
 mod ids;
 pub(crate) mod pane_graphics;
@@ -193,6 +194,7 @@ fn agent_panel_sort_from_config(
     match sort {
         crate::config::AgentPanelSortConfig::Spaces => state::AgentPanelSort::Spaces,
         crate::config::AgentPanelSortConfig::Priority => state::AgentPanelSort::Priority,
+        crate::config::AgentPanelSortConfig::Folders => state::AgentPanelSort::Folders,
     }
 }
 
@@ -370,6 +372,7 @@ impl App {
         // Try to restore previous session
         let mut restored_terminals = std::collections::HashMap::new();
         let mut restored_terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let mut restored_space_order: Vec<crate::folder::SpaceOrderEntry> = Vec::new();
         let (workspaces, active, selected) = if !policy.restore_session {
             (Vec::new(), None, 0)
         } else if let Some(snap) = crate::persist::load() {
@@ -393,6 +396,11 @@ impl App {
             );
             restored_terminals = terminals;
             restored_terminal_runtimes = terminal_runtimes.into();
+            restored_space_order = snap
+                .space_order
+                .into_iter()
+                .map(crate::folder::SpaceOrderEntry::from)
+                .collect();
             if ws.is_empty() {
                 crate::logging::session_restored(0, "empty");
                 (Vec::new(), None, 0)
@@ -523,9 +531,11 @@ impl App {
             host_cell_size: crate::kitty_graphics::HostCellSize::default(),
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
+            space_order: Vec::new(),
         };
 
         state.terminals = restored_terminals;
+        state.install_space_order(restored_space_order);
 
         for ws_idx in 0..state.workspaces.len() {
             let cwd = state.workspaces[ws_idx]
@@ -667,6 +677,14 @@ impl App {
         app.state.selected = snapshot
             .selected
             .min(app.state.workspaces.len().saturating_sub(1));
+        app.state.install_space_order(
+            snapshot
+                .space_order
+                .iter()
+                .cloned()
+                .map(crate::folder::SpaceOrderEntry::from)
+                .collect(),
+        );
         app.state.mode = if app.state.active.is_some() {
             state::Mode::Terminal
         } else {
@@ -1323,6 +1341,23 @@ mod tests {
             Some(expected_version.as_str())
         );
         assert!(app.event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn startup_uses_configured_folder_view_agent_panel_sort() {
+        let mut config = Config::default();
+        config.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Folders;
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let app = App::new(
+            &config,
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+
+        assert_eq!(app.state.agent_panel_sort, state::AgentPanelSort::Folders);
     }
 
     #[test]

@@ -61,19 +61,23 @@ pub(crate) fn apply_agent_view(app: &AppState, entries: &mut Vec<AgentPanelEntry
         }
     }
 
-    if matches!(
-        app.agent_panel_sort,
-        crate::app::state::AgentPanelSort::Priority
-    ) {
-        entries.sort_by_key(|entry| {
-            (
-                std::cmp::Reverse(super::api_helpers::tab_attention_priority(
-                    entry.state,
-                    entry.seen,
-                )),
-                std::cmp::Reverse(entry.last_agent_state_change_seq),
-            )
-        });
+    match app.agent_panel_sort {
+        crate::app::state::AgentPanelSort::Priority => {
+            entries.sort_by_key(|entry| {
+                (
+                    std::cmp::Reverse(super::api_helpers::tab_attention_priority(
+                        entry.state,
+                        entry.seen,
+                    )),
+                    std::cmp::Reverse(entry.last_agent_state_change_seq),
+                )
+            });
+        }
+        crate::app::state::AgentPanelSort::Folders => {
+            let ranks = app.folder_view_workspace_ranks();
+            entries.sort_by_key(|entry| ranks.get(entry.ws_idx).copied().unwrap_or(usize::MAX));
+        }
+        crate::app::state::AgentPanelSort::Spaces => {}
     }
 }
 

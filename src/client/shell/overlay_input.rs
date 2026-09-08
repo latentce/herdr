@@ -1041,6 +1041,26 @@ impl ClientShellState {
                     label: Some(trimmed.to_owned()),
                 },
             )),
+            ClientRenameTarget::Folder { folder_id } => (!trimmed.is_empty()).then(|| {
+                crate::api::schema::Method::FolderRename(crate::api::schema::FolderRenameParams {
+                    folder_id,
+                    name: trimmed.to_owned(),
+                })
+            }),
+            ClientRenameTarget::NewFolder { move_workspace_id } => {
+                if !trimmed.is_empty() {
+                    self.push_endpoint_method_with_kind(
+                        crate::api::schema::Method::FolderCreate(
+                            crate::api::schema::FolderCreateParams {
+                                name: trimmed.to_owned(),
+                            },
+                        ),
+                        PendingEndpointKind::FolderCreate { move_workspace_id },
+                        outcome,
+                    );
+                }
+                None
+            }
         };
         if let Some(method) = method {
             self.push_endpoint_method(method, outcome);

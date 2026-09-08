@@ -939,6 +939,68 @@ pub struct ClientShellSnapshot {
     pub panes: Vec<ClientShellPane>,
     pub agents: Vec<ClientShellAgent>,
     pub commands: Vec<ClientShellCommand>,
+    /// Top-level order of folders and loose workspaces; empty when the server has no folders.
+    #[serde(default)]
+    pub space_order: Vec<ClientShellSpaceOrderEntry>,
+    #[serde(default)]
+    pub folders: Vec<ClientShellFolder>,
+}
+
+/// One entry of the top-level space order: `{"kind": "folder" | "workspace", "id"}` on the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientShellSpaceOrderEntry {
+    Folder(String),
+    Workspace(String),
+    /// An entry kind this client does not know; skipped when projecting.
+    Unknown,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ClientShellSpaceOrderKind {
+    Folder,
+    Workspace,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ClientShellSpaceOrderEntryWire {
+    kind: ClientShellSpaceOrderKind,
+    id: String,
+}
+
+impl Serialize for ClientShellSpaceOrderEntry {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let (kind, id) = match self {
+            Self::Folder(id) => (ClientShellSpaceOrderKind::Folder, id.as_str()),
+            Self::Workspace(id) => (ClientShellSpaceOrderKind::Workspace, id.as_str()),
+            Self::Unknown => (ClientShellSpaceOrderKind::Unknown, ""),
+        };
+        ClientShellSpaceOrderEntryWire {
+            kind,
+            id: id.to_string(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ClientShellSpaceOrderEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = ClientShellSpaceOrderEntryWire::deserialize(deserializer)?;
+        Ok(match wire.kind {
+            ClientShellSpaceOrderKind::Folder => Self::Folder(wire.id),
+            ClientShellSpaceOrderKind::Workspace => Self::Workspace(wire.id),
+            ClientShellSpaceOrderKind::Unknown => Self::Unknown,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellFolder {
+    pub folder_id: String,
+    pub name: String,
+    pub members: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1023,6 +1085,8 @@ pub struct ClientShellWorkspace {
     pub focused: bool,
     #[serde(deserialize_with = "deserialize_client_shell_agent_status")]
     pub agent_status: crate::api::schema::AgentStatus,
+    #[serde(default)]
+    pub folder_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2656,6 +2720,7 @@ mod tests {
                 worktree: None,
                 focused: true,
                 agent_status: crate::api::schema::AgentStatus::Idle,
+                folder_id: None,
             }],
             tabs: vec![ClientShellTab {
                 tab_id: "w1:t1".into(),
@@ -2678,6 +2743,8 @@ mod tests {
                 right_click_passthrough: false,
             }],
             agents: Vec::new(),
+            space_order: Vec::new(),
+            folders: Vec::new(),
             commands: vec![ClientShellCommand {
                 command_id: "cmd_0123456789abcdef0123456789abcdef".into(),
                 binding_label: "prefix+z".into(),

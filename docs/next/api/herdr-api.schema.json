@@ -254,6 +254,111 @@
             },
             {
               "properties": {
+                "folder": {
+                  "$ref": "#/schemas/event/$defs/FolderInfo"
+                },
+                "type": {
+                  "const": "folder_created",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "folder"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "folder": {
+                  "$ref": "#/schemas/event/$defs/FolderInfo"
+                },
+                "type": {
+                  "const": "folder_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "folder"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "folder_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "folder_deleted",
+                  "type": "string"
+                },
+                "workspace_ids": {
+                  "description": "Members released to the top level at the folder's former\nposition, in their previous relative order.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "type",
+                "folder_id",
+                "workspace_ids"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "folder_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "const": "folder_assigned",
+                  "type": "string"
+                },
+                "workspace_ids": {
+                  "description": "All workspaces moved by this assignment (whole worktree families\nmove together), in canonical order.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "type",
+                "workspace_ids"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "folder_id": {
+                  "type": "string"
+                },
+                "position": {
+                  "description": "The folder's effective index among top-level entries after\nclamping.",
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "folder_moved",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "folder_id",
+                "position"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "type": {
                   "const": "worktree_created",
                   "type": "string"
@@ -736,6 +841,11 @@
             "workspace_moved",
             "workspace_reordered",
             "workspace_focused",
+            "folder_created",
+            "folder_updated",
+            "folder_deleted",
+            "folder_assigned",
+            "folder_moved",
             "worktree_created",
             "worktree_opened",
             "worktree_removed",
@@ -756,6 +866,29 @@
             "layout_updated"
           ],
           "type": "string"
+        },
+        "FolderInfo": {
+          "properties": {
+            "folder_id": {
+              "type": "string"
+            },
+            "members": {
+              "description": "Ordered member workspace ids.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "folder_id",
+            "name",
+            "members"
+          ],
+          "type": "object"
         },
         "PaneInfo": {
           "properties": {
@@ -1078,6 +1211,13 @@
             },
             "focused": {
               "type": "boolean"
+            },
+            "folder_id": {
+              "description": "The folder containing this workspace, if any.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "label": {
               "type": "string"
@@ -2142,6 +2282,91 @@
           },
           "required": [
             "match_event"
+          ],
+          "type": "object"
+        },
+        "FolderAssignParams": {
+          "properties": {
+            "folder_id": {
+              "description": "Target folder, or `null` to return the workspace to the top level.\nAssigning any worktree family member moves the whole family.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "position": {
+              "description": "Final index of the assigned block inside the target container — the\nfolder's member list, or the top-level order (where a folder counts\nas one entry) when `folder_id` is `null`. Omitted appends;\nout-of-range positions clamp to the end. Assigning to the current\ncontainer with a position performs a plain reorder inside it.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id"
+          ],
+          "type": "object"
+        },
+        "FolderCreateParams": {
+          "properties": {
+            "name": {
+              "description": "Display name; duplicates allowed, empty/whitespace-only rejected.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
+        "FolderMoveParams": {
+          "properties": {
+            "folder_id": {
+              "type": "string"
+            },
+            "position": {
+              "description": "The folder's final index among top-level entries (folders and loose\nspaces); out-of-range positions clamp to the end.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "folder_id",
+            "position"
+          ],
+          "type": "object"
+        },
+        "FolderRenameParams": {
+          "properties": {
+            "folder_id": {
+              "type": "string"
+            },
+            "name": {
+              "description": "New display name; duplicates allowed, empty/whitespace-only rejected.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "folder_id",
+            "name"
+          ],
+          "type": "object"
+        },
+        "FolderTarget": {
+          "description": "Parameters addressing a single folder by id.",
+          "properties": {
+            "folder_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "folder_id"
           ],
           "type": "object"
         },
@@ -4067,6 +4292,66 @@
             {
               "properties": {
                 "type": {
+                  "const": "folder.created",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "folder.updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "folder.deleted",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "folder.assigned",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "folder.moved",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
                   "const": "worktree.created",
                   "type": "string"
                 }
@@ -5107,6 +5392,102 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/WorkspaceCloseParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "folder.create",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/FolderCreateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "folder.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "folder.rename",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/FolderRenameParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "folder.delete",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/FolderTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "folder.assign",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/FolderAssignParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "folder.move",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/FolderMoveParams"
             }
           },
           "required": [
@@ -7024,6 +7405,111 @@
             },
             {
               "properties": {
+                "folder": {
+                  "$ref": "#/schemas/success_response/$defs/FolderInfo"
+                },
+                "type": {
+                  "const": "folder_created",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "folder"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "folder": {
+                  "$ref": "#/schemas/success_response/$defs/FolderInfo"
+                },
+                "type": {
+                  "const": "folder_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "folder"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "folder_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "folder_deleted",
+                  "type": "string"
+                },
+                "workspace_ids": {
+                  "description": "Members released to the top level at the folder's former\nposition, in their previous relative order.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "type",
+                "folder_id",
+                "workspace_ids"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "folder_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "const": "folder_assigned",
+                  "type": "string"
+                },
+                "workspace_ids": {
+                  "description": "All workspaces moved by this assignment (whole worktree families\nmove together), in canonical order.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "type",
+                "workspace_ids"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "folder_id": {
+                  "type": "string"
+                },
+                "position": {
+                  "description": "The folder's effective index among top-level entries after\nclamping.",
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "folder_moved",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "folder_id",
+                "position"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "type": {
                   "const": "worktree_created",
                   "type": "string"
@@ -7521,6 +8007,11 @@
             "workspace_moved",
             "workspace_reordered",
             "workspace_focused",
+            "folder_created",
+            "folder_updated",
+            "folder_deleted",
+            "folder_assigned",
+            "folder_moved",
             "worktree_created",
             "worktree_opened",
             "worktree_removed",
@@ -7541,6 +8032,29 @@
             "layout_updated"
           ],
           "type": "string"
+        },
+        "FolderInfo": {
+          "properties": {
+            "folder_id": {
+              "type": "string"
+            },
+            "members": {
+              "description": "Ordered member workspace ids.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "folder_id",
+            "name",
+            "members"
+          ],
+          "type": "object"
         },
         "InstalledPluginInfo": {
           "properties": {
@@ -9299,6 +9813,138 @@
             },
             {
               "properties": {
+                "folder_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "folder_created",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "folder_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "folders": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/FolderInfo"
+                  },
+                  "type": "array"
+                },
+                "order": {
+                  "description": "Canonical top-level order interleaving folders and loose spaces.",
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/SpaceOrderEntryInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "folder_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "folders",
+                "order"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "folder": {
+                  "$ref": "#/schemas/success_response/$defs/FolderInfo"
+                },
+                "type": {
+                  "const": "folder_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "folder"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "folder_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "folder_deleted",
+                  "type": "string"
+                },
+                "workspace_ids": {
+                  "description": "Members released to the top level, in order.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "type",
+                "folder_id",
+                "workspace_ids"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "folder_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "const": "folder_assigned",
+                  "type": "string"
+                },
+                "workspace_ids": {
+                  "description": "Every workspace moved, including worktree family members.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "type",
+                "workspace_ids"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "folder_id": {
+                  "type": "string"
+                },
+                "position": {
+                  "description": "The folder's index among top-level entries after clamping.",
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "folder_moved",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "folder_id",
+                "position"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "source": {
                   "$ref": "#/schemas/success_response/$defs/WorktreeSourceInfo"
                 },
@@ -10627,6 +11273,30 @@
           ],
           "type": "object"
         },
+        "SpaceOrderEntryInfo": {
+          "description": "One entry of the top-level space order: a folder or a loose workspace.",
+          "properties": {
+            "id": {
+              "description": "Folder id or workspace id, matching `kind`.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/schemas/success_response/$defs/SpaceOrderEntryKind"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "type": "object"
+        },
+        "SpaceOrderEntryKind": {
+          "enum": [
+            "folder",
+            "workspace"
+          ],
+          "type": "string"
+        },
         "SplitDirection": {
           "enum": [
             "right",
@@ -10683,6 +11353,13 @@
             },
             "focused": {
               "type": "boolean"
+            },
+            "folder_id": {
+              "description": "The folder containing this workspace, if any.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "label": {
               "type": "string"

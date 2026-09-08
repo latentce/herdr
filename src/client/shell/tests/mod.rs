@@ -39,6 +39,7 @@ pub(super) fn snapshot() -> ClientShellSnapshot {
             worktree: None,
             focused: true,
             agent_status: AgentStatus::Idle,
+            folder_id: None,
         }],
         tabs: vec![ClientShellTab {
             tab_id: "tab_1".into(),
@@ -61,6 +62,8 @@ pub(super) fn snapshot() -> ClientShellSnapshot {
             right_click_passthrough: false,
         }],
         agents: Vec::new(),
+        space_order: Vec::new(),
+        folders: Vec::new(),
         commands: Vec::new(),
     }
 }
@@ -213,6 +216,7 @@ mod chrome_context;
 mod copy;
 mod endpoint_requests;
 mod endpoints;
+mod folder_sidebar;
 #[path = "input.rs"]
 mod input_domain;
 mod keybindings_settings;

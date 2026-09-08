@@ -184,6 +184,19 @@ A tab is another terminal layout inside a workspace. Without `--workspace`, `tab
 
 Workspace and tab creation, and pane splitting, leave focus unchanged by default. `--focus` selects the new layout; `--no-focus` states the default explicitly. Without `--cwd`, new terminals follow the configured `terminal.new_cwd` policy, which follows the source pane or workspace by default. Each `--env KEY=VALUE` adds or replaces that variable in the new root shell.
 
+## Folders
+
+```bash
+herdr folder list
+herdr folder create --name TEXT
+herdr folder rename <folder_id> <name>
+herdr folder assign <workspace_id> [--folder FOLDER_ID] [--position N]
+herdr folder move <folder_id> --position N
+herdr folder delete <folder_id>
+```
+
+Folders group workspaces in a server-owned order. `folder list` returns the folders with their ordered members plus the top-level order interleaving folders and loose workspaces. `folder assign` moves a workspace into a folder; omitting `--folder` moves it back to the top level. Assigning any worktree family member moves the whole family. Positions are 0-based indexes in the target container; omitted positions append and out-of-range positions clamp to the end. `folder move` repositions a folder in the top-level order. `folder delete` releases members back to the top level in place and never closes workspaces.
+
 ## Panes
 
 ```bash

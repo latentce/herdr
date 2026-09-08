@@ -192,6 +192,7 @@ pub(super) struct ShellHitMap {
     pub(super) release_notes_scrollbar: Rect,
     pub(super) release_notes_scroll_metrics: Option<crate::pane::ScrollMetrics>,
     pub(super) release_notes_max_scroll: usize,
+    pub(super) folders: folders::FolderHits,
 }
 
 #[derive(Clone)]
@@ -267,6 +268,10 @@ pub(super) enum ClientChromeDrag {
         source_workspace_id: String,
         target: Option<(Option<String>, u16)>,
     },
+    SpaceOrder {
+        source: folders::SpaceDragSource,
+        target: Option<folders::SpaceDropSlot>,
+    },
     PaneSplit {
         hit: PaneSplitHit,
         tab_id: String,
@@ -288,6 +293,7 @@ pub(super) struct WorkspaceHit {
     pub(super) workspace_id: String,
     pub(super) indented: bool,
     pub(super) group_toggle: Option<(Rect, String)>,
+    pub(super) foldered: bool,
 }
 
 #[derive(Debug)]
@@ -365,6 +371,13 @@ pub(super) enum ClientRenameTarget {
     },
     Pane {
         pane_id: String,
+    },
+    Folder {
+        folder_id: String,
+    },
+    /// `move_workspace_id` is filed into the new folder on success.
+    NewFolder {
+        move_workspace_id: Option<String>,
     },
 }
 
@@ -581,6 +594,11 @@ pub(super) enum ClientContextMenuAction {
     Zoom,
     ToggleRightClickPassthrough,
     ClosePane,
+    MoveToFolderMenu,
+    RemoveFromFolder,
+    DeleteFolder,
+    MoveToFolder(usize),
+    NewFolder,
 }
 
 #[derive(Debug)]
@@ -591,7 +609,17 @@ pub(super) enum ClientContextMenuTarget {
         is_linked_worktree: bool,
         has_worktree_children: bool,
         collapsed: bool,
+        foldered: bool,
     },
+    Folder {
+        folder_id: String,
+    },
+    /// "Move to folder ▸" targets as `(folder_id, name)`; items dispatch by index since names may repeat.
+    MoveToFolder {
+        workspace_id: String,
+        folders: Vec<(String, String)>,
+    },
+    SpacesPanel,
     Tab {
         tab_id: String,
         workspace_id: String,
@@ -614,7 +642,7 @@ pub(super) struct ClientContextMenuOverlay {
 }
 
 pub(super) struct ClientContextMenuItem {
-    pub(super) label: &'static str,
+    pub(super) label: std::borrow::Cow<'static, str>,
     pub(super) action: ClientContextMenuAction,
 }
 
@@ -665,6 +693,10 @@ impl ClientShellOverlay {
 #[derive(Debug)]
 pub(super) enum PendingEndpointKind {
     Generic,
+    /// `move_workspace_id` is filed into the new folder on success.
+    FolderCreate {
+        move_workspace_id: Option<String>,
+    },
     ProductAnnouncementDismiss {
         version: String,
         id: String,
@@ -911,6 +943,9 @@ pub(crate) struct ClientShellState {
     pub(super) workspace_press: Option<ClientWorkspacePress>,
     pub(super) tab_press: Option<ClientTabPress>,
     pub(super) collapsed_groups: HashSet<String>,
+    pub(super) folder_press: Option<folders::ClientFolderPress>,
+    /// Collapse state keyed by `ClientEndpointId::storage_key()`.
+    pub(super) folder_collapse: HashMap<String, folders::FolderCollapseState>,
     pub(super) workspace_scroll: usize,
     pub(super) agent_scroll: usize,
     pub(super) tab_scroll: usize,
@@ -997,7 +1032,7 @@ pub(super) fn release_notes_state(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct WorkspaceEntry {
     pub(super) index: usize,
     pub(super) indented: bool,
@@ -1054,6 +1089,12 @@ impl ClientShellState {
             workspace_press: None,
             tab_press: None,
             collapsed_groups: preferences.collapsed_groups.into_iter().collect(),
+            folder_press: None,
+            folder_collapse: folders::FolderCollapseState::from_preferences(
+                preferences.folder_collapse,
+                preferences.collapsed_folders,
+                preferences.collapsed_agent_spaces,
+            ),
             workspace_scroll: 0,
             agent_scroll: 0,
             tab_scroll: 0,
@@ -1147,6 +1188,12 @@ impl ClientShellState {
     ) -> Vec<WorkspaceEntry> {
         if self.mobile_layout_active() {
             render::workspace_entries(snapshot, &HashSet::new())
+        } else if folders::has_folders(snapshot) {
+            folders::visible_workspace_entries(
+                snapshot,
+                &self.collapsed_groups,
+                self.collapsed_folders(),
+            )
         } else {
             render::workspace_entries(snapshot, &self.collapsed_groups)
         }
@@ -1198,6 +1245,7 @@ impl ClientShellState {
         self.chrome_drag = None;
         self.workspace_press = None;
         self.tab_press = None;
+        self.folder_press = None;
         self.workspace_scroll = 0;
         self.agent_scroll = 0;
         self.tab_scroll = 0;
@@ -1507,6 +1555,8 @@ impl ClientShellState {
             }
         }
         self.snapshot = Some(snapshot);
+        let mut prune_outcome = ClientShellInput::default();
+        self.prune_folder_collapse_state(&mut prune_outcome);
         let pending_surface = self.pending_pane_surface.take();
         if let Some(surface) = pending_surface {
             let matching = self.snapshot.as_ref().is_some_and(|snapshot| {

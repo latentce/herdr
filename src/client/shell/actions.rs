@@ -564,6 +564,10 @@ impl ClientShellState {
         }
         match pending.kind {
             PendingEndpointKind::Generic => {}
+            PendingEndpointKind::FolderCreate { move_workspace_id } => {
+                let actions = self.complete_folder_create(move_workspace_id, &result);
+                return (true, actions);
+            }
             PendingEndpointKind::ProductAnnouncementDismiss { version, id } => {
                 return match result {
                     Ok(_) => (false, Vec::new()),
@@ -984,18 +988,14 @@ impl ClientShellState {
                 if entries.is_empty() {
                     return None;
                 }
-                let current = entries
-                    .iter()
-                    .position(|entry| {
-                        snapshot.workspaces[entry.index].workspace_id == focused_workspace
-                    })
-                    .unwrap_or(0);
                 let delta = if action == KeybindAction::PreviousWorkspace {
                     -1
                 } else {
                     1
                 };
-                let next = (current as isize + delta).rem_euclid(entries.len() as isize) as usize;
+                let current =
+                    self.navigation_anchor(snapshot, &entries, Some(&focused_workspace), delta);
+                let next = (current + delta).rem_euclid(entries.len() as isize) as usize;
                 let workspace_id = snapshot.workspaces[entries[next].index]
                     .workspace_id
                     .clone();

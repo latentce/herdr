@@ -1,5 +1,6 @@
 use crate::api::schema::{
-    EmptyParams, Method, PaneFocusDirectionParams, PaneInputSetParams, PaneMoveParams,
+    EmptyParams, FolderAssignParams, FolderCreateParams, FolderMoveParams, FolderRenameParams,
+    FolderTarget, Method, PaneFocusDirectionParams, PaneInputSetParams, PaneMoveParams,
     PaneRenameParams, PaneResizeParams, PaneSplitParams, PaneSwapParams, PaneTarget,
     PaneZoomParams, Request, TabCreateParams, TabListParams, TabRenameParams, TabTarget,
     WorkspaceCloseParams, WorkspaceCreateParams, WorkspaceRenameParams, WorkspaceTarget,
@@ -68,6 +69,36 @@ pub(super) fn tab_rename(params: TabRenameParams) -> std::io::Result<i32> {
 
 pub(super) fn tab_close(tab_id: String) -> std::io::Result<i32> {
     print_method_response("cli:tab:close", Method::TabClose(TabTarget { tab_id }))
+}
+
+pub(super) fn folder_list() -> std::io::Result<i32> {
+    print_method_response(
+        "cli:folder:list",
+        Method::FolderList(EmptyParams::default()),
+    )
+}
+
+pub(super) fn folder_create(params: FolderCreateParams) -> std::io::Result<i32> {
+    print_method_response("cli:folder:create", Method::FolderCreate(params))
+}
+
+pub(super) fn folder_rename(params: FolderRenameParams) -> std::io::Result<i32> {
+    print_method_response("cli:folder:rename", Method::FolderRename(params))
+}
+
+pub(super) fn folder_assign(params: FolderAssignParams) -> std::io::Result<i32> {
+    print_method_response("cli:folder:assign", Method::FolderAssign(params))
+}
+
+pub(super) fn folder_move(params: FolderMoveParams) -> std::io::Result<i32> {
+    print_method_response("cli:folder:move", Method::FolderMove(params))
+}
+
+pub(super) fn folder_delete(folder_id: String) -> std::io::Result<i32> {
+    print_method_response(
+        "cli:folder:delete",
+        Method::FolderDelete(FolderTarget { folder_id }),
+    )
 }
 
 pub(super) fn worktree_list(params: WorktreeListParams) -> std::io::Result<i32> {

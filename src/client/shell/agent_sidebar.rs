@@ -42,6 +42,14 @@ pub(super) fn ordered_agent_pane_ids(
                 std::cmp::Reverse(agent.state_change_seq),
             )
         });
+    } else if sort == crate::config::AgentPanelSortConfig::Folders {
+        let ranks = super::folders::expanded_workspace_ranks(snapshot);
+        agents.sort_by_key(|agent| {
+            ranks
+                .get(agent.workspace_id.as_str())
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
     }
     agents
         .into_iter()
@@ -56,6 +64,7 @@ pub(super) fn render_agent_panel(
     config: &ClientShellConfig,
     agent_scroll: &mut usize,
     hits: &mut ShellHitMap,
+    folders: &super::folders::FolderRenderState<'_>,
 ) {
     if !render_agent_panel_header(
         buffer,
@@ -64,6 +73,19 @@ pub(super) fn render_agent_panel(
         config,
         hits,
     ) {
+        return;
+    }
+
+    if super::folders::agent_folder_view_active(snapshot, config) {
+        super::folders::render_agent_folder_view(
+            buffer,
+            area,
+            snapshot,
+            config,
+            folders,
+            agent_scroll,
+            hits,
+        );
         return;
     }
 
@@ -121,6 +143,7 @@ pub(super) fn render_agent_panel_header(
     let sort_label = agent_view_label.unwrap_or(match config.agent_panel_sort {
         crate::config::AgentPanelSortConfig::Spaces => "grouped",
         crate::config::AgentPanelSortConfig::Priority => "priority",
+        crate::config::AgentPanelSortConfig::Folders => "folders",
     });
     let sort_width = display_width(sort_label).min(area.width as usize) as u16;
     let sort_rect = Rect::new(

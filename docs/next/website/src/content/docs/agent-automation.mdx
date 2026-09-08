@@ -17,6 +17,8 @@ A pane exists whether or not it contains an agent. An agent is the recognized pr
 
 Creating a workspace also creates its first tab and root pane; creating a tab creates its root pane. Use the returned pane ID for the first process, and split only when that layout needs another terminal.
 
+Workspaces can also be organized into folders with `herdr folder`: create and rename folders, assign workspaces (omitting `--folder` returns one to the top level), reorder the top level, and delete folders without closing anything. Assigning any worktree family member moves the whole family.
+
 Creation commands print JSON. Capture IDs from the response instead of predicting them:
 
 ```bash

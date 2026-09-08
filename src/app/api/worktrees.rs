@@ -477,6 +477,7 @@ impl App {
         membership: crate::workspace::WorktreeSpaceMembership,
         emit_update: bool,
     ) {
+        let key = membership.key.clone();
         let changed = if let Some(workspace) = self.state.workspaces.get_mut(ws_idx) {
             if workspace.worktree_space.as_ref() == Some(&membership) {
                 false
@@ -488,6 +489,14 @@ impl App {
             false
         };
         if changed {
+            // Colocation may re-sort the workspaces vec; re-resolve the index by identity.
+            let ws_idx = {
+                let workspace_id = self.state.workspaces.get(ws_idx).map(|ws| ws.id.clone());
+                self.state.ensure_worktree_family_colocated(&key);
+                workspace_id
+                    .and_then(|id| self.state.workspaces.iter().position(|ws| ws.id == id))
+                    .unwrap_or(ws_idx)
+            };
             self.state.mark_session_dirty();
             if emit_update {
                 self.emit_workspace_updated(ws_idx);
