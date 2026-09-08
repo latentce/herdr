@@ -30,7 +30,8 @@ const NONINTERACTIVE_SSH_STDERR_LIMIT: usize = 16 * 1024;
 const BRIDGE_FAILURE_REPORT_TIMEOUT: Duration = Duration::from_secs(1);
 const REMOTE_SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const CURRENT_PROTOCOL: u32 = crate::protocol::PROTOCOL_VERSION;
-const STABLE_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
+const STABLE_UPDATE_MANIFEST_URL: &str =
+    "https://github.com/latentce/herdr/releases/latest/download/latest.json";
 const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
 const REMOTE_BINARY_ENV_VAR: &str = "HERDR_REMOTE_BINARY";
 const REMOTE_OUTPUT_READY_MARKER: &str = "herdr-remote-output-ready:1";
@@ -667,6 +668,16 @@ fn current_channel() -> &'static str {
     crate::build_info::channel()
 }
 
+/// install.ps1 accepts only the stable and preview update channels; fork
+/// builds follow the stable channel.
+fn windows_installer_channel() -> &'static str {
+    if crate::build_info::is_preview() {
+        "preview"
+    } else {
+        "stable"
+    }
+}
+
 struct InstallSource {
     path: PathBuf,
     temporary_dir: Option<PathBuf>,
@@ -1174,7 +1185,7 @@ fn windows_remote_install_command(remote_dir: &str, identity: &str, sha256: &str
         crate::platform::quote_powershell_arg(&format!(r"{remote_dir}\herdr-windows-x86_64.zip"));
     windows_powershell_script_command(&format!(
         r#"$herdrInstaller = {installer}; $herdrPackage = {package}; & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $herdrInstaller -Channel {channel} -LocalPackagePath $herdrPackage -LocalPackageFormat zip -LocalPackageIdentity {identity} -LocalPackageSha256 {sha256}; if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}; $herdrHome = if ([string]::IsNullOrWhiteSpace($env:HERDR_HOME)) {{ Join-Path $env:USERPROFILE '.herdr' }} else {{ $env:HERDR_HOME }}; $activeJunction = Join-Path $herdrHome 'packages\standalone\current'; $activeTarget = [string](Get-Item -LiteralPath $activeJunction -Force -ErrorAction Stop).Target; if ([string]::IsNullOrWhiteSpace($activeTarget)) {{ throw 'Herdr installer did not activate a concrete release.' }}; $installedHerdr = Join-Path $activeTarget 'herdr.exe'; if (-not (Test-Path -LiteralPath $installedHerdr -PathType Leaf)) {{ throw 'Herdr installer result does not contain herdr.exe.' }}; $encodedResult = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes([System.IO.Path]::GetFullPath($installedHerdr))); [Console]::Out.WriteLine('{WINDOWS_REMOTE_INSTALL_RESULT_MARKER}' + $encodedResult); exit 0"#,
-        channel = crate::platform::quote_powershell_arg(current_channel()),
+        channel = crate::platform::quote_powershell_arg(windows_installer_channel()),
         identity = crate::platform::quote_powershell_arg(identity),
         sha256 = crate::platform::quote_powershell_arg(sha256),
     ))
@@ -4789,6 +4800,11 @@ mod tests {
         ));
         assert!(command.contains("-LocalPackageFormat zip"));
         assert!(command.contains("-LocalPackageIdentity 0.9.0-custom.digest"));
+        assert!(matches!(windows_installer_channel(), "stable" | "preview"));
+        assert!(command.contains(&format!(
+            "-Channel {}",
+            crate::platform::quote_powershell_arg(windows_installer_channel())
+        )));
         assert!(command.contains(".Target"));
         assert!(command.contains(WINDOWS_REMOTE_INSTALL_RESULT_MARKER));
 
