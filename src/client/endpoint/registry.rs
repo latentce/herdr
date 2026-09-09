@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::health::{EndpointHealth, HealthAction};
 use super::ClientEndpointId;
@@ -201,7 +201,23 @@ impl EndpointRegistry {
         }
     }
 
-    pub(crate) fn tick_health(&mut self, now: Instant) {
+    /// Completes an outstanding round-trip probe for `endpoint_id` and returns the smoothed
+    /// round-trip time, or `None` when the pong does not match the current probe.
+    pub(crate) fn pong_received(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        payload: &str,
+        now: Instant,
+    ) -> Option<Duration> {
+        self.connections
+            .get_mut(endpoint_id)
+            .filter(|connection| connection.generation == generation)
+            .and_then(|connection| connection.health.as_mut())
+            .and_then(|health| health.pong_received(payload, now))
+    }
+
+    pub(crate) fn tick_health(&mut self, now: Instant, rtt_probing: bool) {
         let actions = self
             .connections
             .iter()
@@ -209,7 +225,7 @@ impl EndpointRegistry {
                 connection
                     .health
                     .as_ref()
-                    .map(|health| (endpoint_id.clone(), health.action(now)))
+                    .map(|health| (endpoint_id.clone(), health.action(now, rtt_probing)))
             })
             .filter(|(_, action)| *action != HealthAction::None)
             .collect::<Vec<_>>();
@@ -217,9 +233,17 @@ impl EndpointRegistry {
             match action {
                 HealthAction::None => {}
                 HealthAction::Ping => {
+                    let Some(seq) = self
+                        .connections
+                        .get(&endpoint_id)
+                        .and_then(|connection| connection.health.as_ref())
+                        .map(|health| health.next_probe_seq())
+                    else {
+                        continue;
+                    };
                     let ping = ClientMessage::EndpointControl {
                         kind: crate::protocol::endpoint::HEALTH_PING_KIND.into(),
-                        data: String::new(),
+                        data: seq.to_string(),
                     };
                     if self.send_to(&endpoint_id, &ping) == EndpointSendOutcome::Sent {
                         if let Some(health) = self
@@ -486,7 +510,7 @@ mod tests {
             negotiation(),
             false,
         );
-        registry.tick_health(Instant::now() + std::time::Duration::from_secs(300));
+        registry.tick_health(Instant::now() + std::time::Duration::from_secs(300), false);
         assert!(registry.connection(&ClientEndpointId::Local).is_some());
         assert!(sent.lock().unwrap().is_empty());
         assert!(registry.take_failures().is_empty());
@@ -515,7 +539,7 @@ mod tests {
             false,
         );
         let now = Instant::now();
-        registry.tick_health(now + super::super::health::HEARTBEAT_INTERVAL);
+        registry.tick_health(now + super::super::health::HEARTBEAT_INTERVAL, false);
         assert!(matches!(
             sent.lock().unwrap().as_slice(),
             [ClientMessage::EndpointControl { kind, .. }]
@@ -525,9 +549,66 @@ mod tests {
         registry.tick_health(
             now + super::super::health::HEARTBEAT_INTERVAL
                 + super::super::health::HEARTBEAT_TIMEOUT,
+            false,
         );
         assert!(registry.connection(&ssh_id).is_none());
         assert_eq!(registry.take_failures()[0].kind, io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn rtt_probe_carries_a_sequence_and_a_matching_pong_reports_rtt() {
+        let mut registry = EndpointRegistry::new(
+            FakeTransport {
+                sent: Arc::new(Mutex::new(Vec::new())),
+                error: None,
+            },
+            1,
+            negotiation(),
+        );
+        let ssh_id = ClientEndpointId::Ssh(profile());
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        registry.insert(
+            ssh_id.clone(),
+            FakeTransport {
+                sent: sent.clone(),
+                error: None,
+            },
+            2,
+            negotiation(),
+            false,
+        );
+        let now = Instant::now();
+        registry.mark_ready(&ssh_id, 2);
+        // Busy link: traffic arrives, but rtt probing still pings on its own cadence.
+        registry.received(&ssh_id, 2, now + Duration::from_secs(2));
+        registry.tick_health(now + super::super::health::RTT_PROBE_INTERVAL, true);
+        let payload = match sent.lock().unwrap().as_slice() {
+            [ClientMessage::EndpointControl { kind, data }]
+                if kind == crate::protocol::endpoint::HEALTH_PING_KIND =>
+            {
+                data.clone()
+            }
+            other => panic!("expected one health ping, got {other:?}"),
+        };
+        assert!(payload.parse::<u64>().is_ok(), "ping payload is a sequence");
+
+        let reply_at = now + super::super::health::RTT_PROBE_INTERVAL + Duration::from_millis(97);
+        assert_eq!(
+            registry.pong_received(&ssh_id, 1, &payload, reply_at),
+            None,
+            "a stale generation never reports rtt"
+        );
+        assert_eq!(
+            registry.pong_received(&ssh_id, 2, &payload, reply_at),
+            Some(Duration::from_millis(97))
+        );
+        assert_eq!(
+            registry.pong_received(&ssh_id, 2, &payload, reply_at),
+            None,
+            "a probe completes once"
+        );
+        assert!(registry.connection(&ssh_id).is_some());
+        assert!(registry.take_failures().is_empty());
     }
 
     #[test]
@@ -554,7 +635,7 @@ mod tests {
         let now = Instant::now();
         registry.mark_ready(&ssh_id, 2);
         registry.received(&ssh_id, 2, now + super::super::health::HEARTBEAT_INTERVAL);
-        registry.tick_health(now + super::super::health::HEARTBEAT_TIMEOUT);
+        registry.tick_health(now + super::super::health::HEARTBEAT_TIMEOUT, false);
         assert!(registry.connection(&ssh_id).is_some());
     }
 

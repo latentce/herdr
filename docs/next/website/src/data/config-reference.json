@@ -1050,6 +1050,12 @@
           ]
         },
         {
+          "key": "ui.show_machine_rtt",
+          "type": "boolean",
+          "default": "true",
+          "description": "Probe saved SSH machines every 3 seconds and show the smoothed round-trip time next to each machine in the sidebar."
+        },
+        {
           "key": "ui.sidebar.agents.row_gap",
           "type": "integer",
           "default": "0",
