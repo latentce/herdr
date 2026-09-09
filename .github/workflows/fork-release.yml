@@ -14,6 +14,10 @@ name: Fork Release
 #   https://github.com/latentce/herdr/releases/latest/download/latest.json
 # so installed fork builds self-update from these releases.
 #
+# Every run also mirrors upstream's plain vX.Y.Z release tags onto this fork.
+# The Distribution contract PR check resolves each published docs version's
+# tag, so PRs touching docs/next/website fail if any are missing.
+#
 # Requirements:
 # - This workflow must live on the repository's default branch for the cron
 #   schedule to fire (set `fork` as the default branch of this fork).
@@ -49,6 +53,33 @@ jobs:
           ref: ${{ env.FORK_BRANCH }}
           fetch-depth: 0
           token: ${{ secrets.FORK_SYNC_TOKEN }}
+
+      - name: Mirror upstream release tags
+        run: |
+          set -euo pipefail
+          # docs/versions/manifest.json is validated against each published
+          # vX.Y.Z tag by scripts/docs/versions.mjs (the Distribution contract
+          # PR check), so the fork must carry upstream's release tags. Only
+          # plain vX.Y.Z tags are mirrored; vX.Y.Z-fork.N tags belong to the
+          # release job below and are never touched here.
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}"
+          release_tags() {
+            git ls-remote --tags "$1" 'v*' \
+              | awk '{print $2}' \
+              | sed 's|refs/tags/||; s|\^{}||' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -u
+          }
+          MISSING=$(comm -23 <(release_tags upstream) <(release_tags origin))
+          if [ -z "$MISSING" ]; then
+            echo "Fork already carries every upstream release tag."
+            exit 0
+          fi
+          echo "Mirroring upstream release tags:" $MISSING
+          for tag in $MISSING; do
+            git fetch upstream --no-tags "refs/tags/${tag}:refs/tags/${tag}"
+          done
+          git push origin $(printf 'refs/tags/%s ' $MISSING)
 
       - name: Decide fork release tag
         id: decide
@@ -109,7 +140,6 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote add upstream "https://github.com/${UPSTREAM_REPO}"
           git fetch upstream "refs/tags/${UPSTREAM_TAG}:refs/tags/${UPSTREAM_TAG}" --no-tags
           if ! git merge --no-edit "$UPSTREAM_TAG"; then
             echo "::error::Merge of $UPSTREAM_TAG into $FORK_BRANCH has conflicts." \
