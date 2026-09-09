@@ -49,6 +49,7 @@ pub(super) fn render_expanded(
     endpoints: &[ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
+    collapse_by_endpoint: &HashMap<String, super::folders::FolderCollapseState>,
     agent_scroll: &mut usize,
     hits: &mut ShellHitMap,
 ) {
@@ -59,6 +60,19 @@ pub(super) fn render_expanded(
         config,
         hits,
     ) {
+        return;
+    }
+    if super::folders::agent_folder_view_enabled(agent_view_label, config) {
+        let rows = folder_view_rows(endpoints, active_endpoint_id, config, collapse_by_endpoint);
+        super::folders::render_agent_folder_rows(
+            buffer,
+            area,
+            &rows,
+            config,
+            agent_scroll,
+            hits,
+            super::folders::AgentHitTarget::Endpoint,
+        );
         return;
     }
     let rows = agent_rows(endpoints, active_endpoint_id, config);
@@ -92,6 +106,59 @@ struct EndpointAgentRow {
     machine_label: String,
     stale: bool,
     agent: super::agent_sidebar::AgentRow,
+}
+
+/// Folder-view rows for every endpoint with a snapshot, each section headed
+/// by its machine. Collapse state is looked up per endpoint because folder and
+/// workspace ids are server-scoped.
+fn folder_view_rows<'a>(
+    endpoints: &'a [ClientShellEndpoint],
+    active_endpoint_id: &ClientEndpointId,
+    config: &ClientShellConfig,
+    collapse_by_endpoint: &HashMap<String, super::folders::FolderCollapseState>,
+) -> Vec<super::folders::AgentFolderViewRow<'a>> {
+    let mut rows = Vec::new();
+    for endpoint in endpoints {
+        let Some(snapshot) = endpoint.snapshot.as_deref() else {
+            continue;
+        };
+        let active = &endpoint.endpoint_id == active_endpoint_id;
+        let stale = endpoint.status != ClientEndpointStatus::Online;
+        let collapse =
+            super::folders::FolderCollapseState::of(collapse_by_endpoint, &endpoint.endpoint_id);
+        let folders = super::folders::FolderRenderState {
+            endpoint_id: &endpoint.endpoint_id,
+            collapsed_folders: &collapse.folders,
+            collapsed_agent_spaces: &collapse.agent_spaces,
+            collapse_by_endpoint,
+            dragged_folder_id: None,
+            drop_into_folder_id: None,
+            drop_indicator_indent: 0,
+        };
+        let section = super::folders::agent_folder_view_rows(snapshot, config, &folders);
+        if section.is_empty() {
+            continue;
+        }
+        rows.push(super::folders::AgentFolderViewRow {
+            endpoint_id: &endpoint.endpoint_id,
+            stale,
+            row: super::folders::AgentPanelRow::MachineHeader {
+                label: endpoint.label.clone(),
+                status: endpoint.status,
+            },
+        });
+        rows.extend(section.into_iter().map(|mut row| {
+            if !active {
+                row.clear_active_highlight();
+            }
+            super::folders::AgentFolderViewRow {
+                endpoint_id: &endpoint.endpoint_id,
+                stale,
+                row,
+            }
+        }));
+    }
+    rows
 }
 
 fn agent_rows(
