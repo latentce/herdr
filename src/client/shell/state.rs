@@ -81,6 +81,7 @@ pub(crate) struct ClientShellConfig {
     pub(super) agents: crate::config::AgentsSidebarConfig,
     pub(super) agent_panel_sort: crate::config::AgentPanelSortConfig,
     pub(super) status_indicators: crate::config::StatusIndicatorStyle,
+    pub(super) show_machine_rtt: bool,
     pub(super) sound_enabled: bool,
     pub(super) toast_delivery: crate::config::ToastDelivery,
     pub(super) toast_delay_seconds: u64,

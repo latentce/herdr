@@ -1824,7 +1824,30 @@ async fn run_client_loop(
                             continue;
                         }
                         let snapshot = match endpoint::decode_endpoint_control(&kind, &data) {
-                            Ok(endpoint::EndpointControlMessage::HealthPong) => continue,
+                            Ok(endpoint::EndpointControlMessage::HealthPong) => {
+                                let rtt = write_stream.pong_received(
+                                    &endpoint_id,
+                                    generation,
+                                    &data,
+                                    now,
+                                );
+                                if let Some(frame) = rtt.and_then(|rtt| {
+                                    state.shell.as_mut().and_then(|shell| {
+                                        shell
+                                            .set_endpoint_rtt(&endpoint_id, rtt)
+                                            .then(|| {
+                                                shell.compose(
+                                                    state.reported_size.0,
+                                                    state.reported_size.1,
+                                                )
+                                            })
+                                            .flatten()
+                                    })
+                                }) {
+                                    state.present_frame(frame);
+                                }
+                                continue;
+                            }
                             Ok(endpoint::EndpointControlMessage::Ignored) => {
                                 debug!(%kind, "ignoring unknown endpoint control message");
                                 continue;
@@ -1939,7 +1962,11 @@ async fn run_client_loop(
                 state
                     .detached_process_children
                     .retain_mut(|child| child.try_wait().ok().flatten().is_none());
-                write_stream.tick_health(now);
+                let rtt_probing = state
+                    .shell
+                    .as_ref()
+                    .is_some_and(|shell| shell.machine_rtt_enabled());
+                write_stream.tick_health(now, rtt_probing);
                 for failure in write_stream.take_failures() {
                     if write_stream.connection(&failure.endpoint_id).is_some()
                         && !write_stream.accepts(&failure.endpoint_id, failure.generation)

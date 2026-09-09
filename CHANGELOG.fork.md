@@ -6,6 +6,11 @@ restarts at 1 for each upstream base and increases when fork features land
 between upstream releases. Upstream's
 own changes live in [CHANGELOG.md](CHANGELOG.md) and the upstream release notes.
 
+## Machine round-trip time
+
+- Each online saved SSH machine shows its smoothed round-trip time beside the status dot in the machines sidebar, for example `97ms ●`. The client probes the machine every 3 seconds over the existing health ping/pong, so it works with any v0.9.0 remote and needs no server changes. The value covers the full path your input takes (local client, `ssh`, the remote bridge, and the remote Herdr server), making it a better guide to how typing will feel than a plain network ping.
+- Enabled by default. Set `show_machine_rtt = false` under `[ui]` to hide the label and return to upstream's quiet-only health probing.
+
 ## Folders
 
 - Spaces can be organized into named folders in the sidebar: create, rename, and delete folders from right-click menus, move spaces by menu or drag-and-drop to exact positions, and drop a space onto a folder header to file it. Deleting a folder releases its members in place and never closes spaces.

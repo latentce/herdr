@@ -963,6 +963,9 @@ pub struct UiConfig {
     _legacy_agent_panel_scope: Option<LegacyAgentPanelScopeConfig>,
     /// Agent status indicator style. Saved values are "dots" or "symbols". Default: "dots".
     pub status_indicators: StatusIndicatorStyle,
+    /// Probe saved SSH machines every few seconds and show the smoothed round-trip time
+    /// next to each machine in the sidebar. Default: true.
+    pub show_machine_rtt: bool,
     /// Expanded sidebar row composition.
     pub sidebar: SidebarConfig,
     /// Accent color for highlights, borders, and navigation UI.
@@ -1187,6 +1190,7 @@ impl Default for UiConfig {
             agent_panel_sort: AgentPanelSortConfig::Spaces,
             _legacy_agent_panel_scope: None,
             status_indicators: StatusIndicatorStyle::Dots,
+            show_machine_rtt: true,
             sidebar: SidebarConfig::default(),
             accent: "cyan".into(),
             toast: ToastConfig::default(),

@@ -289,6 +289,7 @@ pub(super) fn render_expanded(
                     marker,
                     endpoint,
                     collapsed && &endpoint.endpoint_id == state.active_endpoint_id,
+                    config.show_machine_rtt,
                     palette,
                 );
                 hits.machines.push(MachineHit {
@@ -508,6 +509,7 @@ fn render_endpoint_row(
     marker: &str,
     endpoint: &ClientShellEndpoint,
     highlighted: bool,
+    show_rtt: bool,
     palette: &Palette,
 ) {
     if highlighted {
@@ -526,12 +528,21 @@ fn render_endpoint_row(
     } else {
         format!("{glyph} {state}")
     };
+    // Round-trip time sits left of the status dot, e.g. `97ms ●`, only while online.
+    let rtt = (show_rtt && !endpoint.endpoint_id.is_local() && state.is_empty())
+        .then_some(endpoint.rtt)
+        .flatten()
+        .map(rtt_label);
     let signal_width = display_width(&signal).min(rect.width);
+    let rtt_width = rtt
+        .as_ref()
+        .map_or(0, |label| display_width(label).saturating_add(1));
     put_text(
         buffer,
         rect.x,
         rect.y,
-        rect.width.saturating_sub(signal_width.saturating_add(1)),
+        rect.width
+            .saturating_sub(signal_width.saturating_add(rtt_width).saturating_add(1)),
         &format!(" {marker} {}", endpoint.label),
         Style::default()
             .fg(
@@ -544,4 +555,13 @@ fn render_endpoint_row(
             .add_modifier(Modifier::BOLD),
     );
     put_right_text(buffer, rect, rect.y, &signal, Style::default().fg(color));
+    if let Some(label) = rtt {
+        let rtt_rect = Rect::new(
+            rect.x,
+            rect.y,
+            rect.width.saturating_sub(signal_width.saturating_add(1)),
+            1,
+        );
+        put_right_text(buffer, rtt_rect, rect.y, &label, rtt_style(palette));
+    }
 }
