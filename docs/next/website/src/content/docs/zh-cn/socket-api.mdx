@@ -98,6 +98,7 @@ herdr pane read w1:p2 --source recent --lines 50
 | 会话 | `session.snapshot` |
 | 工作区 | `workspace.create`、`workspace.list`、`workspace.get`、`workspace.focus`、`workspace.rename`、`workspace.move`、`workspace.move_block`、`workspace.report_metadata`、`workspace.close` |
 | Worktree | `worktree.list`、`worktree.create`、`worktree.open`、`worktree.remove` |
+| 文件夹 | `folder.create`、`folder.list`、`folder.rename`、`folder.assign`、`folder.move`、`folder.delete` |
 | 标签页 | `tab.create`、`tab.list`、`tab.get`、`tab.focus`、`tab.rename`、`tab.move`、`tab.close` |
 | 窗格 | `pane.split`、`pane.swap`、`pane.move`、`pane.zoom`、`pane.layout`、`pane.process_info`、`pane.neighbor`、`pane.edges`、`pane.focus_direction`、`pane.resize`、`pane.list`、`pane.current`、`pane.get`、`pane.rename`、`pane.send_text`、`pane.send_keys`、`pane.send_input`、`pane.read`、`pane.graphics.info`、`pane.graphics.set`、`pane.graphics.clear`、`pane.graphics.stream`、`pane.report_agent`、`pane.report_agent_session`、`pane.report_metadata`、`pane.clear_agent_authority`、`pane.release_agent`、`pane.close`、`pane.wait_for_output` |
 | 弹窗 | `popup.close` |
@@ -300,6 +301,31 @@ Worktree 方法把 Git 检出作为 Herdr 工作区管理。`worktree.create` �
 Worktree 命令也发出生命周期事件。`worktree.create` 发出 `workspace.created`、`tab.created`、`pane.created` 和 `worktree.created`。`worktree.open` 发出 `worktree.opened`,并在打开新的 Herdr 工作区时同时发出工作区/标签页/窗格创建事件。`worktree.remove` 发出 `worktree.removed`;如果关联的工作区仍然打开,还会发出 `workspace.closed`。
 
 当关联的 worktree 工作区仍然打开时，父工作区只有在 `workspace.close` 的 params 中包含 `"close_group": true` 时才会被关闭；缺少显式关闭组意图时会返回 `workspace_group_close_required`。显式关闭组时，每个被关闭的工作区都会发出一个 `workspace.closed` 事件。
+
+## 文件夹
+
+文件夹方法用于整理侧边栏中空间的顺序。服务器拥有一个文件夹与松散工作区交错排列的顶层有序序列，以及每个文件夹的有序成员列表。所有读取都反映这一规范顺序：`folder.list` 返回文件夹和顶层顺序，工作区列表遵循展平后的顺序，工作区位于文件夹内时其记录带有 `folder_id`（松散工作区省略该字段）。
+
+`herdr folder` CLI 命令组为 shell 和智能体 1:1 封装了这六个方法；参见 [CLI 参考](/docs/cli-reference/)。
+
+```json
+{"id":"req_1","method":"folder.create","params":{"name":"projects"}}
+{"id":"req_2","method":"folder.list","params":{}}
+{"id":"req_3","method":"folder.rename","params":{"folder_id":"f1","name":"active"}}
+{"id":"req_4","method":"folder.assign","params":{"workspace_id":"w2","folder_id":"f1","position":0}}
+{"id":"req_5","method":"folder.move","params":{"folder_id":"f1","position":0}}
+{"id":"req_6","method":"folder.delete","params":{"folder_id":"f1"}}
+```
+
+`folder.create` 返回新文件夹的 id。名称必须包含可见文本；由于 id 才是身份标识，允许重复名称。
+
+`folder.assign` 把一个工作区移入文件夹，或在 `folder_id` 为 `null` 时移回顶层。指派 worktree 家族中的任一成员会移动整个家族，响应和事件会报告所有受影响的工作区。可选的 `position` 是受影响块在目标容器中的最终索引：目标为文件夹的成员列表，或在 `folder_id` 为 `null` 时为顶层顺序（一个文件夹算作一个条目）。省略则追加到末尾；超出范围则截断到末尾。带位置地指派到当前容器就是在其内部的普通重排：同一文件夹内的定位指派发出 `folder.updated`，而 `folder_id: null` 加位置的顶层指派则是顶层重排。
+
+`folder.move` 在顶层顺序中重新定位文件夹并返回实际位置。`folder.delete` 把成员按原有相对顺序释放回文件夹原来所在的顶层位置；它永远不会关闭工作区。空文件夹是合法的、可持久化的状态。
+
+文件夹的折叠是每个客户端各自的视觉状态，不会出现在任何 API 载荷中。
+
+文件夹方法会发出 `folder.created`、`folder.updated`（重命名或成员重排）、`folder.assigned`、`folder.moved` 和 `folder.deleted` 事件。
 
 ## 智能体视图查询
 
@@ -641,6 +667,8 @@ workspace 的 get/list 响应会公开生成的 `tokens` 映射,空间侧边栏�
 布局事件订阅包括 `layout.updated`。该事件携带一个标签页更新后的 `PaneLayoutSnapshot`。使用 `session.snapshot` 引导的客户端应替换具有相同 `workspace_id` 和 `tab_id` 的缓存布局。
 
 Worktree 事件订阅包括 `worktree.created`、`worktree.opened` 和 `worktree.removed`。Worktree 事件描述 Git 检出的生命周期。`worktree.created` 包含打开的 `workspace` 和创建的 `worktree`。`worktree.opened` 包含目标 `workspace`、打开的 `worktree` 和 `already_open`。`worktree.removed` 包含 `workspace_id`、被移除的 `worktree` 和 `forced`。
+
+文件夹事件订阅包括 `folder.created`、`folder.updated`、`folder.deleted`、`folder.assigned` 和 `folder.moved`。`folder.created` 和 `folder.updated` 包含带有序成员的文件夹记录。`folder.deleted` 包含被释放的 `workspace_ids`。`folder.assigned` 包含受影响的 `workspace_ids`（家族指派时为整个 worktree 家族）和目标 `folder_id`，顶层指派时省略 `folder_id`。`folder.moved` 包含 `folder_id` 和实际的顶层 `position`。
 
 生命周期事件用 `events.subscribe`。支持一次性等待时,专门的等待辅助命令会单独在文档中说明。
 

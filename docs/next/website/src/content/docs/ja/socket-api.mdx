@@ -98,6 +98,7 @@ herdr pane read w1:p2 --source recent --lines 50
 | セッション | `session.snapshot` |
 | ワークスペース | `workspace.create`、`workspace.list`、`workspace.get`、`workspace.focus`、`workspace.rename`、`workspace.move`、`workspace.move_block`、`workspace.report_metadata`、`workspace.close` |
 | Worktree | `worktree.list`、`worktree.create`、`worktree.open`、`worktree.remove` |
+| フォルダ | `folder.create`、`folder.list`、`folder.rename`、`folder.assign`、`folder.move`、`folder.delete` |
 | タブ | `tab.create`、`tab.list`、`tab.get`、`tab.focus`、`tab.rename`、`tab.move`、`tab.close` |
 | ペイン | `pane.split`、`pane.swap`、`pane.move`、`pane.zoom`、`pane.layout`、`pane.process_info`、`pane.neighbor`、`pane.edges`、`pane.focus_direction`、`pane.resize`、`pane.list`、`pane.current`、`pane.get`、`pane.rename`、`pane.send_text`、`pane.send_keys`、`pane.send_input`、`pane.read`、`pane.graphics.info`、`pane.graphics.set`、`pane.graphics.clear`、`pane.graphics.stream`、`pane.report_agent`、`pane.report_agent_session`、`pane.report_metadata`、`pane.clear_agent_authority`、`pane.release_agent`、`pane.close`、`pane.wait_for_output` |
 | ポップアップ | `popup.close` |
@@ -300,6 +301,31 @@ Worktree メソッドは Git チェックアウトを Herdr ワークスペー�
 worktree コマンドはライフサイクルイベントも発行します。`worktree.create` は `workspace.created`、`tab.created`、`pane.created`、`worktree.created` を発行します。`worktree.open` は `worktree.opened` を発行し、新しい Herdr ワークスペースを開いた場合はワークスペース/タブ/ペインの作成イベントも発行します。`worktree.remove` は `worktree.removed` を発行し、リンクされたワークスペースがまだ開いている場合は `workspace.closed` も発行します。
 
 リンクされた worktree ワークスペースが開いている親ワークスペースを `workspace.close` で閉じるには、params に `"close_group": true` が必要です。明示的なグループクローズ指定がない場合は `workspace_group_close_required` を返します。明示的なグループクローズは、閉じた各ワークスペースについて `workspace.closed` イベントを 1 件ずつ発行します。
+
+## フォルダ
+
+フォルダのメソッドはサイドバーのスペースの並び順を整理します。サーバーは、フォルダと単独ワークスペースを交互に並べた 1 つのトップレベル順序と、フォルダごとの順序付きメンバーリストを所有します。すべての読み取りはこの正規の順序を反映します。`folder.list` はフォルダとトップレベル順序を返し、ワークスペースのリストは平坦化した順序に従い、ワークスペースがフォルダ内にある場合はワークスペースレコードに `folder_id` が含まれます (単独ワークスペースではこのフィールドは省略されます)。
+
+`herdr folder` CLI グループは、シェルやエージェント向けにこれら 6 つのメソッドを 1:1 でラップします。[CLI リファレンス](/docs/cli-reference/) を参照してください。
+
+```json
+{"id":"req_1","method":"folder.create","params":{"name":"projects"}}
+{"id":"req_2","method":"folder.list","params":{}}
+{"id":"req_3","method":"folder.rename","params":{"folder_id":"f1","name":"active"}}
+{"id":"req_4","method":"folder.assign","params":{"workspace_id":"w2","folder_id":"f1","position":0}}
+{"id":"req_5","method":"folder.move","params":{"folder_id":"f1","position":0}}
+{"id":"req_6","method":"folder.delete","params":{"folder_id":"f1"}}
+```
+
+`folder.create` は新しいフォルダの id を返します。名前には表示可能なテキストが必要です。id が識別子なので、重複した名前は許可されます。
+
+`folder.assign` はワークスペースをフォルダに移動し、`folder_id` が `null` の場合はトップレベルに戻します。worktree ファミリーのいずれかを割り当てるとファミリー全体が移動し、レスポンスとイベントは影響を受けたすべてのワークスペースを報告します。省略可能な `position` は、対象コンテナ内での影響ブロックの最終インデックスです。対象はフォルダのメンバーリスト、または `folder_id` が `null` の場合はトップレベル順序 (フォルダは 1 エントリとして数えます) です。省略すると末尾に追加され、範囲外は末尾に丸められます。現在のコンテナに位置を指定して割り当てると、その中での単純な並べ替えになります。同じフォルダ内での位置指定の割り当ては `folder.updated` を発行し、`folder_id: null` と位置を指定したトップレベルの割り当てはトップレベルの並べ替えになります。
+
+`folder.move` はトップレベル順序内でフォルダを並べ替え、実際の位置を返します。`folder.delete` はメンバーを以前の相対順序のまま、フォルダがあった位置でトップレベルに戻します。ワークスペースを閉じることはありません。空のフォルダは正当な、永続化される状態です。
+
+フォルダの折りたたみはクライアントごとの見た目の状態で、API のペイロードには含まれません。
+
+フォルダのメソッドは `folder.created`、`folder.updated` (名前変更またはメンバーの並べ替え)、`folder.assigned`、`folder.moved`、`folder.deleted` イベントを発行します。
 
 ## エージェントビューのクエリ
 
@@ -645,6 +671,8 @@ workspace の get/list 応答は結果の `tokens` マップを公開し、ス�
 レイアウトのイベント購読には `layout.updated` があります。このイベントは 1 つのタブについて更新済みの `PaneLayoutSnapshot` を運びます。`session.snapshot` でブートストラップするクライアントは、同じ `workspace_id` と `tab_id` のキャッシュ済みレイアウトを置き換えてください。
 
 worktree のイベント購読には `worktree.created`、`worktree.opened`、`worktree.removed` があります。worktree イベントは Git チェックアウトのライフサイクルを記述します。`worktree.created` は開かれた `workspace` と作成された `worktree` を含みます。`worktree.opened` は対象の `workspace`、開かれた `worktree`、`already_open` を含みます。`worktree.removed` は `workspace_id`、削除された `worktree`、`forced` を含みます。
+
+フォルダのイベント購読には `folder.created`、`folder.updated`、`folder.deleted`、`folder.assigned`、`folder.moved` があります。`folder.created` と `folder.updated` は順序付きメンバーを含むフォルダレコードを含みます。`folder.deleted` は解放された `workspace_ids` を含みます。`folder.assigned` は影響を受けた `workspace_ids` (ファミリー割り当ての場合は worktree ファミリー全体) と対象の `folder_id` を含み、トップレベルへの割り当てでは `folder_id` は省略されます。`folder.moved` は `folder_id` と実際のトップレベル `position` を含みます。
 
 ライフサイクルイベントには `events.subscribe` を使ってください。ワンショットの wait がサポートされる場合、専用の wait ヘルパーが別途ドキュメント化されます。
 

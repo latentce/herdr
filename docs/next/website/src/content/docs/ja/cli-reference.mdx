@@ -180,6 +180,19 @@ herdr tab close <tab_id>
 
 ワークスペースとタブの作成、およびペインの分割は、デフォルトではフォーカスを変えません。`--focus` は新しいレイアウトを選択し、`--no-focus` はデフォルトを明示します。`--cwd` がない場合、新しいターミナルは `terminal.new_cwd` の設定に従い、デフォルトでは元のペインまたはワークスペースを引き継ぎます。各 `--env KEY=VALUE` は新しいルートシェルの環境変数を追加または置換します。
 
+## フォルダ
+
+```bash
+herdr folder list
+herdr folder create --name TEXT
+herdr folder rename <folder_id> <name>
+herdr folder assign <workspace_id> [--folder FOLDER_ID] [--position N]
+herdr folder move <folder_id> --position N
+herdr folder delete <folder_id>
+```
+
+フォルダはサーバーが所有する並び順でワークスペースをまとめます。`folder list` は各フォルダとその順序付きメンバー、およびフォルダと単独ワークスペースを交互に並べたトップレベルの順序を返します。`folder assign` はワークスペースをフォルダに移動します。`--folder` を省略するとトップレベルに戻します。worktree ファミリーのいずれかを割り当てると、ファミリー全体が移動します。位置は対象コンテナ内の 0 始まりのインデックスです。省略すると末尾に追加され、範囲外は末尾に丸められます。`folder move` はトップレベルの順序内でフォルダを並べ替えます。`folder delete` はメンバーをその位置のままトップレベルに戻し、ワークスペースを閉じることはありません。
+
 ## ペイン
 
 ```bash

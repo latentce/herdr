@@ -180,6 +180,19 @@ herdr tab close <tab_id>
 
 创建工作区、标签页和拆分窗格默认不改变焦点。`--focus` 选择新布局;`--no-focus` 显式表达默认行为。不指定 `--cwd` 时,新终端遵循 `terminal.new_cwd` 设置,默认跟随来源窗格或工作区。每个 `--env KEY=VALUE` 在新的根 shell 中添加或替换一个环境变量。
 
+## 文件夹
+
+```bash
+herdr folder list
+herdr folder create --name TEXT
+herdr folder rename <folder_id> <name>
+herdr folder assign <workspace_id> [--folder FOLDER_ID] [--position N]
+herdr folder move <folder_id> --position N
+herdr folder delete <folder_id>
+```
+
+文件夹按服务器拥有的顺序对工作区分组。`folder list` 返回各文件夹及其有序成员，以及文件夹与松散工作区交错排列的顶层顺序。`folder assign` 把一个工作区移入文件夹；省略 `--folder` 则把它移回顶层。指派 worktree 家族中的任一成员会移动整个家族。位置是目标容器内从 0 开始的索引；省略则追加到末尾，超出范围则截断到末尾。`folder move` 在顶层顺序中重新定位文件夹。`folder delete` 把成员原位释放回顶层，永远不会关闭工作区。
+
 ## 窗格
 
 ```bash
