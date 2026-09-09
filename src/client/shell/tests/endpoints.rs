@@ -274,7 +274,9 @@ fn machine_row_shows_muted_rtt_only_when_enabled_and_online() {
     let (mut state, remote_id) = state_with_remote();
     let rtt = std::time::Duration::from_millis(97);
 
-    // Disabled by default: the value is retained but never drawn and never repaints.
+    // Enabled by default. Opting out retains the value but never draws it or repaints.
+    assert!(state.machine_rtt_enabled());
+    state.config.show_machine_rtt = false;
     assert!(!state.machine_rtt_enabled());
     assert!(!state.set_endpoint_rtt(&remote_id, rtt));
     let frame = state.compose(100, 28).expect("frame");

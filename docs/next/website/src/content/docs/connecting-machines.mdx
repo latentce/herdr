@@ -65,7 +65,7 @@ Renaming changes the displayed label without reconnecting. Disabling keeps the p
 
 Removing or disabling the machine you are viewing returns you to Local. If Local is unavailable, Herdr shows that and retries its connection instead of selecting a different remote machine. With enabled saved machines, the client can remain usable even if Local fails or restarts.
 
-To see how responsive each machine is, set `show_machine_rtt = true` in `[ui]`. Herdr then probes every online saved machine every 3 seconds through its existing SSH connection and shows the smoothed round-trip time beside the status dot, for example `97ms ●`. The value covers the full path your input takes (local client, `ssh`, the remote bridge, and the remote Herdr server), so it is a better guide to how typing will feel than a plain network ping. The option is off by default.
+Each online saved machine shows its smoothed round-trip time beside the status dot, for example `97ms ●`. Herdr probes the machine every 3 seconds through its existing SSH connection. The value covers the full path your input takes (local client, `ssh`, the remote bridge, and the remote Herdr server), so it is a better guide to how typing will feel than a plain network ping. Set `show_machine_rtt = false` in `[ui]` to hide it and return to probing only when the connection is quiet.
 
 ## Connection problems
 

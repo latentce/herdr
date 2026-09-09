@@ -337,7 +337,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 # Probe saved SSH machines every 3 seconds and show the smoothed round-trip time
 # next to each machine in the sidebar.
-# show_machine_rtt = false
+# show_machine_rtt = true
 
 # Expanded agent rows. Built-ins are state_icon, state_text, machine, workspace, tab,
 # pane, agent, terminal_title, and terminal_title_stripped.
