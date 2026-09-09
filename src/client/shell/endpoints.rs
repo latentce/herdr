@@ -11,6 +11,8 @@ pub(crate) struct ClientShellEndpoint {
     pub(crate) agent_recency: HashMap<String, u64>,
     pub(super) agent_presentation: super::endpoint_agent_state::EndpointAgentPresentation,
     pub(crate) methods: Option<HashSet<String>>,
+    /// Smoothed round-trip time of the current connection; cleared whenever it drops.
+    pub(crate) rtt: Option<std::time::Duration>,
 }
 
 pub(super) struct MachineHit {
@@ -64,6 +66,7 @@ impl ClientShellState {
                     .map(|endpoint| endpoint.agent_presentation.clone())
                     .unwrap_or_default(),
                 methods: previous.and_then(|endpoint| endpoint.methods.clone()),
+                rtt: previous.and_then(|endpoint| endpoint.rtt),
             });
         }
 
@@ -100,6 +103,7 @@ impl ClientShellState {
             endpoint.snapshot = None;
             endpoint.snapshot_generation = None;
             endpoint.methods = None;
+            endpoint.rtt = None;
             endpoint.agent_recency.clear();
             endpoint.agent_presentation = Default::default();
         }
@@ -116,7 +120,33 @@ impl ClientShellState {
             .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
         {
             endpoint.status = status;
+            if status != ClientEndpointStatus::Online {
+                endpoint.rtt = None;
+            }
         }
+    }
+
+    /// Whether remote machines should be probed on a fixed cadence for round-trip time.
+    pub(crate) fn machine_rtt_enabled(&self) -> bool {
+        self.config.show_machine_rtt
+    }
+
+    /// Records a new smoothed round-trip time. Returns whether the displayed value changed.
+    pub(crate) fn set_endpoint_rtt(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        rtt: std::time::Duration,
+    ) -> bool {
+        let Some(endpoint) = self
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        else {
+            return false;
+        };
+        let changed = endpoint.rtt.map(rtt_label) != Some(rtt_label(rtt));
+        endpoint.rtt = Some(rtt);
+        changed && self.config.show_machine_rtt
     }
 
     pub(crate) fn mark_endpoint_disconnected(&mut self, endpoint_id: &ClientEndpointId) {
@@ -502,5 +532,18 @@ pub(super) fn local_endpoint() -> ClientShellEndpoint {
         agent_recency: HashMap::new(),
         agent_presentation: Default::default(),
         methods: None,
+        rtt: None,
     }
+}
+
+/// Unrounded millisecond label for a machine's smoothed round-trip time, e.g. `97ms`.
+pub(super) fn rtt_label(rtt: std::time::Duration) -> String {
+    format!("{}ms", rtt.as_millis())
+}
+
+/// Muted style for the round-trip time label. `overlay0` is the palette's colour for
+/// secondary numbers; the DIM modifier is deliberately not used because the sidebar reserves
+/// it for stale cached rows and terminals render it inconsistently on RGB colours.
+pub(super) fn rtt_style(palette: &Palette) -> Style {
+    Style::default().fg(palette.overlay0)
 }

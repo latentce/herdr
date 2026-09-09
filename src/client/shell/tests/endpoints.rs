@@ -256,6 +256,85 @@ fn sidebar_renders_local_and_saved_ssh_endpoints_with_status() {
 }
 
 #[test]
+fn machine_row_shows_muted_rtt_only_when_enabled_and_online() {
+    fn row_text(state: &ClientShellState, frame: &FrameData) -> String {
+        let remote = state
+            .hits
+            .machines
+            .iter()
+            .find(|hit| !hit.endpoint_id.is_local())
+            .expect("remote machine row")
+            .rect;
+        let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
+        (remote.x..remote.right())
+            .map(|x| buffer[(x, remote.y)].symbol().to_owned())
+            .collect()
+    }
+
+    let (mut state, remote_id) = state_with_remote();
+    let rtt = std::time::Duration::from_millis(97);
+
+    // Disabled by default: the value is retained but never drawn and never repaints.
+    assert!(!state.machine_rtt_enabled());
+    assert!(!state.set_endpoint_rtt(&remote_id, rtt));
+    let frame = state.compose(100, 28).expect("frame");
+    assert!(!row_text(&state, &frame).contains("97ms"));
+
+    state.config.show_machine_rtt = true;
+    assert!(state.machine_rtt_enabled());
+    assert!(
+        !state.set_endpoint_rtt(&remote_id, rtt),
+        "same label does not request a repaint"
+    );
+    assert!(
+        state.set_endpoint_rtt(&remote_id, std::time::Duration::from_millis(98)),
+        "a changed label requests a repaint"
+    );
+    let frame = state.compose(100, 28).expect("frame");
+    let text = row_text(&state, &frame);
+    assert!(text.contains("Build"), "{text:?}");
+    assert!(text.ends_with("98ms ●"), "{text:?}");
+    let remote = state
+        .hits
+        .machines
+        .iter()
+        .find(|hit| !hit.endpoint_id.is_local())
+        .expect("remote machine row")
+        .rect;
+    let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
+    let label_cell = &buffer[(remote.right() - 3, remote.y)];
+    assert_eq!(label_cell.symbol(), "s");
+    assert_eq!(label_cell.fg, state.config.palette.overlay0);
+    assert!(
+        !label_cell.modifier.contains(Modifier::DIM),
+        "DIM is reserved for stale cached rows"
+    );
+    assert_eq!(
+        buffer[(remote.right() - 1, remote.y)].fg,
+        state.config.palette.green,
+        "the status dot keeps its connection colour"
+    );
+    state.set_endpoint_rtt(&remote_id, std::time::Duration::from_millis(1234));
+    let frame = state.compose(100, 28).expect("frame");
+    assert!(row_text(&state, &frame).ends_with("1234ms ●"));
+
+    // A catalog hot-reload rebuilds the endpoint list; the live value must survive it.
+    state.set_endpoint_catalog(&[remote_profile()]);
+    let frame = state.compose(100, 28).expect("frame");
+    assert!(row_text(&state, &frame).ends_with("1234ms ●"));
+
+    // Leaving Online drops the stale measurement with the connection.
+    state.mark_endpoint_disconnected(&remote_id);
+    let frame = state.compose(100, 28).expect("frame");
+    let text = row_text(&state, &frame);
+    assert!(!text.contains("ms"), "{text:?}");
+    assert!(text.contains("reconnecting"), "{text:?}");
+    state.set_endpoint_status(&remote_id, ClientEndpointStatus::Online);
+    let frame = state.compose(100, 28).expect("frame");
+    assert!(row_text(&state, &frame).ends_with("●"));
+}
+
+#[test]
 fn active_workspace_is_the_only_highlight_when_machine_is_expanded() {
     let (mut state, endpoint_id) = state_with_remote();
     assert!(state.activate_endpoint_projection(&endpoint_id));

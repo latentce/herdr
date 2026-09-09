@@ -335,6 +335,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # distinct static glyphs for blocked, working, done, idle, and unknown states.
 # status_indicators = "dots"
 
+# Probe saved SSH machines every 3 seconds and show the smoothed round-trip time
+# next to each machine in the sidebar.
+# show_machine_rtt = false
+
 # Expanded agent rows. Built-ins are state_icon, state_text, machine, workspace, tab,
 # pane, agent, terminal_title, and terminal_title_stripped.
 # Custom values reported through pane metadata use a $name token.
