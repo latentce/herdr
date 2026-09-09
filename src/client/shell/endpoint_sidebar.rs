@@ -474,6 +474,7 @@ pub(super) fn render_expanded(
         state.endpoints,
         state.active_endpoint_id,
         config,
+        state.folders.collapse_by_endpoint,
         state.agent_scroll,
         hits,
     );

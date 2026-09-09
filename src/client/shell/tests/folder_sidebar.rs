@@ -871,18 +871,18 @@ fn agents_panel_folder_view_nests_headers_and_collapses_agent_lists() {
         .folders
         .agent_space_headers
         .iter()
-        .map(|(_, workspace_id)| workspace_id.clone())
+        .map(|hit| hit.workspace_id.clone())
         .collect::<Vec<_>>();
     assert_eq!(space_headers, ["ws_a", "ws_b", "ws_d"]);
     assert_eq!(state.hits.agents.len(), 3);
 
-    let (bravo, _) = state
+    let bravo = state
         .hits
         .folders
         .agent_space_headers
         .iter()
-        .find(|(_, workspace_id)| workspace_id == "ws_b")
-        .cloned()
+        .find(|hit| hit.workspace_id == "ws_b")
+        .map(|hit| hit.rect)
         .expect("bravo header");
     click(
         &mut state,
@@ -916,7 +916,7 @@ fn agents_panel_folder_view_nests_headers_and_collapses_agent_lists() {
         .folders
         .agent_space_headers
         .iter()
-        .any(|(_, workspace_id)| workspace_id == "ws_b"));
+        .any(|hit| hit.workspace_id == "ws_b"));
     assert!(!state
         .hits
         .workspaces
@@ -1234,6 +1234,207 @@ fn multi_machine_sidebar_renders_and_collapses_remote_folders_in_place() {
     ));
 }
 
+fn agent(workspace_id: &str, seq: u64, focused: bool) -> ClientShellAgent {
+    ClientShellAgent {
+        pane_id: format!("pane_{workspace_id}"),
+        workspace_id: workspace_id.into(),
+        tab_id: format!("{workspace_id}:tab"),
+        agent: Some("codex".into()),
+        display_agent: None,
+        name: None,
+        title: None,
+        terminal_title: None,
+        terminal_title_stripped: None,
+        agent_status: AgentStatus::Working,
+        state_change_seq: seq,
+        state_labels: Vec::new(),
+        tokens: Vec::new(),
+        focused,
+    }
+}
+
+#[test]
+fn multi_machine_agents_panel_renders_folder_view_per_machine() {
+    use crate::client::endpoint::{
+        ClientEndpointId, ClientEndpointStatus, ProfileId, SavedSshEndpoint,
+    };
+
+    let mut local_snapshot = foldered_snapshot();
+    local_snapshot.agents.push(agent("ws_a", 0, true));
+    local_snapshot.agents.push(agent("ws_b", 1, false));
+    let mut state = state_with(local_snapshot);
+    state.config.agent_panel_sort = crate::config::AgentPanelSortConfig::Folders;
+    let profile = SavedSshEndpoint {
+        id: ProfileId::parse("0123456789abcdef0123456789abcdef").expect("profile id"),
+        label: "Build".into(),
+        target: "dev@build.example".into(),
+        session: "agents".into(),
+        enabled: true,
+    };
+    let remote_id = ClientEndpointId::Ssh(profile.id.clone());
+    state.set_endpoint_catalog(&[profile]);
+    state.set_endpoint_status(&remote_id, ClientEndpointStatus::Online);
+    let mut remote_snapshot = foldered_snapshot();
+    remote_snapshot.boot_id = "remote-boot".into();
+    remote_snapshot.folders[0].name = "remote work".into();
+    // The remote's own focus must not paint as this client's active row.
+    remote_snapshot.agents.push(agent("ws_c", 0, true));
+    state.set_endpoint_snapshot(&remote_id, Box::new(remote_snapshot));
+    assert!(state.multi_endpoint_active());
+
+    let frame = state.compose(106, 50).expect("frame");
+
+    assert!(
+        state.hits.agents.is_empty(),
+        "multi-machine agents register endpoint-qualified hits"
+    );
+    let agent_hits = state
+        .hits
+        .endpoint_agents
+        .iter()
+        .map(|(_, endpoint_id, pane_id)| (endpoint_id.clone(), pane_id.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        agent_hits,
+        [
+            (ClientEndpointId::Local, "pane_ws_a".to_string()),
+            (ClientEndpointId::Local, "pane_ws_b".to_string()),
+            (remote_id.clone(), "pane_ws_c".to_string()),
+        ]
+    );
+
+    let folder_headers = state
+        .hits
+        .folders
+        .agent_folder_headers
+        .iter()
+        .map(|header| (header.endpoint_id.clone(), header.rect))
+        .collect::<Vec<_>>();
+    assert_eq!(folder_headers.len(), 2, "one folder header per machine");
+    let (local_folder, remote_folder) = (folder_headers[0].1, folder_headers[1].1);
+    assert!(folder_headers[0].0.is_local());
+    assert_eq!(folder_headers[1].0, remote_id);
+    assert!(row_text(&frame, local_folder.y).contains("▾ work"));
+    assert!(row_text(&frame, remote_folder.y).contains("▾ remote work"));
+
+    let space_headers = state
+        .hits
+        .folders
+        .agent_space_headers
+        .iter()
+        .map(|hit| (hit.endpoint_id.clone(), hit.workspace_id.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        space_headers,
+        [
+            (ClientEndpointId::Local, "ws_a".to_string()),
+            (ClientEndpointId::Local, "ws_b".to_string()),
+            (remote_id.clone(), "ws_c".to_string()),
+        ]
+    );
+
+    // Each machine's section starts one row below its machine header: the
+    // local section with the loose `alpha` space, the remote with its folder.
+    let local_first_row = state
+        .hits
+        .folders
+        .agent_space_headers
+        .iter()
+        .find(|hit| hit.endpoint_id.is_local() && hit.workspace_id == "ws_a")
+        .map(|hit| hit.rect.y)
+        .expect("local alpha header");
+    let local_machine_row = local_first_row - 1;
+    let remote_machine_row = remote_folder.y - 1;
+    assert!(
+        row_text(&frame, local_machine_row).contains("Local"),
+        "local section is headed by its machine: {:?}",
+        row_text(&frame, local_machine_row)
+    );
+    assert!(
+        row_text(&frame, remote_machine_row).contains("Build"),
+        "remote section is headed by its machine: {:?}",
+        row_text(&frame, remote_machine_row)
+    );
+
+    let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
+    let (remote_agent_rect, _, _) = state.hits.endpoint_agents[2];
+    assert_ne!(
+        buffer[(remote_agent_rect.x, remote_agent_rect.y)].bg,
+        state.config.palette.active_row_bg,
+        "an inactive machine's focused agent is not highlighted"
+    );
+    let (local_agent_rect, _, _) = state.hits.endpoint_agents[0];
+    assert_eq!(
+        buffer[(local_agent_rect.x, local_agent_rect.y)].bg,
+        state.config.palette.active_row_bg,
+        "the active machine's focused agent is highlighted"
+    );
+
+    // Collapsing the remote folder touches only the remote's collapse state.
+    click(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        remote_folder.x + 6,
+        remote_folder.y,
+    );
+    assert!(!state.collapsed_folders().contains("f_1"));
+    assert!(
+        folders::FolderCollapseState::of(&state.folder_collapse, &remote_id)
+            .folders
+            .contains("f_1")
+    );
+    let frame = state.compose(106, 50).expect("frame");
+    assert!(row_text(&frame, remote_folder.y).contains("▸ remote work"));
+    assert!(!state
+        .hits
+        .endpoint_agents
+        .iter()
+        .any(|(_, endpoint_id, _)| *endpoint_id == remote_id));
+    assert_eq!(
+        state
+            .hits
+            .endpoint_agents
+            .iter()
+            .filter(|(_, endpoint_id, _)| endpoint_id.is_local())
+            .count(),
+        2
+    );
+
+    // Collapsing a remote space header is likewise scoped to the remote.
+    let remote_snapshot_expanded = {
+        let mut outcome = ClientShellInput::default();
+        state.toggle_folder_collapse_for(&remote_id, "f_1", &mut outcome);
+        state.compose(106, 50).expect("frame")
+    };
+    let remote_space = state
+        .hits
+        .folders
+        .agent_space_headers
+        .iter()
+        .find(|hit| hit.endpoint_id == remote_id && hit.workspace_id == "ws_c")
+        .map(|hit| hit.rect)
+        .expect("remote space header");
+    assert!(row_text(&remote_snapshot_expanded, remote_space.y).contains("▾ charlie"));
+    click(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        remote_space.x + 8,
+        remote_space.y,
+    );
+    assert!(!state.folder_collapse().agent_spaces.contains("ws_c"));
+    assert!(
+        folders::FolderCollapseState::of(&state.folder_collapse, &remote_id)
+            .agent_spaces
+            .contains("ws_c")
+    );
+    state.compose(106, 50).expect("frame");
+    assert!(!state
+        .hits
+        .endpoint_agents
+        .iter()
+        .any(|(_, _, pane_id)| pane_id == "pane_ws_c"));
+}
+
 #[test]
 fn collapsing_a_family_parent_in_the_agents_panel_hides_its_worktree_children() {
     use crate::protocol::ClientShellWorktree;
@@ -1279,7 +1480,7 @@ fn collapsing_a_family_parent_in_the_agents_panel_hides_its_worktree_children() 
             .folders
             .agent_space_headers
             .iter()
-            .map(|(_, workspace_id)| workspace_id.clone())
+            .map(|hit| hit.workspace_id.clone())
             .collect::<Vec<_>>()
     };
     assert_eq!(headers(&state), ["ws_b", "ws_c"]);
@@ -1295,7 +1496,7 @@ fn collapsing_a_family_parent_in_the_agents_panel_hides_its_worktree_children() 
         "the child header is hidden with its parent"
     );
     assert!(state.hits.agents.is_empty());
-    let (parent, _) = state.hits.folders.agent_space_headers[0].clone();
+    let parent = state.hits.folders.agent_space_headers[0].rect;
     assert!(row_text(&frame, parent.y).contains("▸ bravo"));
     let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
     assert_eq!(

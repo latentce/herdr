@@ -2064,26 +2064,26 @@ impl ClientShellState {
                     self.toggle_folder_collapse_for(&endpoint_id, &folder_id, outcome);
                     return;
                 }
-                if let Some(folder_id) = self
+                if let Some((endpoint_id, folder_id)) = self
                     .hits
                     .folders
                     .agent_folder_headers
                     .iter()
                     .find(|header| super::contains(header.rect, point))
-                    .map(|header| header.folder_id.clone())
+                    .map(|header| (header.endpoint_id.clone(), header.folder_id.clone()))
                 {
-                    self.toggle_folder_collapse(&folder_id, outcome);
+                    self.toggle_folder_collapse_for(&endpoint_id, &folder_id, outcome);
                     return;
                 }
-                if let Some(workspace_id) = self
+                if let Some((endpoint_id, workspace_id)) = self
                     .hits
                     .folders
                     .agent_space_headers
                     .iter()
-                    .find(|(rect, _)| super::contains(*rect, point))
-                    .map(|(_, workspace_id)| workspace_id.clone())
+                    .find(|hit| super::contains(hit.rect, point))
+                    .map(|hit| (hit.endpoint_id.clone(), hit.workspace_id.clone()))
                 {
-                    self.toggle_agent_space_collapse(&workspace_id, outcome);
+                    self.toggle_agent_space_collapse_for(&endpoint_id, &workspace_id, outcome);
                     return;
                 }
                 let workspace_press = self

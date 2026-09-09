@@ -455,6 +455,7 @@ impl ClientShellState {
         FolderCollapseState::of(&self.folder_collapse, &self.active_endpoint_id)
     }
 
+    #[cfg(test)]
     pub(super) fn folder_collapse_mut(&mut self) -> &mut FolderCollapseState {
         self.folder_collapse
             .entry(self.active_endpoint_id.storage_key())
@@ -472,12 +473,19 @@ pub(super) struct FolderHit {
     pub(super) folder_id: String,
 }
 
+/// An agents panel space header. Workspace ids are server-scoped, so the hit
+/// remembers which endpoint's collapse state it toggles.
+pub(super) struct AgentSpaceHit {
+    pub(super) rect: Rect,
+    pub(super) endpoint_id: ClientEndpointId,
+    pub(super) workspace_id: String,
+}
+
 #[derive(Default)]
 pub(super) struct FolderHits {
     pub(super) headers: Vec<FolderHit>,
     pub(super) agent_folder_headers: Vec<FolderHit>,
-    /// Agents panel space headers as `(rect, workspace_id)`.
-    pub(super) agent_space_headers: Vec<(Rect, String)>,
+    pub(super) agent_space_headers: Vec<AgentSpaceHit>,
 }
 
 pub(super) struct ClientFolderPress {
@@ -1045,12 +1053,29 @@ impl ClientShellState {
         self.persist_chrome_preferences(outcome);
     }
 
+    /// Toggle on the active endpoint; the panel itself resolves the endpoint
+    /// from its hit, see [`Self::toggle_agent_space_collapse_for`].
+    #[cfg(test)]
     pub(super) fn toggle_agent_space_collapse(
         &mut self,
         workspace_id: &str,
         outcome: &mut ClientShellInput,
     ) {
-        let collapsed = &mut self.folder_collapse_mut().agent_spaces;
+        let endpoint_id = self.active_endpoint_id.clone();
+        self.toggle_agent_space_collapse_for(&endpoint_id, workspace_id, outcome);
+    }
+
+    pub(super) fn toggle_agent_space_collapse_for(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        workspace_id: &str,
+        outcome: &mut ClientShellInput,
+    ) {
+        let collapsed = &mut self
+            .folder_collapse
+            .entry(endpoint_id.storage_key())
+            .or_default()
+            .agent_spaces;
         if !collapsed.remove(workspace_id) {
             collapsed.insert(workspace_id.to_owned());
         }
@@ -1458,11 +1483,25 @@ pub(super) fn agent_folder_view_active(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
 ) -> bool {
+    agent_folder_view_enabled(snapshot.agent_view_label.as_deref(), config)
+}
+
+/// Label-based form of [`agent_folder_view_active`], for callers that hold
+/// the active endpoint's agent view label rather than its snapshot.
+pub(super) fn agent_folder_view_enabled(
+    agent_view_label: Option<&str>,
+    config: &ClientShellConfig,
+) -> bool {
     config.agent_panel_sort == crate::config::AgentPanelSortConfig::Folders
-        && snapshot.agent_view_label.is_none()
+        && agent_view_label.is_none()
 }
 
 pub(super) enum AgentPanelRow {
+    /// One machine's section when several endpoints share the panel.
+    MachineHeader {
+        label: String,
+        status: ClientEndpointStatus,
+    },
     FolderHeader {
         folder_id: String,
         name: String,
@@ -1484,6 +1523,39 @@ pub(super) enum AgentPanelRow {
         row: super::agent_sidebar::AgentRow,
         indent: u16,
     },
+}
+
+impl AgentPanelRow {
+    /// Drop focus highlights; another endpoint's focus is not this client's.
+    pub(super) fn clear_active_highlight(&mut self) {
+        match self {
+            AgentPanelRow::MachineHeader { .. } => {}
+            AgentPanelRow::FolderHeader {
+                indicates_active, ..
+            }
+            | AgentPanelRow::SpaceHeader {
+                indicates_active, ..
+            } => *indicates_active = false,
+            AgentPanelRow::Agent { row, .. } => row.focused = false,
+        }
+    }
+}
+
+/// A folder-view row tagged with the endpoint it belongs to.
+pub(super) struct AgentFolderViewRow<'a> {
+    pub(super) endpoint_id: &'a ClientEndpointId,
+    /// Rendered dimmed; the endpoint is not online.
+    pub(super) stale: bool,
+    pub(super) row: AgentPanelRow,
+}
+
+/// Where agent rows record their click targets.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum AgentHitTarget {
+    /// Single-endpoint panel: `hits.agents`.
+    Local,
+    /// Multi-endpoint panel: `hits.endpoint_agents`.
+    Endpoint,
 }
 
 const AGENT_PANEL_HEADER_GUTTER: u16 = 1;
@@ -1690,8 +1762,37 @@ pub(super) fn render_agent_folder_view(
     agent_scroll: &mut usize,
     hits: &mut ShellHitMap,
 ) {
+    let rows = agent_folder_view_rows(snapshot, config, folders)
+        .into_iter()
+        .map(|row| AgentFolderViewRow {
+            endpoint_id: folders.endpoint_id,
+            stale: false,
+            row,
+        })
+        .collect::<Vec<_>>();
+    render_agent_folder_rows(
+        buffer,
+        area,
+        &rows,
+        config,
+        agent_scroll,
+        hits,
+        AgentHitTarget::Local,
+    );
+}
+
+/// Draw folder-view rows below the agents panel header, handling scroll,
+/// gaps, and hit registration. Rows may come from several endpoints.
+pub(super) fn render_agent_folder_rows(
+    buffer: &mut Buffer,
+    area: Rect,
+    rows: &[AgentFolderViewRow<'_>],
+    config: &ClientShellConfig,
+    agent_scroll: &mut usize,
+    hits: &mut ShellHitMap,
+    hit_target: AgentHitTarget,
+) {
     let palette = &config.palette;
-    let rows = agent_folder_view_rows(snapshot, config, folders);
     let body = Rect::new(
         area.x,
         area.y.saturating_add(3),
@@ -1706,18 +1807,20 @@ pub(super) fn render_agent_folder_view(
 
     let row_heights = rows
         .iter()
-        .map(|row| match row {
-            AgentPanelRow::FolderHeader { .. } | AgentPanelRow::SpaceHeader { .. } => 1,
+        .map(|entry| match &entry.row {
+            AgentPanelRow::MachineHeader { .. }
+            | AgentPanelRow::FolderHeader { .. }
+            | AgentPanelRow::SpaceHeader { .. } => 1,
             AgentPanelRow::Agent { row, .. } => row.rows.len().max(1).min(u16::MAX as usize) as u16,
         })
         .collect::<Vec<_>>();
     let gaps = rows
         .iter()
         .enumerate()
-        .map(|(index, row)| {
+        .map(|(index, entry)| {
             if index + 1 >= rows.len() {
                 0
-            } else if matches!(row, AgentPanelRow::Agent { .. }) {
+            } else if matches!(entry.row, AgentPanelRow::Agent { .. }) {
                 config.agents.row_gap
             } else {
                 0
@@ -1734,13 +1837,42 @@ pub(super) fn render_agent_folder_view(
     let show_scrollbar = metrics.max_offset_from_bottom > 0 && body.width > 1;
     let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
     let mut y = body.y;
-    for (index, row) in rows.iter().enumerate().skip(*agent_scroll) {
+    for (index, entry) in rows.iter().enumerate().skip(*agent_scroll) {
         let height = row_heights[index].min(body.height);
         if y.saturating_add(height) > body.bottom() {
             break;
         }
         let rect = Rect::new(body.x, y, content_width, height);
-        match row {
+        match &entry.row {
+            AgentPanelRow::MachineHeader { label, status } => {
+                let (glyph, _, color) =
+                    super::endpoints::endpoint_status_presentation(*status, palette);
+                let signal = if entry.endpoint_id.is_local() {
+                    ""
+                } else {
+                    glyph
+                };
+                let signal_width = render::display_width(signal).min(rect.width);
+                let name_width = rect
+                    .width
+                    .saturating_sub(signal_width.saturating_add(u16::from(signal_width > 0)));
+                let name = truncate_end(label, name_width.saturating_sub(1) as usize);
+                Paragraph::new(Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(
+                        name,
+                        Style::default()
+                            .fg(if *status == ClientEndpointStatus::Disabled {
+                                palette.overlay0
+                            } else {
+                                palette.text
+                            })
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]))
+                .render(rect, buffer);
+                render::put_right_text(buffer, rect, rect.y, signal, Style::default().fg(color));
+            }
             AgentPanelRow::FolderHeader {
                 folder_id,
                 name,
@@ -1775,7 +1907,7 @@ pub(super) fn render_agent_folder_view(
                 );
                 hits.folders.agent_folder_headers.push(FolderHit {
                     rect,
-                    endpoint_id: folders.endpoint_id.clone(),
+                    endpoint_id: entry.endpoint_id.clone(),
                     folder_id: folder_id.clone(),
                 });
             }
@@ -1832,13 +1964,22 @@ pub(super) fn render_agent_folder_view(
                         if *collapsed { "▸" } else { "▾" },
                         Style::default().fg(palette.accent),
                     );
-                    hits.folders
-                        .agent_space_headers
-                        .push((rect, workspace_id.clone()));
+                    hits.folders.agent_space_headers.push(AgentSpaceHit {
+                        rect,
+                        endpoint_id: entry.endpoint_id.clone(),
+                        workspace_id: workspace_id.clone(),
+                    });
                 }
             }
             AgentPanelRow::Agent { row, indent } => {
-                hits.agents.push((rect, row.pane_id.clone()));
+                match hit_target {
+                    AgentHitTarget::Local => hits.agents.push((rect, row.pane_id.clone())),
+                    AgentHitTarget::Endpoint => hits.endpoint_agents.push((
+                        rect,
+                        entry.endpoint_id.clone(),
+                        row.pane_id.clone(),
+                    )),
+                }
                 let indent = (*indent).min(rect.width.saturating_sub(1));
                 let inner = Rect::new(rect.x + indent, rect.y, rect.width - indent, rect.height);
                 if row.focused {
@@ -1846,6 +1987,16 @@ pub(super) fn render_agent_folder_view(
                 }
                 super::agent_sidebar::render_agent_row(buffer, inner, row, config);
             }
+        }
+        // The machine header carries its own status glyph color; dimming it
+        // would erase the very signal that explains why the section is stale.
+        if entry.stale && !matches!(entry.row, AgentPanelRow::MachineHeader { .. }) {
+            buffer.set_style(
+                rect,
+                Style::default()
+                    .fg(palette.overlay0)
+                    .add_modifier(Modifier::DIM),
+            );
         }
         y = y.saturating_add(height).saturating_add(gaps[index]);
     }
