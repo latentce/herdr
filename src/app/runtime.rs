@@ -4,7 +4,8 @@ use std::time::Instant;
 use std::time::Duration;
 
 use super::{
-    background_update_check_enabled, App, AUTO_UPDATE_CHECK_INTERVAL, MIN_RENDER_INTERVAL,
+    background_update_check_enabled, App, AUTO_UPDATE_CHECK_INTERVAL, MIN_PRESENT_INTERVAL,
+    MIN_RENDER_INTERVAL,
 };
 fn retain_detached_process_after_wait(
     pid: u32,
@@ -81,10 +82,16 @@ impl App {
     pub(crate) fn can_present_now(&self, now: Instant) -> bool {
         match self.last_presentation_at {
             Some(last_presentation_at) => {
-                now.duration_since(last_presentation_at) >= MIN_RENDER_INTERVAL
+                now.duration_since(last_presentation_at) >= MIN_PRESENT_INTERVAL
             }
             None => true,
         }
+    }
+
+    pub(crate) fn next_presentation_deadline(&self, now: Instant) -> Option<Instant> {
+        self.last_presentation_at
+            .map(|last_presentation_at| last_presentation_at + MIN_PRESENT_INTERVAL)
+            .filter(|deadline| *deadline > now)
     }
 
     pub(crate) fn record_render_attempt(&mut self, now: Instant, presentation: bool) {
@@ -219,6 +226,28 @@ mod tests {
 
         assert!(!app.can_render_now(foreground_echo));
         assert!(app.can_present_now(foreground_echo));
+    }
+
+    #[test]
+    fn presentation_deadline_is_shorter_than_render_cadence() {
+        let (mut app, _) = test_app_with_pane();
+        let presented_at = Instant::now();
+        app.record_render_attempt(presented_at, true);
+        let now = presented_at + Duration::from_millis(1);
+
+        assert!(MIN_PRESENT_INTERVAL < MIN_RENDER_INTERVAL);
+        assert_eq!(
+            app.next_presentation_deadline(now),
+            Some(presented_at + MIN_PRESENT_INTERVAL)
+        );
+        assert_eq!(
+            app.next_headless_loop_deadline_with_git_refresh(now, true, false),
+            Some(presented_at + MIN_RENDER_INTERVAL)
+        );
+        assert_eq!(
+            app.next_presentation_deadline(presented_at + MIN_PRESENT_INTERVAL),
+            None
+        );
     }
 
     #[test]

@@ -619,6 +619,17 @@ impl HeadlessServer {
                 .fold(next_deadline, |deadline, pending| {
                     Some(deadline.map_or(pending, |current| current.min(pending)))
                 });
+            let next_deadline = if needs_render
+                && self.has_pending_presentation_work(needs_full_render, needs_graphics_render)
+            {
+                self.app
+                    .next_presentation_deadline(now)
+                    .map_or(next_deadline, |present| {
+                        Some(next_deadline.map_or(present, |current| current.min(present)))
+                    })
+            } else {
+                next_deadline
+            };
             let event = {
                 tokio::select! {
                     maybe_api = self.app.api_rx.recv() => match maybe_api {
@@ -2483,7 +2494,12 @@ impl HeadlessServer {
                 if let Err(err) = apply_client_pane_input_events(runtime, &events) {
                     warn!(client_id, pane_id, err = %err, "targeted client shell input failed");
                 }
-                foreground_changed | geometry_changed || runtime.scroll_metrics() != scroll_before
+                let scrolled = runtime.scroll_metrics() != scroll_before;
+                if scrolled && client_pane_input_has_wheel_scroll(&events) {
+                    self.present_wheel_scroll(runtime_pane_id);
+                    return foreground_changed | geometry_changed;
+                }
+                foreground_changed | geometry_changed || scrolled
             }
             ServerEvent::ClientShellPopupInput {
                 client_id,
@@ -2686,6 +2702,14 @@ impl HeadlessServer {
             RenderImpact::Full
         } else {
             RenderImpact::None
+        }
+    }
+
+    /// Presents a wheel scroll as retained dirty rows (ghostty dirties every
+    /// viewport row on a pin move) and wakes the loop like a PTY reader would.
+    fn present_wheel_scroll(&self, pane_id: crate::layout::PaneId) {
+        if self.app.render_dirty.request_pty(pane_id) {
+            self.app.render_notify.notify_one();
         }
     }
 
@@ -3443,6 +3467,18 @@ fn client_pane_input_has_interaction(events: &[protocol::ClientPaneInputEvent]) 
     events
         .iter()
         .any(|event| !client_pane_input_releases_press(event))
+}
+
+fn client_pane_input_has_wheel_scroll(events: &[protocol::ClientPaneInputEvent]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            protocol::ClientPaneInputEvent::Mouse {
+                kind: protocol::ClientMouseKind::ScrollUp | protocol::ClientMouseKind::ScrollDown,
+                ..
+            }
+        )
+    })
 }
 
 impl Drop for HeadlessServer {
