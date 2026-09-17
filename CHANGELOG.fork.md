@@ -10,6 +10,11 @@ own changes live in [CHANGELOG.md](CHANGELOG.md) and the upstream release notes.
 
 - The fork patches were rebased onto upstream v0.9.1. Folder navigation, collapse state, and the machines sidebar now work with upstream's cross-machine workspace navigation and per-machine worktree collapses, and the fork release workflow builds with Zig 0.16.0 as upstream now requires.
 
+## Scrolling performance
+
+- Pane scrolling keeps up with high-refresh displays: frames are presented at up to ~120 fps instead of ~60, so a 120 Hz wheel stream gets one frame per tick rather than double-size jumps, and scroll latency dropped from roughly 9–16 ms to about 5 ms. Hidden-pane output keeps its 16 ms cadence, so background CPU use is unchanged.
+- Wheel scrolls reuse the retained dirty-row path instead of a full UI re-render, and terminal cell extraction makes about a third as many libghostty calls per cell.
+
 ## Machine round-trip time
 
 - Each online saved SSH machine shows its smoothed round-trip time beside the status dot in the machines sidebar, for example `97ms ●`. The client probes the machine every 3 seconds over the existing health ping/pong, so it works with any v0.9.0 remote and needs no server changes. The value covers the full path your input takes (local client, `ssh`, the remote bridge, and the remote Herdr server), making it a better guide to how typing will feel than a plain network ping.

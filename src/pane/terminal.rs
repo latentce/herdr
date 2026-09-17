@@ -2373,7 +2373,7 @@ impl GhosttyPaneTerminal {
                     );
                     let symbol = match ghostty_buffer_symbol_into(
                         &cells,
-                        basic.wide,
+                        &basic,
                         hide_kitty_placeholders,
                         &mut grapheme_bytes,
                         &mut symbol_scratch,
@@ -2648,7 +2648,7 @@ fn ghostty_collect_dirty_patch(
             );
             let symbol = match ghostty_buffer_symbol_into(
                 &cells,
-                basic.wide,
+                &basic,
                 hide_kitty_placeholders,
                 &mut grapheme_bytes,
                 &mut symbol_scratch,
@@ -3112,17 +3112,18 @@ fn is_halfwidth_katakana_voiced_grapheme(symbol: &str) -> bool {
 
 fn ghostty_buffer_symbol_into<'a>(
     cells: &crate::ghostty::RowCellIter<'_>,
-    wide: crate::ghostty::CellWide,
+    basic: &crate::ghostty::CellBasicData,
     hide_kitty_placeholders: bool,
     grapheme_bytes: &mut Vec<u8>,
     symbol_scratch: &'a mut String,
 ) -> Result<&'a str, crate::ghostty::Error> {
+    let wide = basic.wide;
     symbol_scratch.clear();
     match wide {
         crate::ghostty::CellWide::SpacerTail => {}
         crate::ghostty::CellWide::SpacerHead => symbol_scratch.push(' '),
         crate::ghostty::CellWide::Narrow | crate::ghostty::CellWide::Wide => {
-            cells.grapheme_text_into(grapheme_bytes, symbol_scratch)?;
+            cells.symbol_text_into(basic, grapheme_bytes, symbol_scratch)?;
             let hidden_kitty_placeholder = hide_kitty_placeholders
                 && symbol_scratch.chars().next().map(u32::from)
                     == Some(crate::ghostty::KITTY_UNICODE_PLACEHOLDER);
@@ -3204,19 +3205,28 @@ fn ghostty_cell_style(
     resolved_bg: Option<Color>,
     palette_overrides: Option<&PaletteOverrides>,
 ) -> Style {
+    // Unstyled cells have no per-cell fg/bg in ghostty; skip the FFI fallbacks for them.
     let mut fg = basic
         .style
         .fg_color
         .map(|color| ghostty_cell_color(color, palette_overrides))
-        .or_else(|| cells.fg_color().ok().flatten().map(ghostty_color))
+        .or_else(|| {
+            basic
+                .has_styling
+                .then(|| cells.fg_color().ok().flatten().map(ghostty_color))
+                .flatten()
+        })
         .or(default_fg);
-    let mut bg = cells
+    let mut bg = basic
         .content_bg_color()
-        .ok()
-        .flatten()
         .or(basic.style.bg_color)
         .map(|color| ghostty_cell_color(color, palette_overrides))
-        .or_else(|| cells.bg_color().ok().flatten().map(ghostty_color))
+        .or_else(|| {
+            basic
+                .has_styling
+                .then(|| cells.bg_color().ok().flatten().map(ghostty_color))
+                .flatten()
+        })
         .or(default_bg);
     if basic.style.invisible {
         fg = bg.or(default_bg);
@@ -5373,10 +5383,11 @@ mod tests {
         if rows.next() {
             let mut cells = rows.populate_cells(&mut row_cells).unwrap();
             while cells.next() {
-                let wide = cells.wide().unwrap_or(crate::ghostty::CellWide::Narrow);
+                let basic = cells.basic_data().unwrap_or_default();
+                let wide = basic.wide;
                 let symbol = ghostty_buffer_symbol_into(
                     &cells,
-                    wide,
+                    &basic,
                     false,
                     &mut grapheme_bytes,
                     &mut symbol_scratch,

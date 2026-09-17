@@ -3190,6 +3190,18 @@ pub struct CellBasicData {
     pub has_hyperlink: bool,
     pub has_styling: bool,
     pub style: CellStyle,
+    pub content: CellContent,
+}
+
+/// Cell content decoded with the other basic data so common cells need no extra FFI calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellContent {
+    /// A single codepoint; `0` means the cell has no text.
+    Codepoint(u32),
+    /// A multi-codepoint grapheme cluster; read it with `grapheme_text_into`.
+    Grapheme,
+    /// A background-color-only cell with no text.
+    BgColor(CellColor),
 }
 
 impl Default for CellBasicData {
@@ -3199,6 +3211,16 @@ impl Default for CellBasicData {
             has_hyperlink: false,
             has_styling: false,
             style: CellStyle::default(),
+            content: CellContent::Codepoint(0),
+        }
+    }
+}
+
+impl CellBasicData {
+    pub fn content_bg_color(&self) -> Option<CellColor> {
+        match self.content {
+            CellContent::BgColor(color) => Some(color),
+            CellContent::Codepoint(_) | CellContent::Grapheme => None,
         }
     }
 }
@@ -3257,13 +3279,19 @@ impl<'a> RowCellIter<'a> {
 
         let mut wide = ffi::GhosttyCellWide_GHOSTTY_CELL_WIDE_NARROW;
         let mut has_hyperlink = false;
+        let mut content_tag = ffi::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_CODEPOINT;
+        let mut codepoint = 0u32;
         let cell_keys = [
             ffi::GhosttyCellData_GHOSTTY_CELL_DATA_WIDE,
             ffi::GhosttyCellData_GHOSTTY_CELL_DATA_HAS_HYPERLINK,
+            ffi::GhosttyCellData_GHOSTTY_CELL_DATA_CONTENT_TAG,
+            ffi::GhosttyCellData_GHOSTTY_CELL_DATA_CODEPOINT,
         ];
         let mut cell_values = [
             (&mut wide as *mut ffi::GhosttyCellWide).cast::<c_void>(),
             (&mut has_hyperlink as *mut bool).cast::<c_void>(),
+            (&mut content_tag as *mut ffi::GhosttyCellContentTag).cast::<c_void>(),
+            (&mut codepoint as *mut u32).cast::<c_void>(),
         ];
         unsafe {
             ffi::ghostty_cell_get_multi(
@@ -3275,12 +3303,43 @@ impl<'a> RowCellIter<'a> {
             )
             .into_result()?;
         }
+        let content = match content_tag {
+            ffi::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_CODEPOINT_GRAPHEME => {
+                CellContent::Grapheme
+            }
+            ffi::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_BG_COLOR_PALETTE => {
+                let mut index = 0u8;
+                unsafe {
+                    ffi::ghostty_cell_get(
+                        raw,
+                        ffi::GhosttyCellData_GHOSTTY_CELL_DATA_COLOR_PALETTE,
+                        (&mut index as *mut u8).cast(),
+                    )
+                    .into_result()?;
+                }
+                CellContent::BgColor(CellColor::Palette(index))
+            }
+            ffi::GhosttyCellContentTag_GHOSTTY_CELL_CONTENT_BG_COLOR_RGB => {
+                let mut color = ffi::GhosttyColorRgb::default();
+                unsafe {
+                    ffi::ghostty_cell_get(
+                        raw,
+                        ffi::GhosttyCellData_GHOSTTY_CELL_DATA_COLOR_RGB,
+                        (&mut color as *mut ffi::GhosttyColorRgb).cast(),
+                    )
+                    .into_result()?;
+                }
+                CellContent::BgColor(CellColor::Rgb(color.into()))
+            }
+            _ => CellContent::Codepoint(codepoint),
+        };
 
         Ok(CellBasicData {
             wide: CellWide::from_raw(wide),
             has_hyperlink,
             has_styling,
             style: style.into(),
+            content,
         })
     }
 
@@ -3401,36 +3460,6 @@ impl<'a> RowCellIter<'a> {
         }
     }
 
-    fn raw_cell_text_into(&self, text: &mut String) -> Result<(), Error> {
-        let raw = self.raw_cell()?;
-        let mut has_text = false;
-        unsafe {
-            ffi::ghostty_cell_get(
-                raw,
-                ffi::GhosttyCellData_GHOSTTY_CELL_DATA_HAS_TEXT,
-                (&mut has_text as *mut bool).cast(),
-            )
-            .into_result()?;
-        }
-        if !has_text {
-            return Ok(());
-        }
-
-        let mut codepoint = 0u32;
-        unsafe {
-            ffi::ghostty_cell_get(
-                raw,
-                ffi::GhosttyCellData_GHOSTTY_CELL_DATA_CODEPOINT,
-                (&mut codepoint as *mut u32).cast(),
-            )
-            .into_result()?;
-        }
-        if let Some(ch) = char::from_u32(codepoint) {
-            text.push(ch);
-        }
-        Ok(())
-    }
-
     pub fn grapheme_text(&self) -> Result<String, Error> {
         let mut bytes = Vec::new();
         let mut text = String::new();
@@ -3438,13 +3467,42 @@ impl<'a> RowCellIter<'a> {
         Ok(text)
     }
 
+    /// Writes the cell's text, skipping FFI for single-codepoint and background-only cells.
+    pub fn symbol_text_into(
+        &self,
+        basic: &CellBasicData,
+        bytes: &mut Vec<u8>,
+        text: &mut String,
+    ) -> Result<(), Error> {
+        match basic.content {
+            CellContent::Codepoint(codepoint) => {
+                text.clear();
+                if codepoint != 0 {
+                    if let Some(ch) = char::from_u32(codepoint) {
+                        text.push(ch);
+                    }
+                }
+                Ok(())
+            }
+            CellContent::BgColor(_) => {
+                text.clear();
+                Ok(())
+            }
+            CellContent::Grapheme => self.grapheme_text_into(bytes, text),
+        }
+    }
+
     pub fn grapheme_text_into(&self, bytes: &mut Vec<u8>, text: &mut String) -> Result<(), Error> {
+        // Keep the scratch buffer sized so the common case needs no size probe.
+        const MIN_SCRATCH_LEN: usize = 32;
         text.clear();
-        bytes.clear();
+        if bytes.len() < MIN_SCRATCH_LEN {
+            bytes.resize(MIN_SCRATCH_LEN, 0);
+        }
 
         let mut buffer = ffi::GhosttyBuffer {
-            ptr: ptr::null_mut(),
-            cap: 0,
+            ptr: bytes.as_mut_ptr(),
+            cap: bytes.len(),
             len: 0,
         };
         let result = unsafe {
@@ -3455,40 +3513,32 @@ impl<'a> RowCellIter<'a> {
             )
         };
         match result {
-            ffi::GhosttyResult_GHOSTTY_SUCCESS if buffer.len == 0 => {
-                return self.raw_cell_text_into(text);
+            ffi::GhosttyResult_GHOSTTY_SUCCESS => {}
+            ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE => {
+                bytes.resize(buffer.len, 0);
+                buffer = ffi::GhosttyBuffer {
+                    ptr: bytes.as_mut_ptr(),
+                    cap: bytes.len(),
+                    len: 0,
+                };
+                unsafe {
+                    ffi::ghostty_render_state_row_cells_get(
+                        self.cells.raw,
+                        ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_UTF8,
+                        (&mut buffer as *mut ffi::GhosttyBuffer).cast(),
+                    )
+                    .into_result()?;
+                }
             }
-            ffi::GhosttyResult_GHOSTTY_SUCCESS => {
-                return Err(Error(ffi::GhosttyResult_GHOSTTY_INVALID_VALUE));
-            }
-            ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE => {}
             other => return Err(Error(other)),
-        }
-
-        if buffer.len == 0 {
-            return self.raw_cell_text_into(text);
-        }
-        bytes.resize(buffer.len, 0);
-        let mut buffer = ffi::GhosttyBuffer {
-            ptr: bytes.as_mut_ptr(),
-            cap: bytes.len(),
-            len: 0,
-        };
-        unsafe {
-            ffi::ghostty_render_state_row_cells_get(
-                self.cells.raw,
-                ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_UTF8,
-                (&mut buffer as *mut ffi::GhosttyBuffer).cast(),
-            )
-            .into_result()?;
         }
         if buffer.len > bytes.len() {
             return Err(Error(ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE));
         }
-        bytes.truncate(buffer.len);
-        match std::str::from_utf8(bytes) {
+        let written = &bytes[..buffer.len];
+        match std::str::from_utf8(written) {
             Ok(value) => text.push_str(value),
-            Err(_) => text.push_str(&String::from_utf8_lossy(bytes)),
+            Err(_) => text.push_str(&String::from_utf8_lossy(written)),
         }
         Ok(())
     }

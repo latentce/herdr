@@ -3091,6 +3091,119 @@ async fn client_shell_release_under_popup_renders_when_it_resets_scrollback() {
 }
 
 #[tokio::test]
+async fn client_shell_wheel_scroll_presents_through_retained_pty_path() {
+    let mut server = test_headless_server();
+    let mut workspace = crate::workspace::Workspace::test_new("wheel-scroll");
+    let pane_id = workspace.tabs[0].root_pane;
+    let (runtime, _input_rx) =
+        crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+            80,
+            2,
+            10_000,
+            b"one\r\ntwo\r\nthree\r\nfour\r\n",
+            4,
+        );
+    workspace.insert_test_runtime(pane_id, runtime);
+    server.app.state.workspaces = vec![workspace];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    let public_pane_id = server.app.public_pane_id(0, pane_id).unwrap();
+    server.clients.insert(
+        11,
+        ClientConnection::new_with_mode(
+            ClientConnectionMode::ClientShell,
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            1,
+            RenderEncoding::SemanticFrame,
+            None,
+        ),
+    );
+    server.foreground_client_id = Some(11);
+    assert!(server.claim_unowned_shell_tab_geometry(11, false));
+    // Drain setup-time render requests.
+    let _ = server.app.render_dirty.take();
+
+    let wheel = |kind| crate::protocol::ClientPaneInputEvent::Mouse {
+        kind,
+        position: crate::protocol::ClientMousePosition::Cell { column: 2, row: 1 },
+        geometry: None,
+        modifiers: 0,
+        lines: 1,
+    };
+    let render_impact =
+        server.handle_server_event_with_render_impact(ServerEvent::ClientShellPaneInput {
+            client_id: 11,
+            pane_id: public_pane_id.clone(),
+            events: vec![wheel(crate::protocol::ClientMouseKind::ScrollUp)],
+        });
+
+    // The viewport moved, but the frame is presented as a dirty-row patch.
+    assert_eq!(render_impact, RenderImpact::None);
+    assert_eq!(
+        server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .and_then(|runtime| runtime.scroll_metrics())
+            .map(|metrics| metrics.offset_from_bottom),
+        Some(1)
+    );
+    assert!(server.app.render_dirty.is_pending());
+    let request = server.app.render_dirty.take();
+    assert!(!request.generic);
+    assert_eq!(request.pty_sources, HashSet::from([pane_id]));
+
+    // Scrolling back to the bottom is another viewport move.
+    let render_impact =
+        server.handle_server_event_with_render_impact(ServerEvent::ClientShellPaneInput {
+            client_id: 11,
+            pane_id: public_pane_id.clone(),
+            events: vec![wheel(crate::protocol::ClientMouseKind::ScrollDown); 5],
+        });
+    assert_eq!(render_impact, RenderImpact::None);
+    assert_eq!(
+        server.app.render_dirty.take().pty_sources,
+        HashSet::from([pane_id])
+    );
+
+    // A wheel event that cannot move the viewport requests nothing.
+    let render_impact =
+        server.handle_server_event_with_render_impact(ServerEvent::ClientShellPaneInput {
+            client_id: 11,
+            pane_id: public_pane_id.clone(),
+            events: vec![wheel(crate::protocol::ClientMouseKind::ScrollDown)],
+        });
+    assert_eq!(render_impact, RenderImpact::None);
+    assert!(!server.app.render_dirty.is_pending());
+
+    // Consume any notify permit left by setup.
+    let _ = tokio::time::timeout(Duration::ZERO, server.app.render_notify.notified()).await;
+
+    // A wheel event drained after the loop's dirty-signal check must still wake the loop.
+    server
+        .server_event_tx
+        .try_send(ServerEvent::ClientShellPaneInput {
+            client_id: 11,
+            pane_id: public_pane_id,
+            events: vec![wheel(crate::protocol::ClientMouseKind::ScrollUp)],
+        })
+        .unwrap();
+    assert!(!server.drain_server_events());
+    assert_eq!(
+        server.app.render_dirty.take().pty_sources,
+        HashSet::from([pane_id])
+    );
+    assert!(
+        tokio::time::timeout(Duration::ZERO, server.app.render_notify.notified())
+            .await
+            .is_ok(),
+        "drained wheel scroll must leave a render wake-up permit"
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
 async fn client_shell_text_input_renders_only_when_resetting_scrollback() {
     let mut server = test_headless_server();
     let mut workspace = crate::workspace::Workspace::test_new("scrolled-input");

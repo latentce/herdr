@@ -493,20 +493,17 @@ pub(crate) fn render_tab_surface_virtual(
     let cursor = crate::ui::tab_surface_cursor(app_state, terminal_runtimes, surface);
     let hyperlinks = crate::ui::tab_surface_hyperlinks(app_state, terminal_runtimes, surface);
 
+    // Render straight into the current buffer; `Terminal::draw` would also
+    // diff it against an empty buffer and copy every cell into the backend.
     let backend = CursorTrackingBackend::new(area.width, area.height);
     let mut terminal = ratatui::Terminal::new(backend).expect("TestBackend::new should never fail");
-    terminal
-        .draw(|frame| {
-            crate::ui::render_tab_surface(app_state, terminal_runtimes, surface, frame);
-        })
-        .expect("render to TestBackend should never fail");
+    {
+        let mut frame = terminal.get_frame();
+        crate::ui::render_tab_surface(app_state, terminal_runtimes, surface, &mut frame);
+    }
+    let buffer = std::mem::take(terminal.current_buffer_mut());
 
-    (
-        terminal.backend().buffer().clone(),
-        cursor,
-        hyperlinks,
-        layout,
-    )
+    (buffer, cursor, hyperlinks, layout)
 }
 
 /// Renders one server-owned terminal directly for `terminal attach` clients.
