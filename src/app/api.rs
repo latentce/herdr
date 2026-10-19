@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 mod agent_view;
 mod agents;
 mod env;
+mod folders;
 mod integrations;
 mod layouts;
 mod panes;
@@ -934,6 +935,7 @@ impl App {
         request: crate::api::schema::Request,
     ) -> String {
         self.sync_pending_terminal_titles();
+        self.sync_folders();
         use crate::api::schema::{
             ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
         };
@@ -1081,6 +1083,17 @@ impl App {
             }
             Method::WorkspaceClose(target) => {
                 return self.handle_workspace_close(request.id, target);
+            }
+            method @ (Method::FolderList(_)
+            | Method::FolderGet(_)
+            | Method::FolderCreate(_)
+            | Method::FolderRename(_)
+            | Method::FolderDelete(_)
+            | Method::FolderMove(_)
+            | Method::FolderAddWorkspace(_)
+            | Method::FolderRemoveWorkspace(_)
+            | Method::FolderCreateWorkspace(_)) => {
+                return self.handle_folder_method(request.id, method);
             }
             Method::WorktreeList(_) | Method::WorktreeOpen(_) => {
                 return responses::encode_error(

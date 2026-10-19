@@ -10,6 +10,7 @@ mod restore;
 mod snapshot;
 mod writer;
 
+pub(crate) use self::io::save_json_to_path;
 pub use self::io::{clear_history, load, load_history};
 pub use self::restore::restore;
 pub(crate) use self::restore::restored_worktree_space_membership;

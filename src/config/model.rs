@@ -101,6 +101,18 @@ pub enum AgentPanelSortConfig {
     Priority,
 }
 
+/// Agents panel mode for the fork-only `[ui] agent_panel_mode`
+/// key. Kept apart from `agent_panel_sort` so stock Herdr, which rejects
+/// unknown values there, only warns about this key and keeps the config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentPanelModeConfig {
+    #[serde(alias = "spaces", alias = "workspaces")]
+    Grouped,
+    Priority,
+    Folders,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum LegacyAgentPanelScopeConfig {
@@ -993,6 +1005,9 @@ pub struct UiConfig {
     pub window_title: String,
     /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
     pub agent_panel_sort: AgentPanelSortConfig,
+    /// "grouped", "priority" or "folders"; replaces
+    /// `agent_panel_sort` when set. Default: unset.
+    pub agent_panel_mode: Option<AgentPanelModeConfig>,
     /// Retired setting that Herdr wrote before the workspace filter was removed.
     #[serde(rename = "agent_panel_scope")]
     _legacy_agent_panel_scope: Option<LegacyAgentPanelScopeConfig>,
@@ -1224,6 +1239,7 @@ impl Default for UiConfig {
             tab_bar_right_separator: " ".into(),
             window_title: super::window_title::default_window_title(),
             agent_panel_sort: AgentPanelSortConfig::Spaces,
+            agent_panel_mode: None,
             _legacy_agent_panel_scope: None,
             status_indicators: StatusIndicatorStyle::Dots,
             sidebar: SidebarConfig::default(),

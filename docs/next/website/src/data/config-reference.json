@@ -1051,6 +1051,17 @@
           ]
         },
         {
+          "key": "ui.agent_panel_mode",
+          "type": "enum",
+          "default": "unset",
+          "description": "Fork-only Agent panel mode; replaces agent_panel_sort when set. \"spaces\" and \"workspaces\" are accepted as aliases for \"grouped\". Use this key, not agent_panel_sort, for \"folders\": stock Herdr rejects unknown agent_panel_sort values and falls back to default settings for the entire config.",
+          "values": [
+            "grouped",
+            "priority",
+            "folders"
+          ]
+        },
+        {
           "key": "ui.status_indicators",
           "type": "enum",
           "default": "\"dots\"",

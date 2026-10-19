@@ -568,7 +568,10 @@ impl ClientShellState {
             }
             return;
         }
-
+        if matches!(self.overlay, Some(ClientShellOverlay::FolderMenu(_))) {
+            self.handle_folder_menu_key(key, outcome);
+            return;
+        }
         if matches!(self.overlay, Some(ClientShellOverlay::GlobalMenu(_))) {
             match key.code {
                 KeyCode::Esc => {
@@ -612,6 +615,13 @@ impl ClientShellState {
                 KeyCode::Down => {
                     self.move_context_menu_selection(1);
                     outcome.repaint = true;
+                }
+                KeyCode::Right => {
+                    let highlighted = match self.overlay.as_ref() {
+                        Some(ClientShellOverlay::ContextMenu(menu)) => menu.highlighted,
+                        _ => return,
+                    };
+                    outcome.repaint |= self.open_folder_submenu(highlighted);
                 }
                 KeyCode::Enter => {
                     let highlighted = match self.overlay.as_ref() {
@@ -931,6 +941,14 @@ impl ClientShellState {
     }
 
     pub(super) fn save_rename_overlay(&mut self, outcome: &mut ClientShellInput) {
+        if let Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+            target: ClientRenameTarget::Folder(_),
+            ..
+        })) = self.overlay.as_ref()
+        {
+            self.save_folder_prompt(outcome);
+            return;
+        }
         let Some(ClientShellOverlay::Rename(rename)) = self.overlay.take() else {
             return;
         };
@@ -987,6 +1005,7 @@ impl ClientShellState {
                     label: Some(trimmed.to_owned()),
                 },
             )),
+            ClientRenameTarget::Folder(_) => None,
         };
         if let Some(method) = method {
             self.push_endpoint_method(method, outcome);

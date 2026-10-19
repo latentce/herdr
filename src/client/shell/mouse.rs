@@ -1204,6 +1204,11 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                Some(ClientChromeDrag::Folders(_)) => {
+                    self.update_folder_drag(point);
+                    outcome.repaint = true;
+                    return;
+                }
                 Some(ClientChromeDrag::Workspace { .. }) => {
                     let target = self.workspace_drop_target_at(point);
                     if let Some(ClientChromeDrag::Workspace {
@@ -1216,6 +1221,9 @@ impl ClientShellState {
                     return;
                 }
                 None => {}
+            }
+            if self.folder_drag_motion(mouse.column, mouse.row, outcome) {
+                return;
             }
             if let Some(press) = self.workspace_press.as_ref() {
                 let delta = mouse
@@ -1259,6 +1267,7 @@ impl ClientShellState {
             if let Some(drag) = self.chrome_drag.take() {
                 self.workspace_press = None;
                 self.tab_press = None;
+                self.folders.press = None;
                 match drag {
                     ClientChromeDrag::Tab {
                         tab_id,
@@ -1293,6 +1302,7 @@ impl ClientShellState {
                         }
                         outcome.repaint = true;
                     }
+                    ClientChromeDrag::Folders(drag) => self.finish_folder_drag(drag, outcome),
                     ClientChromeDrag::Workspace {
                         source_workspace_id,
                         target,
@@ -1369,6 +1379,9 @@ impl ClientShellState {
                 }
                 return;
             }
+            if self.release_folder_press(outcome) {
+                return;
+            }
             if let Some(press) = self.workspace_press.take() {
                 self.finish_endpoint_workspace_press(press, outcome);
                 return;
@@ -1382,6 +1395,10 @@ impl ClientShellState {
                 );
                 return;
             }
+        }
+        if matches!(self.overlay, Some(ClientShellOverlay::FolderMenu(_))) {
+            self.handle_folder_menu_mouse(&mouse, point, outcome);
+            return;
         }
         if matches!(self.overlay, Some(ClientShellOverlay::GlobalMenu(_))) {
             let row_hit = self
@@ -1428,6 +1445,9 @@ impl ClientShellState {
                     {
                         menu.highlighted = index;
                         outcome.repaint = true;
+                    }
+                    if let Some((_, index)) = row_hit {
+                        self.open_folder_submenu(index);
                     }
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -1835,6 +1855,10 @@ impl ClientShellState {
                 if !self.config.mouse_capture {
                     return;
                 }
+                if !self.sidebar_collapsed && self.open_folder_header_menu(point) {
+                    outcome.repaint = true;
+                    return;
+                }
                 let workspace_id = (!self.sidebar_collapsed)
                     .then(|| self.active_endpoint_workspace_at(point))
                     .flatten();
@@ -1940,6 +1964,7 @@ impl ClientShellState {
                 self.workspace_press = None;
                 self.tab_press = None;
                 self.chrome_drag = None;
+                self.folders.press = None;
                 // The toggle is painted over the agent scrollbar's last cell.
                 if super::contains(self.hits.sidebar_toggle, point) {
                     self.sidebar_collapsed = !self.sidebar_collapsed;
@@ -2023,19 +2048,7 @@ impl ClientShellState {
                     return;
                 }
                 if super::contains(self.hits.agent_sort_toggle, point) {
-                    let sort = match self.config.agent_panel_sort {
-                        crate::config::AgentPanelSortConfig::Spaces => {
-                            crate::config::AgentPanelSortConfig::Priority
-                        }
-                        crate::config::AgentPanelSortConfig::Priority => {
-                            crate::config::AgentPanelSortConfig::Spaces
-                        }
-                    };
-                    self.config.agent_panel_sort = sort;
-                    self.agent_panel_sort_manual = true;
-                    self.agent_scroll = 0;
-                    self.persist_chrome_preferences(outcome);
-                    outcome.repaint = true;
+                    self.cycle_agent_panel_mode(outcome);
                     return;
                 }
                 if self.handle_endpoint_machine_click(point, outcome) {
@@ -2047,6 +2060,10 @@ impl ClientShellState {
                     return;
                 }
                 if super::contains(self.hits.new_workspace, point) {
+                    if self.open_folder_new_menu() {
+                        outcome.repaint = true;
+                        return;
+                    }
                     self.record_binding(
                         crate::input::KeybindMatch::Action(
                             crate::input::KeybindAction::NewWorkspace,
@@ -2086,6 +2103,9 @@ impl ClientShellState {
                         .saturating_add(1)
                         .min(tab_count.saturating_sub(1));
                     outcome.repaint = true;
+                    return;
+                }
+                if self.press_folder_header(mouse.column, mouse.row) {
                     return;
                 }
                 let group_toggle = self.hits.workspaces.iter().find_map(|hit| {
@@ -2139,6 +2159,9 @@ impl ClientShellState {
                     .flatten();
                 if let Some(tab_press) = tab_press {
                     self.tab_press = Some(tab_press);
+                    return;
+                }
+                if self.click_folder_agent_header(point, outcome) {
                     return;
                 }
                 if self.handle_endpoint_agent_click(point, outcome) {

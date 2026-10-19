@@ -1936,6 +1936,7 @@ impl HeadlessServer {
                     "client connected"
                 );
                 self.app.ensure_default_workspace();
+                self.app.sync_folders();
                 let first_app_client = self.app_client_count() == 0;
                 let last_activity = self.allocate_activity_stamp();
                 let observed = crate::kitty_graphics::HostCellSize {
@@ -1998,6 +1999,20 @@ impl HeadlessServer {
                             return false;
                         }
                     };
+                let folders_message = match crate::folders::protocol::pending_message(
+                    &self.app.state.folders,
+                    crate::folders::protocol::SentFolders::default(),
+                    &seed_snapshot.boot_id,
+                    seed_snapshot.revision,
+                ) {
+                    Ok(message) => message,
+                    Err(err) => {
+                        warn!(client_id, err = %err, "failed to encode workspace folders");
+                        return false;
+                    }
+                };
+                connection.shell_folders =
+                    crate::folders::protocol::SentFolders::current(&self.app.state.folders);
                 let completion_message = match crate::protocol::endpoint::agent_completions_message(
                     &completion_projection,
                 ) {
@@ -2016,6 +2031,9 @@ impl HeadlessServer {
                     self.popup_owner_tab_id = self.shell_tab_id_for_client(client_id);
                 }
                 if let Some(message) = projection_message {
+                    self.send_to_client(client_id, message);
+                }
+                if let Some(message) = folders_message {
                     self.send_to_client(client_id, message);
                 }
                 self.send_to_client(client_id, completion_message);

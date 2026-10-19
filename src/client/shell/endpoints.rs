@@ -134,6 +134,7 @@ impl ClientShellState {
             endpoint.pending_agent_view_projection = None;
             endpoint.agent_view_projection_supported = false;
         }
+        self.folders.retire_endpoint(endpoint_id);
     }
 
     pub(crate) fn set_endpoint_status(
@@ -567,6 +568,7 @@ impl ClientShellState {
         {
             return;
         }
+        self.prune_folder_state_for_snapshot(endpoint_id, &snapshot);
         let boot_changed = self.endpoints[index]
             .snapshot
             .as_deref()

@@ -1954,7 +1954,7 @@ fn machine_arrow_toggles_inactive_machine_without_switching() {
                     .find(|hit| hit.endpoint_id == remote_id)
                     .expect("remote machine")
                     .rect;
-                let column = machine.x + u16::from(!sidebar_collapsed);
+                let column = machine.x;
                 let buffer = frame.to_ratatui_buffer().expect("frame buffer");
                 assert_eq!(
                     buffer[(column, machine.y)].symbol(),

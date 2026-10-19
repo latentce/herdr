@@ -71,6 +71,7 @@ impl App {
                 .unwrap_or_else(|| empty_plugin_context(correlation_id)),
             EventData::WorkspaceRenamed { workspace_id, .. }
             | EventData::WorkspaceMoved { workspace_id, .. }
+            | EventData::WorkspaceFolderChanged { workspace_id, .. }
             | EventData::WorkspaceFocused { workspace_id } => self
                 .plugin_context_for_workspace_id(workspace_id, correlation_id)
                 .unwrap_or_else(|| {
@@ -128,6 +129,10 @@ impl App {
                     context.tab_id = Some(tab_id.clone());
                     context
                 }),
+            EventData::FolderCreated { .. }
+            | EventData::FolderRenamed { .. }
+            | EventData::FolderDeleted { .. }
+            | EventData::FolderMoved { .. } => empty_plugin_context(correlation_id),
             EventData::LayoutUpdated { layout } => self
                 .plugin_context_for_tab_id(&layout.tab_id, correlation_id)
                 .or_else(|| {

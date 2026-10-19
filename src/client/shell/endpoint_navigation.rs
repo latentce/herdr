@@ -61,6 +61,7 @@ impl ClientShellState {
             if !self.collapsed_endpoints.remove(&endpoint_id) {
                 self.collapsed_endpoints.insert(endpoint_id.clone());
             }
+            self.machine_collapse_changed();
             outcome.repaint = true;
             if !collapse_toggle && endpoint_id.is_local() {
                 self.activate_endpoint(endpoint_id, outcome);
@@ -113,6 +114,9 @@ impl ClientShellState {
             action,
             KeybindAction::PreviousWorkspace | KeybindAction::NextWorkspace
         ) {
+            if self.folder_multi_machine_step(action == KeybindAction::NextWorkspace, outcome) {
+                return true;
+            }
             let workspaces = self
                 .endpoints
                 .iter()
@@ -167,6 +171,17 @@ impl ClientShellState {
             action,
             KeybindAction::PreviousAgent | KeybindAction::NextAgent | KeybindAction::FocusAgent(_)
         ) {
+            if let Some(target) = self.folder_agent_target(&action) {
+                if let Some((endpoint_id, pane_id)) = target {
+                    self.focus_or_activate(
+                        endpoint_id,
+                        ClientEndpointFocusTarget::Pane(pane_id),
+                        outcome,
+                    );
+                    outcome.repaint = true;
+                }
+                return true;
+            }
             let agents = super::aggregate_navigation::online_agent_targets(
                 &self.endpoints,
                 &self.active_endpoint_id,

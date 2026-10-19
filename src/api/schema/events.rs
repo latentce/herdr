@@ -32,6 +32,16 @@ pub enum Subscription {
     WorkspaceClosed {},
     #[serde(rename = "workspace.focused")]
     WorkspaceFocused {},
+    #[serde(rename = "workspace.folder_changed")]
+    WorkspaceFolderChanged {},
+    #[serde(rename = "folder.created")]
+    FolderCreated {},
+    #[serde(rename = "folder.renamed")]
+    FolderRenamed {},
+    #[serde(rename = "folder.deleted")]
+    FolderDeleted {},
+    #[serde(rename = "folder.moved")]
+    FolderMoved {},
     #[serde(rename = "worktree.created")]
     WorktreeCreated {},
     #[serde(rename = "worktree.opened")]
@@ -187,6 +197,28 @@ pub enum EventMatch {
         pane_id: String,
         agent_status: AgentStatus,
     },
+    WorkspaceFolderChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        folder_id: Option<String>,
+    },
+    FolderCreated {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        folder_id: Option<String>,
+    },
+    FolderRenamed {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        folder_id: Option<String>,
+    },
+    FolderDeleted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        folder_id: Option<String>,
+    },
+    FolderMoved {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        folder_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -218,6 +250,11 @@ pub enum EventKind {
     PaneAgentDetected,
     PaneAgentStatusChanged,
     LayoutUpdated,
+    WorkspaceFolderChanged,
+    FolderCreated,
+    FolderRenamed,
+    FolderDeleted,
+    FolderMoved,
 }
 
 impl EventKind {
@@ -249,6 +286,11 @@ impl EventKind {
             EventKind::PaneAgentDetected => "pane.agent_detected",
             EventKind::PaneAgentStatusChanged => "pane.agent_status_changed",
             EventKind::LayoutUpdated => "layout.updated",
+            EventKind::WorkspaceFolderChanged => "workspace.folder_changed",
+            EventKind::FolderCreated => "folder.created",
+            EventKind::FolderRenamed => "folder.renamed",
+            EventKind::FolderDeleted => "folder.deleted",
+            EventKind::FolderMoved => "folder.moved",
         }
     }
 }
@@ -281,6 +323,11 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::PaneAgentDetected,
     EventKind::PaneAgentStatusChanged,
     EventKind::LayoutUpdated,
+    EventKind::WorkspaceFolderChanged,
+    EventKind::FolderCreated,
+    EventKind::FolderRenamed,
+    EventKind::FolderDeleted,
+    EventKind::FolderMoved,
 ];
 
 pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
@@ -306,6 +353,11 @@ pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
     EventKind::PaneExited,
     EventKind::PaneAgentDetected,
     EventKind::PaneAgentStatusChanged,
+    EventKind::WorkspaceFolderChanged,
+    EventKind::FolderCreated,
+    EventKind::FolderRenamed,
+    EventKind::FolderDeleted,
+    EventKind::FolderMoved,
 ];
 
 #[cfg(test)]
@@ -451,6 +503,33 @@ pub enum EventData {
     },
     WorkspaceFocused {
         workspace_id: String,
+    },
+    WorkspaceFolderChanged {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        folder_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous_folder_id: Option<String>,
+        folders: Vec<super::folders::FolderInfo>,
+    },
+    FolderCreated {
+        folder: super::folders::FolderInfo,
+        folders: Vec<super::folders::FolderInfo>,
+    },
+    FolderRenamed {
+        folder_id: String,
+        name: String,
+        folders: Vec<super::folders::FolderInfo>,
+    },
+    FolderDeleted {
+        folder_id: String,
+        /// Former members, now loose.
+        workspace_ids: Vec<String>,
+        folders: Vec<super::folders::FolderInfo>,
+    },
+    FolderMoved {
+        folder_id: String,
+        folders: Vec<super::folders::FolderInfo>,
     },
     WorktreeCreated {
         workspace: WorkspaceInfo,

@@ -62,6 +62,14 @@ pub enum ResponseResult {
     WorkspaceList {
         workspaces: Vec<WorkspaceInfo>,
     },
+    FolderInfo {
+        folder: super::folders::FolderInfo,
+    },
+    FolderList {
+        folders: Vec<super::folders::FolderInfo>,
+        /// Combined order of folder IDs and loose workspace IDs.
+        order: Vec<String>,
+    },
     WorktreeList {
         source: WorktreeSourceInfo,
         worktrees: Vec<WorktreeInfo>,

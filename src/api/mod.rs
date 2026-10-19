@@ -1,5 +1,6 @@
 pub mod client;
 mod event_hub;
+mod folder_wait;
 pub mod schema;
 mod server;
 mod status;
@@ -35,6 +36,13 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::WorkspaceMoveBlock(_)
             | Method::WorkspaceReportMetadata(_)
             | Method::WorkspaceClose(_)
+            | Method::FolderCreate(_)
+            | Method::FolderRename(_)
+            | Method::FolderDelete(_)
+            | Method::FolderMove(_)
+            | Method::FolderAddWorkspace(_)
+            | Method::FolderRemoveWorkspace(_)
+            | Method::FolderCreateWorkspace(_)
             | Method::WorktreeCreate(_)
             | Method::WorktreeOpen(_)
             | Method::WorktreeRemove(_)

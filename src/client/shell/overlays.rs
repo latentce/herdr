@@ -47,6 +47,7 @@ pub(crate) fn render_client_overlay(
         ClientShellOverlay::Navigator(_)
             | ClientShellOverlay::ContextMenu(_)
             | ClientShellOverlay::GlobalMenu(_)
+            | ClientShellOverlay::FolderMenu(_)
     ) {
         for y in b.area.y..b.area.bottom() {
             for x in b.area.x..b.area.right() {
@@ -79,7 +80,9 @@ pub(crate) fn render_client_overlay(
         ClientShellOverlay::WorktreeRemove(v) => {
             worktree_overlays::render_worktree_remove_overlay(b, v, p)
         }
-        ClientShellOverlay::ContextMenu(_) | ClientShellOverlay::GlobalMenu(_) => None,
+        ClientShellOverlay::ContextMenu(_)
+        | ClientShellOverlay::GlobalMenu(_)
+        | ClientShellOverlay::FolderMenu(_) => None,
     }
 }
 
@@ -218,7 +221,7 @@ pub(crate) fn render_context_menu(
     })
 }
 
-fn panel(
+pub(in crate::client::shell) fn panel(
     b: &mut Buffer,
     a: Rect,
     c: ratatui::style::Color,

@@ -5,7 +5,7 @@ impl ClientContextMenuOverlay {
         use ClientContextMenuAction as Action;
 
         let item = |label, action| ClientContextMenuItem { label, action };
-        match &self.target {
+        let mut items = match &self.target {
             ClientContextMenuTarget::Workspace { is_git: false, .. } => {
                 vec![item("Rename", Action::Rename), item("Close", Action::Close)]
             }
@@ -79,7 +79,15 @@ impl ClientContextMenuOverlay {
                 ]);
                 items
             }
+        };
+        if let ClientContextMenuTarget::Workspace {
+            move_to_folder: true,
+            ..
+        } = &self.target
+        {
+            items.push(item("Move to folder ▸", Action::MoveToFolder));
         }
+        items
     }
 }
 
@@ -108,6 +116,7 @@ impl ClientShellState {
         let collapsed = worktree.is_some_and(|worktree| {
             self.group_is_collapsed(&self.active_endpoint_id, &worktree.key)
         });
+        let move_to_folder = self.workspace_can_move_to_folder(snapshot, workspace);
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target: ClientContextMenuTarget::Workspace {
                 workspace_id,
@@ -116,6 +125,7 @@ impl ClientShellState {
                 has_worktree_children,
                 close_group,
                 collapsed,
+                move_to_folder,
             },
             x,
             y,
@@ -184,6 +194,10 @@ impl ClientShellState {
         index: usize,
         outcome: &mut ClientShellInput,
     ) {
+        if self.open_folder_submenu(index) {
+            outcome.repaint = true;
+            return;
+        }
         let Some(ClientShellOverlay::ContextMenu(menu)) = self.overlay.take() else {
             return;
         };

@@ -151,7 +151,7 @@ impl App {
         }
 
         let workspace_id = self.public_workspace_id(index);
-        let insert_index = params.insert_index;
+        let insert_index = self.clamp_folder_workspace_move(index, params.insert_index);
         let moved = self.state.move_workspace(index, insert_index);
         let workspaces = self.workspace_list_info();
         if moved {
@@ -220,6 +220,7 @@ impl App {
             None => None,
         };
 
+        let before_workspace_id = self.clamp_folder_block_move(&workspace_ids, before_workspace_id);
         let moved = self
             .state
             .move_workspace_block(&workspace_ids, before_workspace_id.as_deref());

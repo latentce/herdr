@@ -409,6 +409,11 @@ impl App {
                     checkout_path: space.checkout_path.display().to_string(),
                     is_linked_worktree: space.is_linked_worktree,
                 }),
+            folder_id: self
+                .state
+                .folders
+                .folder_of(&ws.id)
+                .map(crate::folders::public_folder_id),
         }
     }
 }

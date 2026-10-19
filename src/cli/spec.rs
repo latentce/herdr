@@ -3,6 +3,7 @@ use std::io::Write;
 use clap::{Arg, ArgAction, ArgGroup, Command, ValueHint};
 
 mod completion;
+mod folder;
 mod machine;
 
 pub(super) fn command() -> Command {
@@ -38,6 +39,7 @@ pub(super) fn command() -> Command {
         .subcommand(server_command())
         .subcommand(api_command())
         .subcommand(workspace_command())
+        .subcommand(folder::command())
         .subcommand(worktree_command())
         .subcommand(tab_command())
         .subcommand(notification_command())
@@ -206,7 +208,8 @@ fn workspace_command() -> Command {
                 .arg(option("label", "TEXT"))
                 .arg(env_option())
                 .arg(flag("focus"))
-                .arg(flag("no-focus")),
+                .arg(flag("no-focus"))
+                .arg(option("folder", "FOLDER_ID")),
         )
         .subcommand(id_command("get", "workspace_id", "Show a workspace"))
         .subcommand(id_command("focus", "workspace_id", "Focus a workspace"))

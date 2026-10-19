@@ -24,6 +24,8 @@ pub(crate) struct ClientShellConfig {
     pub(super) spaces: SpacesSidebarConfig,
     pub(super) agents: crate::config::AgentsSidebarConfig,
     pub(super) agent_panel_sort: crate::config::AgentPanelSortConfig,
+    /// The fork-only `[ui] agent_panel_mode`.
+    pub(super) agent_panel_mode: Option<crate::config::AgentPanelModeConfig>,
     pub(super) status_indicators: crate::config::StatusIndicatorStyle,
     pub(super) sound_enabled: bool,
     pub(super) toast_delivery: crate::config::ToastDelivery,
@@ -85,6 +87,10 @@ pub(super) enum ClientMobileTarget {
 pub(super) struct ShellHitMap {
     pub(super) machines: Vec<MachineHit>,
     pub(super) workspaces: Vec<WorkspaceHit>,
+    pub(super) folder_headers: Vec<super::folders::FolderHeaderHit>,
+    pub(super) folder_menu_rows: Vec<(Rect, usize)>,
+    pub(super) folder_menu_area: Rect,
+    pub(super) folder_agent_headers: Vec<(Rect, super::folders::FolderAgentHeader)>,
     pub(super) workspace_body: Rect,
     pub(super) workspace_scrollbar: Rect,
     pub(super) workspace_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -216,6 +222,8 @@ pub(super) enum ClientChromeDrag {
         source_workspace_id: String,
         target: Option<(Option<String>, u16)>,
     },
+    /// Drags on machines that support folders.
+    Folders(super::folders::FolderDrag),
     PaneSplit {
         hit: PaneSplitHit,
         tab_id: String,
@@ -315,6 +323,8 @@ pub(super) enum ClientRenameTarget {
     Pane {
         pane_id: String,
     },
+    /// Folder name prompts.
+    Folder(super::folders::FolderPrompt),
 }
 
 #[derive(Debug)]
@@ -525,6 +535,8 @@ pub(super) enum ClientContextMenuAction {
     Zoom,
     ToggleRightClickPassthrough,
     ClosePane,
+    /// Opens the "Move to folder ▸" submenu.
+    MoveToFolder,
 }
 
 #[derive(Debug)]
@@ -536,6 +548,8 @@ pub(super) enum ClientContextMenuTarget {
         has_worktree_children: bool,
         close_group: bool,
         collapsed: bool,
+        /// Offer "Move to folder ▸".
+        move_to_folder: bool,
     },
     Tab {
         tab_id: String,
@@ -594,6 +608,8 @@ pub(super) enum ClientShellOverlay {
     ContextMenu(ClientContextMenuOverlay),
     GlobalMenu(ClientGlobalMenuOverlay),
     Settings(ClientSettingsOverlay),
+    /// Folder menus and the "Move to folder ▸" submenu.
+    FolderMenu(super::folders::FolderMenuOverlay),
 }
 
 impl ClientShellOverlay {
@@ -612,6 +628,7 @@ impl ClientShellOverlay {
             Self::ContextMenu(_) => ClientShellOverlayKind::ContextMenu,
             Self::GlobalMenu(_) => ClientShellOverlayKind::GlobalMenu,
             Self::Settings(_) => ClientShellOverlayKind::Settings,
+            Self::FolderMenu(_) => ClientShellOverlayKind::ContextMenu,
         }
     }
 }
@@ -899,6 +916,8 @@ pub(crate) struct ClientShellState {
     pub(super) endpoints: Vec<ClientShellEndpoint>,
     pub(super) active_endpoint_id: ClientEndpointId,
     pub(super) collapsed_endpoints: HashSet<ClientEndpointId>,
+    /// Folder layouts, collapse state and the agents panel mode.
+    pub(super) folders: super::folders::FolderUiState,
     pub(super) mode: ClientShellMode,
     pub(super) navigate_workspace_id: Option<WorkspaceNavigationTarget>,
     pub(super) pending_workspace_highlight: Option<PendingWorkspaceHighlight>,
@@ -990,6 +1009,8 @@ pub(super) struct WorkspaceEntry {
     pub(super) index: usize,
     pub(super) indented: bool,
     pub(super) last_child: bool,
+    /// Folder header or folder member row.
+    pub(super) folder: super::folders::FolderRow,
 }
 
 impl ClientShellState {
@@ -1019,6 +1040,10 @@ impl ClientShellState {
         if let Some(sort) = preferences.agent_panel_sort {
             config.agent_panel_sort = sort;
         }
+        let (folders, collapsed_endpoints) =
+            super::folders::FolderUiState::load(&mut config, &preferences);
+        let agent_panel_sort_manual =
+            preferences.agent_panel_sort.is_some() || folders.agent_mode_manual;
         let mut remote_collapsed_groups = HashMap::<ClientEndpointId, HashSet<String>>::new();
         for saved in preferences.remote_collapsed_groups {
             let Ok(profile_id) = crate::client::endpoint::ProfileId::parse(saved.profile_id) else {
@@ -1049,7 +1074,7 @@ impl ClientShellState {
             sidebar_width_manual: preferences.sidebar_width.is_some(),
             sidebar_section_split,
             sidebar_section_split_manual: preferences.sidebar_section_split.is_some(),
-            agent_panel_sort_manual: preferences.agent_panel_sort.is_some(),
+            agent_panel_sort_manual,
             last_sidebar_divider_click: None,
             chrome_drag: None,
             workspace_press: None,
@@ -1072,7 +1097,8 @@ impl ClientShellState {
             hits: ShellHitMap::default(),
             endpoints: vec![local_endpoint()],
             active_endpoint_id: ClientEndpointId::Local,
-            collapsed_endpoints: HashSet::new(),
+            collapsed_endpoints,
+            folders,
             mode: ClientShellMode::Terminal,
             navigate_workspace_id: None,
             pending_workspace_highlight: None,
@@ -1191,11 +1217,13 @@ impl ClientShellState {
         if self.mobile_layout_active() {
             render::workspace_entries(snapshot, &empty_collapsed_groups)
         } else {
-            render::workspace_entries(
-                snapshot,
-                self.collapsed_groups_for_endpoint(&self.active_endpoint_id)
-                    .unwrap_or(&empty_collapsed_groups),
-            )
+            let collapsed_groups = self
+                .collapsed_groups_for_endpoint(&self.active_endpoint_id)
+                .unwrap_or(&empty_collapsed_groups);
+            (!self.sidebar_collapsed)
+                .then(|| self.folder_navigation_entries(snapshot, collapsed_groups))
+                .flatten()
+                .unwrap_or_else(|| render::workspace_entries(snapshot, collapsed_groups))
         }
     }
 
@@ -1208,10 +1236,12 @@ impl ClientShellState {
         {
             return;
         }
-        let target = self.snapshot.as_deref().and_then(|snapshot| {
-            self.navigation_workspace_entries(snapshot)
-                .iter()
-                .position(|entry| snapshot.workspaces[entry.index].workspace_id == workspace_id)
+        let target = self.folder_reveal_position(workspace_id).or_else(|| {
+            self.snapshot.as_deref().and_then(|snapshot| {
+                self.navigation_workspace_entries(snapshot)
+                    .iter()
+                    .position(|entry| snapshot.workspaces[entry.index].workspace_id == workspace_id)
+            })
         });
         if let Some(target) = target {
             self.workspace_scroll = target.min(self.hits.workspace_max_scroll);
@@ -1245,6 +1275,7 @@ impl ClientShellState {
         self.chrome_drag = None;
         self.workspace_press = None;
         self.tab_press = None;
+        self.folders.press = None;
         self.workspace_scroll = 0;
         self.agent_scroll = 0;
         self.tab_scroll = 0;
@@ -1698,6 +1729,7 @@ impl ClientShellState {
             self.chrome_drag = None;
             self.workspace_press = None;
             self.tab_press = None;
+            self.folders.press = None;
             if self.pane_mouse_gesture.as_ref().is_some_and(|gesture| {
                 gesture.hit.popup && previous_popup.as_deref() == Some(gesture.hit.pane_id.as_str())
             }) {

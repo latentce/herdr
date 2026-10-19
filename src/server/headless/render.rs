@@ -452,6 +452,7 @@ impl HeadlessServer {
     }
 
     fn render_and_stream_with_graphics_limit(&mut self, graphics_frame_limit: usize) {
+        self.app.sync_folders();
         let full_started = crate::render_prof::timer();
         let render_targets = render_targets(&self.clients, self.foreground_client_id);
 
@@ -648,6 +649,7 @@ impl HeadlessServer {
                 if client.shell_snapshot.as_ref() != Some(&candidate)
                     || client.shell_agent_completions.as_ref() != Some(&completions)
                     || client.shell_agent_view != agent_view
+                    || client.shell_folders.is_stale(&self.app.state.folders)
                 {
                     client.shell_projection_revision =
                         client.shell_projection_revision.saturating_add(1);
@@ -713,11 +715,33 @@ impl HeadlessServer {
                             continue;
                         }
                     };
+                    let folders_framed = match crate::folders::protocol::pending_message(
+                        &self.app.state.folders,
+                        client.shell_folders,
+                        &candidate.boot_id,
+                        candidate.revision,
+                    )
+                    .map_err(std::io::Error::other)
+                    .and_then(|message| {
+                        message
+                            .as_ref()
+                            .map(Self::frame_server_message)
+                            .transpose()
+                            .map_err(std::io::Error::other)
+                    }) {
+                        Ok(framed) => framed,
+                        Err(err) => {
+                            warn!(client_id, err = %err, "failed to frame workspace folders");
+                            broken_clients.push(client_id);
+                            continue;
+                        }
+                    };
                     let Some(writer) = client.writer.as_ref() else {
                         broken_clients.push(client_id);
                         continue;
                     };
                     if projection_framed.is_some_and(|framed| writer.control.send(framed).is_err())
+                        || folders_framed.is_some_and(|framed| writer.control.send(framed).is_err())
                         || writer.control.send(completion_framed).is_err()
                         || writer.control.send(snapshot_framed).is_err()
                     {
@@ -727,6 +751,8 @@ impl HeadlessServer {
                     client.shell_snapshot = Some(candidate);
                     client.shell_agent_completions = Some(completions);
                     client.shell_agent_view = agent_view;
+                    client.shell_folders =
+                        crate::folders::protocol::SentFolders::current(&self.app.state.folders);
                 }
                 shell_projection_revision = client.shell_projection_revision;
                 if !client.shell_surface_active {

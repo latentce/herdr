@@ -15,6 +15,13 @@ const ENDPOINT_RESPONSE_CHUNK_BYTES: usize = 512 * 1024;
 const CLIENT_SHELL_METHODS: &[&str] = &[
     "client_shell.surface.set",
     "command.invoke",
+    "folder.add_workspace",
+    "folder.create",
+    "folder.create_workspace",
+    "folder.delete",
+    "folder.move",
+    "folder.remove_workspace",
+    "folder.rename",
     "integration.install",
     "integration.list",
     "layout.set_split_ratio",
@@ -297,6 +304,38 @@ mod tests {
             actual.remove("pane.link.resolve").as_deref(),
             Some("f5e4a3e01453ae7b188f127ce951c12c20e0bebcc17cc364eeb6d1a01fd5bf81")
         );
+        for (method, digest) in [
+            (
+                "folder.add_workspace",
+                "cea640fdd26edffe2e21a6cdc08ee61e06b0d1707292c22d9fe1fce0e5a26060",
+            ),
+            (
+                "folder.create",
+                "c6a4ef20701780bf465450cb61eff727eb28878fc098bb38c793763b67d82ac9",
+            ),
+            (
+                "folder.create_workspace",
+                "23eda379b07b9949820cda4961f2c382cd276c1cd04c3f7afbdde59addc6ff20",
+            ),
+            (
+                "folder.delete",
+                "fc4f7e7cb7a57bd4982a9dc8b929257edf05e986bb44b1cb1243344ccd8ac624",
+            ),
+            (
+                "folder.move",
+                "de79bc899929654a8ad8ce3535f995aa5e1c49612e1a4c52b72c83edea7f5464",
+            ),
+            (
+                "folder.remove_workspace",
+                "045211ea2eb2ddd2be91fe65f3c84c774d15a9c096615a9025bea4ea6b547141",
+            ),
+            (
+                "folder.rename",
+                "969907187b6d1ecb2dd9d126640100505324a9be3682546901948ab07a204569",
+            ),
+        ] {
+            assert_eq!(actual.remove(method).as_deref(), Some(digest), "{method}");
+        }
 
         assert_eq!(
             actual, expected,

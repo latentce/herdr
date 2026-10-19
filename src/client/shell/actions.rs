@@ -364,6 +364,7 @@ impl ClientShellState {
             | crate::api::schema::Method::PaneFocus(_)
             | crate::api::schema::Method::PaneFocusDirection(_) => true,
             crate::api::schema::Method::WorkspaceCreate(params) => params.focus,
+            crate::api::schema::Method::FolderCreateWorkspace(params) => params.workspace.focus,
             crate::api::schema::Method::TabCreate(params) => params.focus,
             crate::api::schema::Method::PaneSplit(params) => params.focus,
             _ => false,
@@ -889,6 +890,9 @@ impl ClientShellState {
             _ => None,
         };
 
+        if let Some(target) = self.folder_agent_target(&action) {
+            return target.map(|(_, pane_id)| Method::PaneFocus(PaneTarget { pane_id }));
+        }
         match action {
             KeybindAction::FocusAgent(index) => {
                 let agents = super::agent_sidebar::ordered_agent_pane_ids(
@@ -956,7 +960,11 @@ impl ClientShellState {
                 } else {
                     1
                 };
-                let next = (current as isize + delta).rem_euclid(entries.len() as isize) as usize;
+                let next = self
+                    .folder_hidden_focus_step(snapshot, &entries, &focused_workspace, delta)
+                    .unwrap_or_else(|| {
+                        (current as isize + delta).rem_euclid(entries.len() as isize) as usize
+                    });
                 let workspace_id = snapshot.workspaces[entries[next].index]
                     .workspace_id
                     .clone();

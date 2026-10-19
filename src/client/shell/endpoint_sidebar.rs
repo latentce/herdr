@@ -282,8 +282,9 @@ pub(super) fn render_expanded(
         if let Some(snapshot) = endpoint.snapshot.as_deref() {
             let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
                 .unwrap_or(&empty_collapsed_groups);
+            let view = state.folders.view(endpoint);
             rows.extend(
-                super::sidebar::workspace_entries(snapshot, collapsed_groups)
+                super::folders::folder_sidebar_entries(snapshot, view.as_ref(), collapsed_groups)
                     .into_iter()
                     .map(|entry| Row::Workspace {
                         endpoint: endpoint_index,
@@ -305,6 +306,7 @@ pub(super) fn render_expanded(
         .iter()
         .map(|row| match row {
             Row::Endpoint(_) => 1,
+            Row::Workspace { entry, .. } if entry.folder_header().is_some() => 1,
             Row::Workspace { endpoint, entry } => {
                 let endpoint = &state.endpoints[*endpoint];
                 let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
@@ -352,6 +354,18 @@ pub(super) fn render_expanded(
     let reveal_focus = !body.is_empty() && std::mem::take(state.reveal_focused_workspace);
     if reveal_navigation || reveal_focus {
         let selected_row = rows.iter().position(|row| match row {
+            Row::Workspace { endpoint, entry } if entry.folder_header().is_some() => {
+                let endpoint = &state.endpoints[*endpoint];
+                !reveal_navigation
+                    && &endpoint.endpoint_id == state.active_endpoint_id
+                    && endpoint.snapshot.as_deref().is_some_and(|snapshot| {
+                        super::folders::entry_reveals_focus(
+                            snapshot,
+                            state.folders.view(endpoint).as_ref(),
+                            entry,
+                        )
+                    })
+            }
             Row::Workspace { endpoint, entry } => {
                 let endpoint = &state.endpoints[*endpoint];
                 endpoint
@@ -420,12 +434,7 @@ pub(super) fn render_expanded(
                 hits.machines.push(MachineHit {
                     rect,
                     status_badge,
-                    collapse_toggle: Rect::new(
-                        rect.x.saturating_add(1),
-                        rect.y,
-                        u16::from(rect.width > 1),
-                        1,
-                    ),
+                    collapse_toggle: Rect::new(rect.x, rect.y, rect.width.min(1), 1),
                     endpoint_id: endpoint.endpoint_id.clone(),
                 });
                 y = y
@@ -437,6 +446,40 @@ pub(super) fn render_expanded(
                 let Some(snapshot) = endpoint.snapshot.as_deref() else {
                     continue;
                 };
+                if let Some((folder, _)) = entry.folder_header() {
+                    if y >= body.bottom() {
+                        break;
+                    }
+                    let rect = Rect::new(body.x, y, content_width, 1);
+                    if let Some(view) = state.folders.view(endpoint) {
+                        let folder_id = view
+                            .layout
+                            .folders
+                            .get(folder)
+                            .map(|folder| folder.id.as_str());
+                        let look = state.folders.look(
+                            folder_id.unwrap_or_default(),
+                            &endpoint.endpoint_id == state.active_endpoint_id,
+                            endpoint.status != ClientEndpointStatus::Online,
+                        );
+                        if let Some(hit) = super::folders::render_folder_header(
+                            buffer,
+                            rect,
+                            &endpoint.endpoint_id,
+                            snapshot,
+                            &view,
+                            folder,
+                            look,
+                            config,
+                        ) {
+                            hits.folder_headers.push(hit);
+                        }
+                    }
+                    y = y
+                        .saturating_add(1)
+                        .saturating_add(gaps.get(row_index).copied().unwrap_or(0));
+                    continue;
+                }
                 let Some(workspace) = snapshot.workspaces.get(entry.index) else {
                     continue;
                 };
@@ -458,13 +501,13 @@ pub(super) fn render_expanded(
                     break;
                 }
                 let rect = Rect::new(body.x, y, content_width, height);
-                let nested = Rect::new(
-                    rect.x.saturating_add(2),
-                    rect.y,
-                    rect.width.saturating_sub(2),
-                    rect.height,
-                );
+                let nested = super::folders::member_rect(rect, entry);
                 let endpoint_active = &endpoint.endpoint_id == state.active_endpoint_id;
+                let dragged = endpoint_active
+                    && state.dragged_workspace_id == Some(workspace.workspace_id.as_str());
+                if dragged {
+                    buffer.set_style(rect, Style::default().bg(palette.surface1));
+                }
                 let selected = state.selected_workspace_id.is_some_and(|target| {
                     target.matches(&endpoint.endpoint_id, &workspace.workspace_id)
                 });
@@ -478,7 +521,7 @@ pub(super) fn render_expanded(
                     endpoint_active && workspace.focused,
                     selected,
                     state.selected_workspace_id.is_some(),
-                    false,
+                    dragged,
                     palette,
                 );
                 if endpoint.status != ClientEndpointStatus::Online {
@@ -515,6 +558,17 @@ pub(super) fn render_expanded(
         hits.workspace_scrollbar = track;
         super::scroll::render_list_scrollbar(buffer, track, metrics, palette);
     }
+
+    super::folders::render_folder_drop_indicator(
+        buffer,
+        workspace_area,
+        state
+            .workspace_drop_indicator_row
+            .map(|row| (row, body.x))
+            .or_else(|| state.folders.drop_indicator()),
+        body.right(),
+        palette,
+    );
 
     let footer_y = workspace_area.bottom().saturating_sub(1);
     if config.mouse_capture {
@@ -553,16 +607,25 @@ pub(super) fn render_expanded(
             }),
         );
     }
-    super::endpoint_agents::render_expanded(
+    if !super::folders::render_folder_agent_panel(
         buffer,
         detail_area,
-        active_snapshot.and_then(|snapshot| snapshot.agent_view_label.as_deref()),
-        state.endpoints,
-        state.active_endpoint_id,
+        active_snapshot,
         config,
-        state.agent_scroll,
+        state,
         hits,
-    );
+    ) {
+        super::endpoint_agents::render_expanded(
+            buffer,
+            detail_area,
+            active_snapshot.and_then(|snapshot| snapshot.agent_view_label.as_deref()),
+            state.endpoints,
+            state.active_endpoint_id,
+            config,
+            state.agent_scroll,
+            hits,
+        );
+    }
     hits.sidebar_toggle = Rect::new(
         area.right().saturating_sub(2),
         area.bottom().saturating_sub(1),
@@ -587,7 +650,7 @@ fn active_endpoint_label<'a>(state: &'a ShellRenderState<'_>) -> &'a str {
         .map_or("Local", |endpoint| endpoint.label.as_str())
 }
 
-fn render_endpoint_row(
+pub(super) fn render_endpoint_row(
     buffer: &mut Buffer,
     rect: Rect,
     marker: &str,
@@ -622,7 +685,7 @@ fn render_endpoint_row(
         rect.x,
         rect.y,
         rect.width.saturating_sub(signal_width.saturating_add(1)),
-        &format!(" {marker} {}", endpoint.label),
+        &format!("{marker}{}", endpoint.label),
         Style::default()
             .fg(
                 if matches!(endpoint.status, ClientEndpointStatus::Disabled) {

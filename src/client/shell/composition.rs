@@ -77,6 +77,10 @@ impl ClientShellState {
             reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
             dragged_workspace_id: None,
             workspace_drop_indicator_row: None,
+            folders: super::folders::FolderRenderState {
+                ui: &self.folders,
+                drag: None,
+            },
         };
         if let Some(snapshot) = local_snapshot {
             render::render_sidebar(
@@ -202,6 +206,7 @@ impl ClientShellState {
                 Some(source_workspace_id.as_str()),
                 target.as_ref().map(|(_, row)| *row),
             ),
+            Some(ClientChromeDrag::Folders(drag)) => (drag.dragged_workspace_id(), None),
             _ => (None, None),
         };
         let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));
@@ -233,6 +238,13 @@ impl ClientShellState {
                 reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
                 dragged_workspace_id,
                 workspace_drop_indicator_row,
+                folders: super::folders::FolderRenderState {
+                    ui: &self.folders,
+                    drag: match &self.chrome_drag {
+                        Some(ClientChromeDrag::Folders(drag)) => Some(drag),
+                        _ => None,
+                    },
+                },
             },
         );
         self.hits.panes = surface
@@ -649,6 +661,30 @@ impl ClientShellState {
                     render::render_context_menu(&mut composed, menu, &self.config.palette)?;
                 occlusion.cover(rendered.area);
                 self.hits.context_menu_rows = rendered.menu_rows;
+                None
+            } else if let ClientShellOverlay::FolderMenu(menu) = overlay {
+                let items = super::folders::folder_menu_items(
+                    &self.folders,
+                    &self.endpoints,
+                    &self.active_endpoint_id,
+                    menu,
+                );
+                let rendered = super::folders::render_folder_menu(
+                    &mut composed,
+                    menu,
+                    &items,
+                    &self.config.palette,
+                )?;
+                occlusion.cover(rendered.area);
+                if let Some(parent) = rendered.parent.as_ref() {
+                    occlusion.cover(parent.area);
+                }
+                self.hits.context_menu_rows = rendered
+                    .parent
+                    .map(|parent| parent.menu_rows)
+                    .unwrap_or_default();
+                self.hits.folder_menu_rows = rendered.rows;
+                self.hits.folder_menu_area = rendered.area;
                 None
             } else if let ClientShellOverlay::GlobalMenu(menu) = overlay {
                 let rendered = render::render_global_menu(

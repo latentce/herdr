@@ -101,6 +101,7 @@ impl ClientShellState {
         let surface_available = self.snapshot.is_some() && self.pane_surface.is_some();
         let empty_collapsed_groups = HashSet::new();
         let mut targets = Vec::new();
+        let mut hidden = Vec::new();
         for endpoint in &self.endpoints {
             if endpoint.status != ClientEndpointStatus::Online {
                 continue;
@@ -117,6 +118,7 @@ impl ClientShellState {
                         index,
                         indented: false,
                         last_child: false,
+                        folder: Default::default(),
                     })
                     .collect()
             } else {
@@ -128,6 +130,26 @@ impl ClientShellState {
                 };
                 render::workspace_entries(snapshot, collapsed_groups)
             };
+            let compact = self.sidebar_collapsed && surface_available;
+            let expanded = !(mobile || compact);
+            let (entries, entries_hidden): (Vec<_>, Vec<_>) = match expanded
+                .then(|| {
+                    self.folder_navigate_entries(
+                        endpoint,
+                        snapshot,
+                        self.collapsed_groups_for_endpoint(&endpoint.endpoint_id)
+                            .unwrap_or(&empty_collapsed_groups),
+                    )
+                })
+                .flatten()
+            {
+                Some(pairs) => pairs.into_iter().unzip(),
+                None => {
+                    let count = entries.len();
+                    (entries, vec![false; count])
+                }
+            };
+            hidden.extend(entries_hidden);
             for entry in entries {
                 targets.push(WorkspaceNavigationTarget {
                     endpoint_id: endpoint.endpoint_id.clone(),
@@ -144,16 +166,23 @@ impl ClientShellState {
             .navigate_workspace_id
             .as_ref()
             .and_then(|selected| targets.iter().position(|target| target == selected));
-        let next = match current {
-            Some(current) if mobile => {
-                (current as isize + delta).clamp(0, targets.len() as isize - 1) as usize
-            }
-            Some(current) => (current as isize + delta).rem_euclid(targets.len() as isize) as usize,
-            None if delta < 0 => targets.len() - 1,
-            None => 0,
+        let next = match super::folders::folder_navigate_step(&hidden, current, delta) {
+            Some(next) => next,
+            None => match current {
+                Some(current) if mobile => {
+                    (current as isize + delta).clamp(0, targets.len() as isize - 1) as usize
+                }
+                Some(current) => {
+                    (current as isize + delta).rem_euclid(targets.len() as isize) as usize
+                }
+                None if delta < 0 => targets.len() - 1,
+                None => 0,
+            },
         };
         let target = targets.swap_remove(next);
-        self.collapsed_endpoints.remove(&target.endpoint_id);
+        if self.collapsed_endpoints.remove(&target.endpoint_id) {
+            self.machine_collapse_changed();
+        }
         if self.endpoints.len() == 1 && !mobile {
             self.reveal_workspace(&target.workspace_id);
         }

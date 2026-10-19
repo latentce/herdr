@@ -1,7 +1,7 @@
 use super::*;
 
 #[path = "../shell/overlays.rs"]
-mod overlays;
+pub(in crate::client::shell) mod overlays;
 #[path = "../shell/sidebar.rs"]
 pub(in crate::client::shell) mod sidebar;
 #[path = "../shell/tabs.rs"]
@@ -248,6 +248,7 @@ pub(super) struct ShellRenderState<'a> {
     pub(super) reveal_navigation_workspace: &'a mut bool,
     pub(super) dragged_workspace_id: Option<&'a str>,
     pub(super) workspace_drop_indicator_row: Option<u16>,
+    pub(super) folders: super::folders::FolderRenderState<'a>,
 }
 
 pub(super) fn render_shell(
@@ -330,6 +331,8 @@ pub(super) fn render_shell(
         hits.new_workspace = Rect::default();
         hits.machines.clear();
         hits.workspaces.clear();
+        hits.folder_headers.clear();
+        hits.folder_agent_headers.clear();
         hits.agents.clear();
         hits.endpoint_agents.clear();
         hits.tab_scroll_left = Rect::default();

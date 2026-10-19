@@ -702,6 +702,17 @@ pub(super) fn wait_for_event(
     event_hub: &EventHub,
     running: &Arc<AtomicBool>,
 ) -> std::io::Result<Option<String>> {
+    if let Some(filter) = super::folder_wait::FolderEventFilter::from_match(&params.match_event) {
+        return super::folder_wait::wait_for_folder_event(
+            request_id,
+            filter,
+            params.timeout_ms,
+            stream,
+            api_tx,
+            event_hub,
+            running,
+        );
+    }
     let deadline = params
         .timeout_ms
         .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));

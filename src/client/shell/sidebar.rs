@@ -226,7 +226,16 @@ pub(crate) fn render_sidebar(
             .add_modifier(Modifier::BOLD),
     );
 
-    let entries = workspace_entries(snapshot, state.collapsed_groups);
+    let folder_view = state
+        .endpoints
+        .iter()
+        .find(|endpoint| &endpoint.endpoint_id == state.active_endpoint_id)
+        .and_then(|endpoint| state.folders.view(endpoint));
+    let entries = super::super::folders::folder_sidebar_entries(
+        snapshot,
+        folder_view.as_ref(),
+        state.collapsed_groups,
+    );
     let body = Rect::new(
         workspace_area.x,
         workspace_area.y.saturating_add(WORKSPACE_HEADER_ROWS),
@@ -239,6 +248,9 @@ pub(crate) fn render_sidebar(
     let row_heights = entries
         .iter()
         .map(|entry| {
+            if entry.folder_header().is_some() {
+                return 1;
+            }
             snapshot
                 .workspaces
                 .get(entry.index)
@@ -272,10 +284,9 @@ pub(crate) fn render_sidebar(
         *state.workspace_scroll,
     );
     if !body.is_empty() && std::mem::take(state.reveal_focused_workspace) {
-        if let Some(target) = entries
-            .iter()
-            .position(|entry| snapshot.workspaces[entry.index].focused)
-        {
+        if let Some(target) = entries.iter().position(|entry| {
+            super::super::folders::entry_reveals_focus(snapshot, folder_view.as_ref(), entry)
+        }) {
             *state.workspace_scroll = super::scroll::list_scroll_start_to_reveal(
                 &row_heights,
                 &gaps,
@@ -300,6 +311,37 @@ pub(crate) fn render_sidebar(
     let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
     let mut y = body.y;
     for (entry_position, entry) in entries.iter().enumerate().skip(*state.workspace_scroll) {
+        if let (Some((folder, _)), Some(view)) = (entry.folder_header(), folder_view.as_ref()) {
+            if y.saturating_add(1) > body.bottom() {
+                break;
+            }
+            let rect = Rect::new(body.x, y, content_width, 1);
+            let folder_id = view
+                .layout
+                .folders
+                .get(folder)
+                .map(|folder| folder.id.as_str());
+            let look = state
+                .folders
+                .look(folder_id.unwrap_or_default(), true, false);
+            if let Some(hit) = super::super::folders::render_folder_header(
+                buffer,
+                rect,
+                state.active_endpoint_id,
+                snapshot,
+                view,
+                folder,
+                look,
+                config,
+            ) {
+                hits.folder_headers.push(hit);
+            }
+            let gap = entries
+                .get(entry_position + 1)
+                .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap);
+            y = y.saturating_add(1 + gap);
+            continue;
+        }
         let Some(workspace) = snapshot.workspaces.get(entry.index) else {
             continue;
         };
@@ -323,7 +365,7 @@ pub(crate) fn render_sidebar(
         }
         render_workspace_rows(
             buffer,
-            rect,
+            super::super::folders::member_rect(rect, entry),
             status,
             config.status_indicators,
             entry,
@@ -374,6 +416,14 @@ pub(crate) fn render_sidebar(
             Style::default().fg(palette.accent),
         );
     }
+
+    super::super::folders::render_folder_drop_indicator(
+        buffer,
+        workspace_area,
+        state.folders.drop_indicator(),
+        body.right(),
+        palette,
+    );
 
     let footer_y = workspace_area.bottom().saturating_sub(1);
     if config.mouse_capture {
@@ -430,14 +480,23 @@ pub(crate) fn render_sidebar(
         }
     }
 
-    super::render_agent_panel(
+    if !super::super::folders::render_folder_agent_panel(
         buffer,
         detail_area,
-        snapshot,
+        Some(snapshot),
         config,
-        state.agent_scroll,
+        state,
         hits,
-    );
+    ) {
+        super::render_agent_panel(
+            buffer,
+            detail_area,
+            snapshot,
+            config,
+            state.agent_scroll,
+            hits,
+        );
+    }
 
     hits.sidebar_toggle = Rect::new(
         area.right().saturating_sub(2),
@@ -494,6 +553,7 @@ pub(crate) fn workspace_entries(
                 index,
                 indented: false,
                 last_child: false,
+                folder: Default::default(),
             });
             continue;
         };
@@ -513,6 +573,7 @@ pub(crate) fn workspace_entries(
                 index: parent,
                 indented: false,
                 last_child: false,
+                folder: Default::default(),
             });
         }
         if collapsed_groups.contains(&worktree.key) {
@@ -528,6 +589,7 @@ pub(crate) fn workspace_entries(
                     index: active,
                     indented: true,
                     last_child: true,
+                    folder: Default::default(),
                 });
             }
             continue;
@@ -547,6 +609,7 @@ pub(crate) fn workspace_entries(
                 index: *child,
                 indented: true,
                 last_child: child_index + 1 == children.len(),
+                folder: Default::default(),
             });
         }
     }

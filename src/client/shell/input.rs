@@ -994,6 +994,12 @@ impl ClientShellState {
                         .nth(*index)
                 })
                 .is_some(),
+            KeybindMatch::Action(action @ KeybindAction::FocusAgent(_))
+                if self.folder_agent_order().is_some() =>
+            {
+                self.folder_agent_target(action)
+                    .is_some_and(|target| target.is_some())
+            }
             KeybindMatch::Action(KeybindAction::FocusAgent(index)) => {
                 super::aggregate_navigation::online_agent_targets(
                     &self.endpoints,

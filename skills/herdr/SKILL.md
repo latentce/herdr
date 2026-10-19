@@ -30,6 +30,7 @@ Then print the relevant command group by running the group without a subcommand:
 ```bash
 herdr agent
 herdr pane
+herdr folder
 herdr workspace
 herdr tab
 herdr worktree
@@ -62,6 +63,7 @@ Agent commands accept either a unique live agent name or the pane ID currently h
 
 Public IDs are opaque stable handles:
 
+- folder: `f1`
 - workspace: `w1`
 - tab: `w1:t1`
 - pane: `w1:p1`
@@ -207,6 +209,7 @@ If a larger recent read still does not reveal the completed response, ask the ag
 - Use `--current`, an explicit pane ID, or a unique agent name. Do not rely on another client's focused pane.
 - Parse IDs from JSON responses. Do not derive them from sidebar order or examples.
 - Do not close workspaces, tabs, panes, or sessions you did not create unless the user explicitly asked. Ordinary CLI/API closes do not inherit the TUI's last-pane confirmation. `workspace close --group` closes the primary workspace and its linked worktree workspaces; never add it merely to bypass `workspace_group_close_required`.
+- Folders are the user's sidebar organization. Do not create, move, or delete them unless the user asked. Deleting a folder never closes its workspaces.
 - Use `--trust-repository` only after the user has verified the repository. It grants per-request Git trust; it is not a routine retry for a failed worktree command.
 - Client and server versions can differ after an update. Check `herdr status` before relying on new server features. A missing method is not permission to stop or upgrade a server.
 - Never run `herdr server stop` from an active session unless the user explicitly intends to stop the server and its pane processes.

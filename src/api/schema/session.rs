@@ -20,4 +20,7 @@ pub struct SessionSnapshot {
     pub panes: Vec<PaneInfo>,
     pub layouts: Vec<PaneLayoutSnapshot>,
     pub agents: Vec<AgentInfo>,
+    /// Folders with their place in the combined order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<super::folders::FolderInfo>,
 }

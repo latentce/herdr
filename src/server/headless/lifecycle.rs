@@ -76,6 +76,7 @@ impl HeadlessServer {
             self.app.state.active,
             self.app.state.selected,
         );
+        self.app.flush_folder_save();
 
         let mut handoff_entries = Vec::new();
         for (terminal_id, runtime) in self.app.terminal_runtimes.iter() {

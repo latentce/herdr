@@ -2089,6 +2089,14 @@ async fn run_client_loop(
                             }
                             continue;
                         }
+                        if kind == crate::folders::protocol::FOLDER_LAYOUT_KIND {
+                            if let (Some(shell), Ok(layout)) =
+                                (state.shell.as_mut(), serde_json::from_str(&data))
+                            {
+                                shell.set_endpoint_folder_layout(&endpoint_id, generation, layout);
+                            }
+                            continue;
+                        }
                         let snapshot = match endpoint::decode_endpoint_control(&kind, &data) {
                             Ok(endpoint::EndpointControlMessage::HealthPong) => continue,
                             Ok(endpoint::EndpointControlMessage::AgentViewProjection(

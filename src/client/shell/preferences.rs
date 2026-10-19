@@ -60,7 +60,7 @@ pub(super) fn load(path: &Path) -> Option<ClientChromePreferences> {
     serde_json::from_str(&content).ok()
 }
 
-pub(super) fn store(path: &Path, preferences: ClientChromePreferences) -> Result<(), String> {
+pub(super) fn store<T: serde::Serialize>(path: &Path, preferences: T) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("invalid client shell state path: {}", path.display()))?;
