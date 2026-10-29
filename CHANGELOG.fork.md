@@ -19,6 +19,13 @@ between upstream releases. Upstream's own changes live in
 - Scripts and agents can manage folders with `herdr folder list|get|create|rename|delete|move|add|remove`, `herdr workspace create --folder`, the `folder.*` socket API methods and `folder.*` / `workspace.folder_changed` events. Workspace objects include `folder_id`. Machines running stock Herdr report `folders_unsupported` and otherwise keep working as before.
 - Full documentation: [Workspace folders](https://github.com/latentce/herdr/blob/fork/fork-docs/workspace-folders.md).
 
+## Animated status indicators
+
+- A third agent status style, `animated`, next to `dots` and `symbols`: working agents show a braille spinner (⠒⠲⠰⠴⠤⠦⠆⠖, 100 ms per frame) and blocked and done agents blink ● in their usual colors, fading halfway into the background every other half second so they never disappear. Idle (○) and unknown (·) look as they do with `dots`, and every animated icon moves in step.
+- Pick **animated dots** in settings, on desktop or in the mobile view, or set `[ui] status_indicator_style = "animated"`; don't use `status_indicators = "animated"`, which stock Herdr rejects. Picking color dots or distinct symbols turns the animation off.
+- Herdr only redraws while an animated icon is on screen, so `dots`, `symbols` and screens with only idle agents cost nothing extra.
+- Full documentation: [Animated status indicators](https://github.com/latentce/herdr/blob/fork/fork-docs/animated-status-indicators.md).
+
 ## Fork infrastructure
 
 - Fork builds are published as `vX.Y.Z-fork.N` GitHub releases by `.github/workflows/fork-release.yml`, which syncs each upstream stable release, reapplies the fork patches, and uploads binaries for all five upstream platforms (Linux x86_64/aarch64, macOS x86_64/aarch64, Windows x86_64) with a `latest.json` update manifest. Fork builds report their identity as `vX.Y.Z-fork.N` in `herdr --version` and self-update when a newer fork revision of the same upstream base is published.

@@ -183,6 +183,7 @@ def parse_enum_body(
     lines: list[str], start: int, name: str, rename_all: str | None, model: Model
 ) -> int:
     variants: list[str] = []
+    variant_attrs: list[str] = []
     index = start
     depth = 0
 
@@ -192,10 +193,13 @@ def parse_enum_body(
             index += 1
             break
 
-        if depth == 0 and not stripped.startswith(("#[", "///")):
+        if depth == 0 and stripped.startswith("#["):
+            variant_attrs.append(stripped)
+        if depth == 0 and stripped and not stripped.startswith(("#[", "///")):
             match = VARIANT_RE.match(stripped)
-            if match:
+            if match and not is_skipped_field(variant_attrs):
                 variants.append(apply_rename_all(match.group(1), rename_all or "lowercase"))
+            variant_attrs = []
         depth += stripped.count("{") - stripped.count("}")
         index += 1
 

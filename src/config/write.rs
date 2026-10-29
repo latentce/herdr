@@ -2,6 +2,9 @@
 pub(crate) enum ConfigEdit<'a> {
     Theme(&'a str),
     StatusIndicators(super::StatusIndicatorStyle),
+    /// The fork's indicator choice: "animated" goes in the fork-only key,
+    /// "dots" and "symbols" go in upstream's key and clear the fork-only one.
+    StatusIndicatorStyle(super::StatusIndicatorStyleConfig),
     Sound(bool),
     ToastDelivery(super::ToastDelivery),
 }
@@ -11,6 +14,7 @@ impl ConfigEdit<'_> {
         match self {
             Self::Theme(_) => "theme",
             Self::StatusIndicators(_) => "status indicators",
+            Self::StatusIndicatorStyle(_) => "status indicators",
             Self::Sound(_) => "sound setting",
             Self::ToastDelivery(_) => "toast setting",
         }
@@ -23,11 +27,24 @@ impl ConfigEdit<'_> {
                     super::upsert_section_value(content, "theme", "name", &format!("\"{name}\""));
                 super::upsert_section_bool(&content, "theme", "auto_switch", false)
             }
+            // Upstream's key rejects the fork-only style; keep it out of there.
+            Self::StatusIndicators(super::StatusIndicatorStyle::Animated) => {
+                Self::StatusIndicatorStyle(super::StatusIndicatorStyleConfig::Animated)
+                    .apply(content)
+            }
             Self::StatusIndicators(style) => super::upsert_section_value(
                 content,
                 "ui",
                 "status_indicators",
                 &format!("\"{}\"", style.as_str()),
+            ),
+            Self::StatusIndicatorStyle(super::StatusIndicatorStyleConfig::Animated) => {
+                super::upsert_section_value(content, "ui", "status_indicator_style", "\"animated\"")
+            }
+            Self::StatusIndicatorStyle(style) => super::remove_section_key(
+                &Self::StatusIndicators(style.into()).apply(content),
+                "ui",
+                "status_indicator_style",
             ),
             Self::Sound(enabled) => {
                 super::upsert_section_bool(content, "ui.sound", "enabled", enabled)
@@ -77,6 +94,35 @@ pub(crate) fn write_edit(edit: ConfigEdit<'_>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_indicator_style_edit_keeps_upstream_key_readable_by_stock_herdr() {
+        use crate::config::{Config, StatusIndicatorStyle, StatusIndicatorStyleConfig};
+
+        let animated = ConfigEdit::StatusIndicatorStyle(StatusIndicatorStyleConfig::Animated)
+            .apply("[ui]\nstatus_indicators = \"symbols\"\n");
+        let config: Config = toml::from_str(&animated).unwrap();
+        assert_eq!(config.ui.status_indicators, StatusIndicatorStyle::Symbols);
+        assert_eq!(
+            config.ui.status_indicator_style,
+            Some(StatusIndicatorStyleConfig::Animated)
+        );
+
+        let dots =
+            ConfigEdit::StatusIndicatorStyle(StatusIndicatorStyleConfig::Dots).apply(&animated);
+        assert!(!dots.contains("status_indicator_style"), "{dots}");
+        let config: Config = toml::from_str(&dots).unwrap();
+        assert_eq!(config.ui.status_indicators, StatusIndicatorStyle::Dots);
+        assert_eq!(config.ui.status_indicator_style, None);
+
+        let routed = ConfigEdit::StatusIndicators(StatusIndicatorStyle::Animated).apply(&dots);
+        let config: Config = toml::from_str(&routed).unwrap();
+        assert_eq!(config.ui.status_indicators, StatusIndicatorStyle::Dots);
+        assert_eq!(
+            config.ui.effective_status_indicators(),
+            StatusIndicatorStyle::Animated
+        );
+    }
 
     #[test]
     fn update_file_at_does_not_move_a_leading_bom_into_the_file() {

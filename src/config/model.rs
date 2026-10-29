@@ -126,6 +126,10 @@ pub enum StatusIndicatorStyle {
     #[default]
     Dots,
     Symbols,
+    /// Fork-only. Comes from `[ui] status_indicator_style`; `status_indicators`
+    /// rejects it like stock Herdr does.
+    #[serde(skip)]
+    Animated,
 }
 
 impl StatusIndicatorStyle {
@@ -133,6 +137,28 @@ impl StatusIndicatorStyle {
         match self {
             Self::Dots => "dots",
             Self::Symbols => "symbols",
+            Self::Animated => "animated",
+        }
+    }
+}
+
+/// Status indicator style for the fork-only `[ui] status_indicator_style`
+/// key. Kept apart from `status_indicators` so stock Herdr, which rejects
+/// unknown values there, only warns about this key and keeps the config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusIndicatorStyleConfig {
+    Dots,
+    Symbols,
+    Animated,
+}
+
+impl From<StatusIndicatorStyleConfig> for StatusIndicatorStyle {
+    fn from(style: StatusIndicatorStyleConfig) -> Self {
+        match style {
+            StatusIndicatorStyleConfig::Dots => Self::Dots,
+            StatusIndicatorStyleConfig::Symbols => Self::Symbols,
+            StatusIndicatorStyleConfig::Animated => Self::Animated,
         }
     }
 }
@@ -1013,6 +1039,9 @@ pub struct UiConfig {
     _legacy_agent_panel_scope: Option<LegacyAgentPanelScopeConfig>,
     /// Agent status indicator style. Saved values are "dots" or "symbols". Default: "dots".
     pub status_indicators: StatusIndicatorStyle,
+    /// "dots", "symbols" or "animated"; replaces
+    /// `status_indicators` when set. Default: unset.
+    pub status_indicator_style: Option<StatusIndicatorStyleConfig>,
     /// Expanded sidebar row composition.
     pub sidebar: SidebarConfig,
     /// Accent color for highlights, borders, and navigation UI.
@@ -1242,6 +1271,7 @@ impl Default for UiConfig {
             agent_panel_mode: None,
             _legacy_agent_panel_scope: None,
             status_indicators: StatusIndicatorStyle::Dots,
+            status_indicator_style: None,
             sidebar: SidebarConfig::default(),
             accent: "cyan".into(),
             toast: ToastConfig::default(),
@@ -1259,6 +1289,12 @@ impl UiConfig {
 
     pub fn right_click_passthrough_modifiers(&self) -> Option<KeyModifiers> {
         self.right_click_passthrough_modifier.modifiers()
+    }
+
+    /// The style to draw: the fork-only key when set, else upstream's key.
+    pub fn effective_status_indicators(&self) -> StatusIndicatorStyle {
+        self.status_indicator_style
+            .map_or(self.status_indicators, StatusIndicatorStyle::from)
     }
 }
 
@@ -1506,6 +1542,44 @@ status_indicators = "symbols"
         )
         .unwrap();
         assert_eq!(config.ui.status_indicators, StatusIndicatorStyle::Symbols);
+    }
+
+    #[test]
+    fn status_indicator_style_key_replaces_status_indicators_and_allows_animated() {
+        assert_eq!(
+            Config::default().ui.effective_status_indicators(),
+            StatusIndicatorStyle::Dots
+        );
+
+        let config: Config = toml::from_str(
+            r#"
+[ui]
+status_indicators = "symbols"
+status_indicator_style = "animated"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.ui.status_indicators, StatusIndicatorStyle::Symbols);
+        assert_eq!(
+            config.ui.effective_status_indicators(),
+            StatusIndicatorStyle::Animated
+        );
+
+        let config: Config = toml::from_str(
+            r#"
+[ui]
+status_indicators = "symbols"
+status_indicator_style = "dots"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.ui.effective_status_indicators(),
+            StatusIndicatorStyle::Dots
+        );
+
+        // Upstream's key keeps rejecting the fork-only style, as stock Herdr does.
+        assert!(toml::from_str::<Config>("[ui]\nstatus_indicators = \"animated\"\n").is_err());
     }
 
     #[test]

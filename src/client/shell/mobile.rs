@@ -297,6 +297,7 @@ fn render_agent_summary(
             (crate::config::StatusIndicatorStyle::Dots, AgentStatus::Blocked) => Some("◉"),
             (crate::config::StatusIndicatorStyle::Dots, AgentStatus::Done) => Some("●"),
             (crate::config::StatusIndicatorStyle::Dots, _) => None,
+            (crate::config::StatusIndicatorStyle::Animated, AgentStatus::Idle) => None,
             _ => Some(status_icon(status, config.status_indicators)),
         };
         let text = symbol.map_or_else(

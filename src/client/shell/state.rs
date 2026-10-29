@@ -918,6 +918,7 @@ pub(crate) struct ClientShellState {
     pub(super) collapsed_endpoints: HashSet<ClientEndpointId>,
     /// Folder layouts, collapse state and the agents panel mode.
     pub(super) folders: super::folders::FolderUiState,
+    pub(super) status_animation: super::status_animation::StatusAnimation,
     pub(super) mode: ClientShellMode,
     pub(super) navigate_workspace_id: Option<WorkspaceNavigationTarget>,
     pub(super) pending_workspace_highlight: Option<PendingWorkspaceHighlight>,
@@ -1099,6 +1100,9 @@ impl ClientShellState {
             active_endpoint_id: ClientEndpointId::Local,
             collapsed_endpoints,
             folders,
+            status_animation: super::status_animation::StatusAnimation::new(
+                std::time::Instant::now(),
+            ),
             mode: ClientShellMode::Terminal,
             navigate_workspace_id: None,
             pending_workspace_highlight: None,
@@ -1915,6 +1919,7 @@ impl ClientShellState {
         self.selection_autoscroll_deadline
             .into_iter()
             .chain(self.selection_repaint_deadline)
+            .chain(self.status_animation.next_frame_at(now))
             .min()
             .map(|deadline| deadline.saturating_duration_since(now).min(default))
             .unwrap_or(default)

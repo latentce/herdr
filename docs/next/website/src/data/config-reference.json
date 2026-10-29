@@ -1072,6 +1072,17 @@
           ]
         },
         {
+          "key": "ui.status_indicator_style",
+          "type": "enum",
+          "default": "unset",
+          "description": "Fork-only status indicator style; replaces status_indicators when set. \"animated\" spins a braille spinner for working agents and blinks blocked and done agents. Use this key, not status_indicators, for \"animated\": stock Herdr rejects unknown status_indicators values and falls back to default settings for the entire config.",
+          "values": [
+            "dots",
+            "symbols",
+            "animated"
+          ]
+        },
+        {
           "key": "ui.sidebar.agents.row_gap",
           "type": "integer",
           "default": "0",

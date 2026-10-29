@@ -148,6 +148,8 @@ impl ClientShellState {
                 &self.config.palette,
             );
         }
+        self.status_animation
+            .resolve(&mut buffer, &self.config, self.host_background);
         FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[])
     }
 
@@ -247,6 +249,8 @@ impl ClientShellState {
                 },
             },
         );
+        self.status_animation
+            .resolve(&mut buffer, &self.config, self.host_background);
         self.hits.panes = surface
             .panes
             .iter()
@@ -626,6 +630,8 @@ impl ClientShellState {
                 &mut self.reveal_mobile_workspace,
                 &mut self.hits,
             );
+            self.status_animation
+                .resolve(&mut composed, &self.config, self.host_background);
             if let Some((label, status)) = active_lifecycle.as_ref() {
                 let _ = endpoint_notices::render_lifecycle_banner(
                     &mut composed,
@@ -756,6 +762,7 @@ impl ClientShellState {
             self.hits.pane_splits.clear();
             self.hits.popup = None;
         }
+        self.status_animation.settle(&frame);
         let graphics = self.compose_graphics(layout, &occlusion);
         Some(crate::client::frame_output::ComposedFrame { frame, graphics })
     }

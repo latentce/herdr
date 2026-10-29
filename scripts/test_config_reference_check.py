@@ -150,6 +150,27 @@ class CollectKeysTests(unittest.TestCase):
         )
         self.assertNotIn("values", entries["keys.zoom"])
 
+    def test_enum_values_leave_out_serde_skipped_variants(self) -> None:
+        model = Model()
+        parse_file(
+            """
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusIndicatorStyle {
+    #[default]
+    Dots,
+    /// Selected through another key.
+    #[serde(skip)]
+
+    Animated,
+    Symbols,
+}
+""",
+            model,
+        )
+
+        self.assertEqual(model.enums["StatusIndicatorStyle"], ["dots", "symbols"])
+
 
 class CheckTests(unittest.TestCase):
     def run_check(

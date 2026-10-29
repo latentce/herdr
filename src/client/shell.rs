@@ -33,6 +33,7 @@ mod render;
 mod scroll;
 mod settings;
 mod state;
+mod status_animation;
 mod surface_patch;
 mod text_editor;
 mod word_selection;
@@ -194,6 +195,7 @@ fn status_icon(
         (StatusIndicatorStyle::Symbols, AgentStatus::Done) => "✓",
         (StatusIndicatorStyle::Symbols, AgentStatus::Idle) => "○",
         (StatusIndicatorStyle::Symbols, AgentStatus::Unknown) => "·",
+        (StatusIndicatorStyle::Animated, status) => status_animation::marker(status),
     }
 }
 
